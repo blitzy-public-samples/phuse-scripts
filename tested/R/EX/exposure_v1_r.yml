@@ -1,0 +1,191 @@
+KeyWords: EX, Exposure
+Script:
+  Desc   : >
+    The Exposure Analysis Panel provides the user with an overview
+     of the treatment dosing in the Exposure Dataset. The Exposure
+     Analysis Panel details the time on drug and number of doses taken
+     by treatment arm, descriptive statistics of the treatment arms,
+     the number of subjects in proposed arm compared to actual treatment,
+     and dosing adjustments.
+  Name   : exposure_v1.R
+  GCR    : r135
+  SRV    : 12345
+  Source : FDA JumpStart
+  Target : https://github.com/phuse-org/phuse-scripts/blob/master/tested/R/EX/exposure_v1.R
+  Title  : Exposure Panel Analysis
+  Topic  : Exposure Panel
+  Type   : Analysis
+  Subtype: TFL
+Package:
+  name : R Analysis Panels
+  title: FDA JumpStart analysis package (R migration)
+Language:
+  name   : R
+  version: ">= 4.3.0"
+Comments: >
+  The Exposure Analysis Panel contains the five analyses outlined below:
+  Analysis 1: Percent of Subjects Left on Study Medication by Day of Study
+  Provides a chart trending the percentage of subjects remaining in the study
+  by treatment arm.
+  Analysis 2: Distribution of Doses by Arm
+    Provides a chart plotting the percentage of subjects by number of
+     cumulative doses received throughout the study by treatment arm.
+  Analysis 3: Dose Descriptive Statistics by Arm and Boxplot of Doses
+    1. Provides a table of the descriptive statistics Mean, Median, Mode,
+        Standard Deviation, Quartile 1, Quartile 3, Minimum, and Maximum for
+        the cumulative doses received by treatment arm.
+    2. Provides a chart of the descriptive statistics Mean, Median, Standard
+        Deviation, Quartile 1, Quartile 3, Minimum, and Maximum for the
+        cumulative doses received by treatment arm.
+  Analysis 4: Planned Arm to Actual Treatment Comparison
+    Provides a table comparing the number of subjects in the planned arm
+     variable from the Demographic Dataset to the number of subjects in the
+     actual treatment variable from the Exposure Dataset.
+  Analysis 5: Dose Changes During the Study
+    Provides a table listing the subjects who experienced an adjustment in
+     dose, the dose value and units, and study day the change occurred.
+  Dataset Requirements:
+     Exposure           (EX)
+     Demographics     (DM)
+  Variable Requirements:
+     EX     - Subject ID                         (USUBJID)
+          - Start Date/Time of Treatment     (EXSTDTC)
+          - End Date/Time of Treatment     (EXENDTC)
+          - Name of Actual Treatment          (EXTRT)
+          - Dose per Administration          (EXDOSE)
+          - Dose Units                    (EXDOSU)
+          - Dosing Frequency per Interval     (EXDOSFRQ)
+     DM  - Actual Arm                     (ACTARM)
+          - Planned Treatment Arm          (ARM)
+          - Subject ID                    (USUBJID)
+          - Subject Reference Start Date/Time     (RFSTDTC)
+          - Planned Arm Code               (ARMCD)
+  R Migration Notes:
+    Migrated from SAS to R using tidyverse ecosystem.
+    Uses survival package for retention analysis (Analysis 1).
+    Uses dplyr/Tplyr for descriptive statistics (Analysis 3).
+    Uses openxlsx for Excel output (replacing SAS PCFILES).
+Inputs:
+  datasets:
+    - name: EX
+      description: Exposure domain dataset
+      format: XPT (read via haven::read_xpt)
+    - name: DM
+      description: Demographics domain dataset
+      format: XPT (read via haven::read_xpt)
+    - name: exposure_exdosfrq.csv
+      description: Dosing frequency lookup reference data
+      format: CSV (read via readr::read_csv)
+  parameters:
+    P1: String - dataset path or config object
+    P2: String - treatment arm variable
+    P3: String - subject identifier variable
+Outputs:
+  files:
+    - name: Exposure Analysis Workbook
+      description: Excel workbook containing all 5 analysis outputs
+      format: XLSX (generated via openxlsx)
+    - name: Retention Curve
+      description: Kaplan-Meier style retention plot (Analysis 1)
+      format: PNG/PDF (generated via ggplot2)
+    - name: Dose Distribution Chart
+      description: Dose distribution bar chart (Analysis 2)
+      format: PNG/PDF (generated via ggplot2)
+    - name: Boxplot of Doses
+      description: Boxplot of cumulative doses by arm (Analysis 3)
+      format: PNG/PDF (generated via ggplot2)
+Authors:
+  - name   : Andreas Anastassopoulos
+    email  : andreas.anastassapoulos@us.ibm.com
+    company: FDA/IBM
+    date   : 03/16/2010
+    role   : Original SAS developer
+  - name   : Blitzy (SAS-to-R Migration)
+    email  :
+    company:
+    date   : 03/24/2026
+    role   : SAS-to-R migration
+Qualification:
+  LastQualDate: 03/08/2016
+  LastQualBy: June Cheng
+  Stage: T
+  Document: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/EX/exposure_v1.docx
+  Note: C - Contributed; D - Development; T - Testing; Q - Qualified
+Stages:
+  - Date: 02/02/2016
+    Name: Austin Taylor <Austin.Taylor@fda.hhs.gov>
+    Stage: C
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/SpecDocs/Exposure%20Analysis%20Specifications%20(3-24-2015).doc
+  - Date: 03/08/2016
+    Name: June Cheng
+    Stage: T
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/EX/exposure_v1.docx
+  - Date: 03/24/2026
+    Name: Blitzy (SAS-to-R Migration)
+    Stage: T
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/R/EX/exposure_v1.R
+Rating:
+  - User: June Cheng
+    Date: 03/08/2016
+    Association: Accenture
+    Stars: 4.5
+  - User: htu
+    Date: 03/10/2016
+    Association: Accenture
+    Stars: 5
+Dependencies:
+  packages:
+    - name: haven
+      version: ">= 2.5.5"
+      purpose: Data I/O for SAS transport (XPT) files
+    - name: dplyr
+      version: ">= 1.1.0"
+      purpose: Core data manipulation replacing SAS DATA steps
+    - name: tidyr
+      version: ">= 1.3.0"
+      purpose: Data reshaping and pivoting
+    - name: readr
+      version: ">= 2.1.0"
+      purpose: CSV file reading for lookup reference data
+    - name: survival
+      version: ">= 3.5-0"
+      purpose: Retention analysis (Analysis 1) replacing PROC LIFETEST
+    - name: ggplot2
+      version: ">= 3.4.0"
+      purpose: Visualization for retention curves, dose distribution, and boxplots
+    - name: Tplyr
+      version: ">= 1.2.1"
+      purpose: Descriptive statistics tables (Analysis 3)
+    - name: r2rtf
+      version: ">= 1.1.1"
+      purpose: RTF output generation replacing SAS ODS RTF
+    - name: openxlsx
+      version: ">= 4.2.5"
+      purpose: Excel workbook output replacing SAS PCFILES/SpreadsheetML
+    - name: janitor
+      version: ">= 2.2.0"
+      purpose: SAS-compatible rounding via round_half_up
+    - name: cli
+      version: ">= 3.6.0"
+      purpose: User-facing messages and error formatting
+    - name: lubridate
+      version: ">= 1.9.0"
+      purpose: Date arithmetic replacing SAS date functions
+  R_scripts:
+    - tested/R/macros/data_checks_exposure.R
+    - tested/R/utilities/data_checks.R
+    - tested/R/utilities/err_output.R
+    - tested/R/utilities/sl_gs_output.R
+    - tested/R/utilities/xml_output.R
+Migration:
+  source_file: tested/SAS/EX/exposure_v1.sas
+  source_manifest: tested/SAS/EX/exposure_v1_sas.yml
+  framework: tidyverse + pharmaverse
+  date: 03/24/2026
+  notes: >
+    Migrated from SAS to R as part of PhUSE WG5 phuse-scripts repository
+    SAS-to-R migration initiative. All 5 exposure analyses are preserved
+    with functional parity. SAS DATA steps replaced with dplyr pipelines,
+    PROC LIFETEST replaced with survival::survfit for retention curves,
+    SAS PCFILES/SpreadsheetML replaced with openxlsx for Excel output,
+    and SAS ODS replaced with r2rtf for RTF output.
