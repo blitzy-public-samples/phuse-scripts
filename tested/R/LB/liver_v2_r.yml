@@ -1,0 +1,112 @@
+KeyWords: LB, Liver Lab
+Script:
+  Desc   : >
+    The Liver Lab Analysis Panel provides the User with an overview of
+     the number and percent of subjects who have predefined abnormalities
+     in lab test values for Alanine Aminotransferase (ALT), Aspartate
+     Aminotransferase (AST), Total Bilirubin (TB), and Alkaline Phosphatase
+     (ALP). It provides the frequency of the lab test values that occur in
+     varying degrees above what is considered a normal lab value (upper limit
+     of normal, ULN). It also compares maximum lab values between tests, and
+     looks at the maximum lab values by (i.e, as a function of) study day.
+     Migrated from SAS to R as part of PhUSE WG5 SAS-to-R migration.
+  Name   : liver_v2.R
+  GCR    : r135
+  SRV    : 12345
+  Source : FDA JumpStart (R Migration)
+  Target : https://github.com/phuse-org/phuse-scripts/blob/master/tested/R/LB/liver_v2.R
+  Title  : Liver Lab Panel Analysis (R)
+  Topic  : Liver Lab Panel
+  Type   : Analysis
+  Subtype: TFL
+Package:
+  name : R Analysis Panels
+  title: FDA JumpStart analysis package (R migration)
+Language:
+  name   : R
+  version: ">= 4.3.0"
+Comments: >
+  R migration of the Liver Lab Analysis Panel. Contains the five analyses
+  outlined in the original SAS implementation. Denominator used for percent
+  calculations is based on the arm variable, calculated by the number of
+  subjects exposed to at least one dose of treatment per arm (either actual
+  or planned depending on what exists in the data).
+  Dataset Requirements:
+     Laboratory Test Results     (LB) - via haven::read_xpt()
+     Demographics                (DM) - via haven::read_xpt()
+  Variable Requirements:
+     LB     - Subject ID                                (USUBJID)
+            - Date/Time of Specimen Collection           (LBDTC)
+            - Lab Test or Examination Short Name         (LBTESTCD)
+            - Numeric Result/Finding in Standard Units   (LBSTRESN)
+            - Standard Units                             (LBSTRESU)
+            - Reference Range Lower Limit-Std Units      (LBSTNRLO)
+            - Reference Range Upper Limit-Std Units      (LBSTNRHI)
+            - Baseline Flag                              (LBBLFL)
+            - Study Day of Specimen Collection           (LBDY)
+            - Visit Number                               (VISITNUM)
+     DM  - Actual Arm                                   (ACTARM)
+            - Planned Treatment Arm                      (ARM)
+            - Subject ID                                 (USUBJID)
+            - Subject Reference Start Date/Time          (RFSTDTC)
+            - Subject Reference End Date/Time            (RFENDTC)
+            - Planned Arm Code                           (ARMCD)
+  R Package Dependencies:
+     haven, dplyr, tidyr, Tplyr, r2rtf, openxlsx, janitor, cli,
+     stringr, forcats, purrr
+Inputs:
+  datasets: LB (laboratory), DM (demographics)
+  P1: String - path to data directory (via config)
+  P2: String - NDA/BLA number
+  P3: String - study ID
+Outputs:
+  datasets: Excel workbook with liver lab analysis results
+  O1: treatment_arms - Treatment arm summary
+  O2: lab_tables - Lab test ULN multiple tables
+  O3: hyslaw - Hy's Law combined DILI results
+  O4: max_bl_tables - Baseline vs maximum lab value tables
+  O5: hylawind - Hy's Law subject-level detail with USUBJID
+  O6: blconflict - Multiple/conflicting baseline lab results
+Authors:
+  - name   : Shannon Dennis
+    email  : shannon.dennis@fda.hhs.gov
+    company: FDA/IBM
+    date   : 12/29/2009
+  - name   : PhUSE WG5 R Migration
+    email  :
+    company: PhUSE
+    date   : 2026
+Qualification:
+  LastQualDate: MM/DD/YYYY
+  LastQualBy: FirstName LastName
+  Stage: T
+  Document: a link to latest documentation
+  Note: C - Contributed; D - Development; T - Testing; Q - Qualified
+Stages:
+  - Date: 02/02/2016
+    Name: Austin Taylor <Austin.Taylor@fda.hhs.gov>
+    Stage: C
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/SpecDocs/Liver%20Lab%20Analysis%20Specifications%20(12-7-2015).doc
+  - Date: 03/08/2016
+    Name: Eric Qi
+    Stage: T
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/LB/liver_v2.docx
+  - Date: 2026
+    Name: PhUSE WG5 R Migration
+    Stage: D
+    Docs: SAS-to-R migration
+Rating:
+  - User: Eric Qi
+    Date: 03/08/2016
+    Association: Merck
+    Stars: 4.5
+  - User: htu
+    Date: 03/10/2016
+    Association: Accenture
+    Stars: 5
+Migration:
+  source_file: tested/SAS/LB/liver_v2.sas
+  source_manifest: tested/SAS/LB/liver_v2_sas.yml
+  target_file: tested/R/LB/liver_v2.R
+  migration_type: SAS-to-R tech stack migration
+  functional_parity: true
