@@ -197,7 +197,7 @@ write_xlsx <- function(data        = NULL,
       ))
     }
     # Ensure every element is a data frame
-    non_df_idx <- which(!vapply(data, is.data.frame, logical(1)))
+    non_df_idx <- which(!purrr::map_lgl(data, is.data.frame))
     if (length(non_df_idx) > 0L) {
       cli::cli_abort(c(
         "x" = "All elements of {.arg data} must be data frames.",
@@ -308,7 +308,7 @@ write_xlsx <- function(data        = NULL,
 
     # Remove illegal sheet name characters: / \ ? * [ ] :
     # (mirrors SAS COMPRESS function at line 308)
-    sheet_label <- gsub("[/\\\\?*\\[\\]:]", "", sheet_label)
+    sheet_label <- stringr::str_replace_all(sheet_label, "[/\\\\?*\\[\\]:]", "")
 
     # Handle empty sheet name after cleaning
     if (nchar(sheet_label) == 0L) {
@@ -364,6 +364,8 @@ write_xlsx <- function(data        = NULL,
       max_width_val <- max(content_width, label_width, name_width, na.rm = TRUE)
 
       # Apply SAS formula: round(1.1 * min(max(length, minwidth), maxwidth))
+      # Note: bare round() acceptable here — this is column width formatting,
+      # not clinical statistical rounding (janitor::round_half_up not required)
       round(1.1 * min(max(max_width_val, minwidth), maxwidth))
     })
 
@@ -499,6 +501,8 @@ write_xlsx <- function(data        = NULL,
 
   # Verbose completion logging (mirrors SAS lines 664-667) --------------------
   if (verbose) {
+    # Note: bare round() acceptable here — this is elapsed time display,
+    # not clinical statistical rounding (janitor::round_half_up not required)
     elapsed <- round(
       as.numeric(difftime(Sys.time(), start_time, units = "secs")),
       2L

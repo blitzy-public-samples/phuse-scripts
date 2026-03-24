@@ -112,7 +112,7 @@ assert_function_exist <- function(fn_name, envir = parent.frame()) {
       ga <- getAnywhere(fn_name)
       # getAnywhere returns an object; check if any matches are functions
       if (length(ga$objs) > 0L) {
-        fn_indices <- vapply(ga$objs, is.function, logical(1L))
+        fn_indices <- purrr::map_lgl(ga$objs, is.function)
         if (any(fn_indices)) {
           # Identify which namespace(s) contain the function
           ns_names <- ga$where[fn_indices]

@@ -20,6 +20,8 @@ library(Tplyr)
 library(r2rtf)
 library(mmrm)
 library(emmeans)
+library(purrr)
+library(stringr)
 # stats and grDevices are base-R and do not need library() calls
 
 # -- Valid statistic names (mirrors SAS lines 57-91) --------------------------
@@ -179,14 +181,14 @@ library(emmeans)
   if (is.null(compstat) || nchar(trimws(compstat)) == 0L) {
     return(list())
   }
-  tokens <- trimws(strsplit(compstat, "\\|")[[1]])
-  specs <- lapply(tokens, function(tok) {
+  tokens <- trimws(stringr::str_split(compstat, "\\|")[[1]])
+  specs <- purrr::map(tokens, function(tok) {
     tok_upper <- toupper(tok)
     # Extract keyword and brace content
     m <- regmatches(tok_upper, regexec("^([A-Z]+)\\{?([^}]*)\\}?$", tok_upper))[[1]]
     if (length(m) >= 2L) {
       keyword <- m[2]
-      params  <- if (length(m) >= 3L && nchar(m[3]) > 0L) strsplit(m[3], "\\*")[[1]] else character(0)
+      params  <- if (length(m) >= 3L && nchar(m[3]) > 0L) stringr::str_split(m[3], "\\*")[[1]] else character(0)
     } else {
       keyword <- tok_upper
       params  <- character(0)
@@ -206,7 +208,7 @@ library(emmeans)
   # var may be a character vector like c("AGE", "SEX", "$")
   # or c("AGE", "SEX$") or c("AGE", "SEX $") or a single space-delimited string
   # We follow the SAS convention: a variable followed by $ means categorical
-  tokens <- unlist(strsplit(paste(var, collapse = " "), "\\s+"))
+  tokens <- unlist(stringr::str_split(paste(var, collapse = " "), "\\s+"))
   tokens <- tokens[nchar(tokens) > 0L]
 
   var_names <- character(0)
@@ -216,8 +218,8 @@ library(emmeans)
     vname <- toupper(tokens[i])
     vtype <- 1L
     # Case 1: $ appended directly to variable name (e.g., "SEX$")
-    if (grepl("\\$$", vname)) {
-      vname <- sub("\\$$", "", vname)
+    if (stringr::str_detect(vname, "\\$$")) {
+      vname <- stringr::str_replace(vname, "\\$$", "")
       vtype <- 2L
     # Case 2: $ as a separate next token (e.g., "SEX", "$")
     } else if (i < length(tokens) && toupper(tokens[i + 1]) == "$") {
@@ -241,9 +243,9 @@ library(emmeans)
   # Format: "{A B C}{D E}" — groups of category levels to collapse
   groups_raw <- regmatches(chconcat, gregexpr("\\{[^}]+\\}", chconcat))[[1]]
   if (length(groups_raw) == 0L) return(list())
-  lapply(groups_raw, function(g) {
-    inner <- gsub("[{}]", "", g)
-    toupper(trimws(strsplit(inner, "\\s+")[[1]]))
+  purrr::map(groups_raw, function(g) {
+    inner <- stringr::str_replace_all(g, "[{}]", "")
+    toupper(trimws(stringr::str_split(inner, "\\s+")[[1]]))
   })
 }
 
@@ -442,7 +444,7 @@ summary_report <- function(
 
   # ---- BY variable tokenization (SAS lines 106-114) -------------------------
   if (!is.null(by) && length(by) > 0L) {
-    by <- toupper(unlist(strsplit(paste(by, collapse = " "), "\\s+")))
+    by <- toupper(unlist(stringr::str_split(paste(by, collapse = " "), "\\s+")))
     by <- by[nchar(by) > 0L]
   } else {
     by <- character(0)
@@ -529,7 +531,7 @@ summary_report <- function(
       non_na <- vec[!is.na(vec)]
       if (length(non_na) > 0L) {
         char_rep <- as.character(non_na)
-        dec_parts <- sub("^[^.]*\\.?", "", char_rep)
+        dec_parts <- stringr::str_replace(char_rep, "^[^.]*\\.?", "")
         max_dec <- max(nchar(dec_parts), na.rm = TRUE)
         max_dec <- min(max_dec, 6L)
         var_formatd[i] <- as.integer(max_dec)
@@ -601,7 +603,7 @@ summary_report <- function(
   has_cat_var   <- any(var_types == 2L)
   if (has_cat_var) {
     by_resolved <- if (length(by) > 0L) {
-      vapply(by, function(b) .resolve_colname(work_data, b), character(1))
+      purrr::map_chr(by, function(b) .resolve_colname(work_data, b))
     } else {
       character(0)
     }
@@ -630,7 +632,7 @@ summary_report <- function(
   all_comp_continuous      <- list()
   all_comp_categorical     <- list()
 
-  by_actual <- vapply(by, function(b) .resolve_colname(work_data, b), character(1))
+  by_actual <- purrr::map_chr(by, function(b) .resolve_colname(work_data, b))
 
   for (j in seq_along(var_names)) {
     vname  <- var_names[j]
@@ -651,7 +653,7 @@ summary_report <- function(
 
       # -- Compute all requested statistics via dplyr summarise ------------
       stat_fns <- setNames(
-        lapply(stats, function(s) {
+        purrr::map(stats, function(s) {
           force(s)
           function(x) .compute_stat(x, s)
         }),
@@ -717,9 +719,9 @@ summary_report <- function(
           var      = vlabel,
           kkorder1 = j,
           kkorder2 = match(`_name_`, stats),
-          statcat  = vapply(`_name_`, function(nm) {
+          statcat  = purrr::map_chr(`_name_`, function(nm) {
             if (nm %in% names(stat_labels)) stat_labels[nm] else nm
-          }, character(1), USE.NAMES = FALSE)
+          })
         )
 
       all_continuous_results[[j]] <- stat_wide
@@ -879,7 +881,7 @@ summary_report <- function(
             }
             if (length(cs$params) >= 1L) {
               grp_str <- cs$params[length(cs$params)]
-              grps <- trimws(strsplit(grp_str, "\\s+")[[1]])
+              grps <- trimws(stringr::str_split(grp_str, "\\s+")[[1]])
               if (length(grps) >= 2L) {
                 if (col_type == 2L) {
                   wilcox_data <- wilcox_data %>%
@@ -1094,7 +1096,7 @@ summary_report <- function(
             pw_data <- work_data
             if (length(cs$params) >= 1L) {
               grp_str <- cs$params[length(cs$params)]
-              grps <- trimws(strsplit(grp_str, "\\s+")[[1]])
+              grps <- trimws(stringr::str_split(grp_str, "\\s+")[[1]])
               if (length(grps) >= 2L) {
                 if (col_type == 2L) {
                   pw_data <- pw_data %>%
@@ -1140,9 +1142,9 @@ summary_report <- function(
   .standardize_cols <- function(df_list) {
     dfs <- Filter(Negate(is.null), df_list)
     if (length(dfs) == 0L) return(NULL)
-    all_kk <- unique(unlist(lapply(dfs, function(d)
-      grep("^kkcol_", names(d), value = TRUE))))
-    dfs <- lapply(dfs, function(d) {
+    all_kk <- unique(unlist(purrr::map(dfs, function(d)
+      stringr::str_subset(names(d), "^kkcol_"))))
+    dfs <- purrr::map(dfs, function(d) {
       for (cn in all_kk) {
         if (!(cn %in% names(d))) d[[cn]] <- NA_character_
       }
@@ -1156,10 +1158,10 @@ summary_report <- function(
 
   # -- Format continuous values (SAS lines 1756-1797) ----------------------
   if (!is.null(cont_combined)) {
-    kkcol_names <- grep("^kkcol_", names(cont_combined), value = TRUE)
+    kkcol_names <- stringr::str_subset(names(cont_combined), "^kkcol_")
 
     # Determine value display width
-    all_vals <- unlist(lapply(kkcol_names, function(cn) cont_combined[[cn]]))
+    all_vals <- unlist(purrr::map(kkcol_names, function(cn) cont_combined[[cn]]))
     all_vals <- all_vals[!is.na(all_vals)]
     if (length(all_vals) > 0L && is.numeric(all_vals[1])) {
       val_width <- max(nchar(trimws(formatC(as.numeric(all_vals), format = "g"))),
@@ -1171,7 +1173,7 @@ summary_report <- function(
 
     for (cn in kkcol_names) {
       if (is.numeric(cont_combined[[cn]])) {
-        formatted <- vapply(seq_len(nrow(cont_combined)), function(ri) {
+        formatted <- purrr::map_chr(seq_len(nrow(cont_combined)), function(ri) {
           stat_nm <- toupper(cont_combined$`_name_`[ri])
           val     <- cont_combined[[cn]][ri]
           ord1    <- cont_combined$kkorder1[ri]
@@ -1194,7 +1196,7 @@ summary_report <- function(
             formatC(janitor::round_half_up(val, fd), format = "f",
                     digits = fd, width = max(val_width - 1L, 4L))
           }
-        }, character(1))
+        })
         cont_combined[[cn]] <- formatted
       }
     }
@@ -1204,11 +1206,11 @@ summary_report <- function(
     if (!is.null(comp_cont_combined) && nrow(comp_cont_combined) > 0L) {
       comp_cont_combined <- comp_cont_combined %>%
         dplyr::mutate(
-          kkest  = vapply(est, function(e) {
+          kkest  = purrr::map_chr(est, function(e) {
             if (is.na(e)) "" else
               formatC(janitor::round_half_up(e, 2), format = "f", digits = 2)
-          }, character(1)),
-          kk95ci = vapply(seq_len(dplyr::n()), function(i) {
+          }),
+          kk95ci = purrr::map_chr(seq_len(dplyr::n()), function(i) {
             lo <- lower[i]; up <- upper[i]
             if (is.na(lo) || is.na(up)) return("")
             paste0("[",
@@ -1216,8 +1218,8 @@ summary_report <- function(
                    ", ",
                    formatC(janitor::round_half_up(up, 2), format = "f", digits = 2),
                    "]")
-          }, character(1)),
-          kkpval = vapply(p_t, .format_pval, character(1))
+          }),
+          kkpval = purrr::map_chr(p_t, .format_pval)
         )
       cont_combined <- cont_combined %>%
         dplyr::left_join(
@@ -1233,7 +1235,7 @@ summary_report <- function(
     comp_cat_combined <- dplyr::bind_rows(Filter(Negate(is.null), all_comp_categorical))
     if (!is.null(comp_cat_combined) && nrow(comp_cat_combined) > 0L) {
       comp_cat_combined <- comp_cat_combined %>%
-        dplyr::mutate(kkpval = vapply(p_pchi, .format_pval, character(1)))
+        dplyr::mutate(kkpval = purrr::map_chr(p_pchi, .format_pval))
 
       # Attach p-value to the first category row of each variable
       cat_combined <- cat_combined %>%
@@ -1249,8 +1251,8 @@ summary_report <- function(
   # ---- Combine continuous and categorical into final report dataset --------
   common_cols <- c("var", "kkorder1", "kkorder2", "statcat", "_name_")
   kkcol_all   <- unique(c(
-    if (!is.null(cont_combined)) grep("^kkcol_", names(cont_combined), value = TRUE) else character(0),
-    if (!is.null(cat_combined))  grep("^kkcol_", names(cat_combined), value = TRUE)  else character(0)
+    if (!is.null(cont_combined)) stringr::str_subset(names(cont_combined), "^kkcol_") else character(0),
+    if (!is.null(cat_combined))  stringr::str_subset(names(cat_combined), "^kkcol_")  else character(0)
   ))
   common_cols <- c(common_cols, kkcol_all)
   optional_cols <- c("kkest", "kk95ci", "kkpval", by_actual)
@@ -1292,7 +1294,7 @@ summary_report <- function(
   # =========================================================================
   # STYLE 2 (down): insert variable-header rows  (SAS lines 2178-2207)
   # =========================================================================
-  kkcol_cols <- grep("^kkcol_", names(report_data), value = TRUE)
+  kkcol_cols <- stringr::str_subset(names(report_data), "^kkcol_")
 
   if (style == 2L) {
     arr_cols <- c("kkorder1", by_actual, "var", "kkorder2")
@@ -1353,7 +1355,7 @@ summary_report <- function(
   # =========================================================================
   # OUTPUT GENERATION  (SAS lines 2284-2414)
   # =========================================================================
-  kkcol_display <- grep("^kkcol_", names(report_data), value = TRUE)
+  kkcol_display <- stringr::str_subset(names(report_data), "^kkcol_")
 
   # Build column headers
   if (length(col_levels) > 0L) {
@@ -1384,9 +1386,9 @@ summary_report <- function(
 
     if (filetype %in% c("TXT", "ASCII")) {
       # -- TXT (replaces PROC PRINTTO + PROC REPORT) -----------------------
-      col_widths <- vapply(names(output_df), function(cn) {
+      col_widths <- purrr::map_int(names(output_df), function(cn) {
         max(nchar(as.character(output_df[[cn]])), nchar(cn), na.rm = TRUE) + spacing
-      }, integer(1))
+      }) %>% rlang::set_names(names(output_df))
 
       header_line <- paste0(
         mapply(function(nm, w) formatC(nm, width = w, flag = "-"),
@@ -1423,14 +1425,20 @@ summary_report <- function(
         "</head><body>",
         "<table>",
         paste0("<tr>", paste0("<th>",
-               gsub("&", "&amp;", gsub("<", "&lt;", gsub(">", "&gt;", names(output_df)))),
+               names(output_df) %>%
+                 stringr::str_replace_all(stringr::fixed(">"), "&gt;") %>%
+                 stringr::str_replace_all(stringr::fixed("<"), "&lt;") %>%
+                 stringr::str_replace_all(stringr::fixed("&"), "&amp;"),
                "</th>", collapse = ""), "</tr>")
       )
       for (ri in seq_len(nrow(output_df))) {
-        cells <- vapply(as.character(output_df[ri, ]), function(v) {
-          v_esc <- gsub("&", "&amp;", gsub("<", "&lt;", gsub(">", "&gt;", v)))
+        cells <- purrr::map_chr(as.character(output_df[ri, ]), function(v) {
+          v_esc <- v %>%
+            stringr::str_replace_all(stringr::fixed(">"), "&gt;") %>%
+            stringr::str_replace_all(stringr::fixed("<"), "&lt;") %>%
+            stringr::str_replace_all(stringr::fixed("&"), "&amp;")
           paste0("<td>", v_esc, "</td>")
-        }, character(1), USE.NAMES = FALSE)
+        })
         html <- c(html, paste0("<tr>", paste0(cells, collapse = ""), "</tr>"))
       }
       html <- c(html, "</table></body></html>")

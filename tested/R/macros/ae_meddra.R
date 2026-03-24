@@ -471,8 +471,7 @@ meddra_aggregate <- function(ds_base,
   }
 
   # Level and level-number columns
-  level_prefixes <- vapply(by_vars, function(bv) sub("_.*$", "", bv),
-                           character(1), USE.NAMES = FALSE)
+  level_prefixes <- purrr::map_chr(by_vars, ~ stringr::str_replace(.x, "_.*$", ""))
   col_order <- c(col_order, "level", level_prefixes)
 
   # Select in order, then any remaining columns

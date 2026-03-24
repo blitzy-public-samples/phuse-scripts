@@ -69,6 +69,28 @@ library(janitor)
 ae_common <- function(adsl_path, adae_path, top_n = 20) {
 
   # ---------------------------------------------------------------------------
+  # Phase 1: Input Validation
+  # ---------------------------------------------------------------------------
+  # Consistent with sister scripts ae_pref.R and ae_serious.R
+  if (!is.character(adsl_path) || length(adsl_path) != 1L) {
+    stop("adsl_path must be a single character string.", call. = FALSE)
+  }
+  if (!is.character(adae_path) || length(adae_path) != 1L) {
+    stop("adae_path must be a single character string.", call. = FALSE)
+  }
+  if (!file.exists(adsl_path)) {
+    stop("ADSL file not found: ", adsl_path, call. = FALSE)
+  }
+  if (!file.exists(adae_path)) {
+    stop("ADAE file not found: ", adae_path, call. = FALSE)
+  }
+  if (!is.numeric(top_n) || length(top_n) != 1L || top_n < 1L ||
+      top_n != as.integer(top_n)) {
+    stop("top_n must be a positive integer.", call. = FALSE)
+  }
+  top_n <- as.integer(top_n)
+
+  # ---------------------------------------------------------------------------
   # Phase 2: Data Loading (SAS Lines 3-16)
   # ---------------------------------------------------------------------------
   # Read ADSL — full subject-level dataset

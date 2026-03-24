@@ -222,7 +222,7 @@ util_boxplot_block_ranges <- function(df,
   )
 
   # Remove the initial state element and extract page assignments
-  page_numbers <- vapply(state_list[-1L], function(s) s[2L], integer(1L))
+  page_numbers <- purrr::map_int(state_list[-1L], ~ .x[2L])
   block_counts[["page"]] <- page_numbers
 
   # ===================================================================

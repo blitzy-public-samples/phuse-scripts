@@ -35,17 +35,17 @@ library(purrr)
   # If spec is a named list with 'source' attributes, extract directly
 
   if (is.list(spec)) {
-    vars <- vapply(spec, function(x) {
+    vars <- purrr::map_chr(spec, function(x) {
       if (is.character(x)) x[[1L]] else as.character(x[[1L]])
-    }, character(1L))
-    sources <- vapply(spec, function(x) {
+    })
+    sources <- purrr::map_chr(spec, function(x) {
       src <- attr(x, "source")
       if (!is.null(src)) {
         toupper(src)
       } else {
         ""
       }
-    }, character(1L))
+    })
     # Normalise: {E} -> "D" (events = Data), {P} -> "P" (population)
     sources <- dplyr::case_when(
       sources == "E" ~ "D",
@@ -56,7 +56,7 @@ library(purrr)
   }
   # If spec is a character vector, scan for inline {P}/{E} tokens
 
-  tokens <- unlist(strsplit(paste(spec, collapse = " "), "\\s+"))
+  tokens <- unlist(stringr::str_split(paste(spec, collapse = " "), "\\s+"))
   vars    <- character(0L)
   sources <- character(0L)
 
@@ -121,7 +121,7 @@ library(purrr)
 .format_cell <- function(pcnt, denom, cnt, type, pe_width, pct_fmt, ev_width,
                          tot_pe_width = NULL, tot_ev_width = NULL) {
   # Parse pctfmt like "5.1" into width and decimals
-  pct_parts <- as.integer(unlist(strsplit(pct_fmt, "\\.")))
+  pct_parts <- as.integer(unlist(stringr::str_split(pct_fmt, "\\.")))
   pct_w     <- pct_parts[1L]
   pct_d     <- if (length(pct_parts) > 1L) pct_parts[2L] else 0L
 
@@ -156,7 +156,7 @@ library(purrr)
 # Helper: Wrap text for FLOW option (mirrors SAS lines 1517-1571)
 # ==============================================================================
 .wrap_text <- function(text, max_width, indent) {
-  words <- unlist(strsplit(text, "\\s+"))
+  words <- unlist(stringr::str_split(text, "\\s+"))
   words <- words[words != ""]
   if (length(words) == 0L) return("")
   lines <- character(0L)
@@ -311,7 +311,7 @@ doevents <- function(var,
   }
 
   # Parse VAR variable list (SAS lines 86-94)
-  var_list <- toupper(unlist(strsplit(paste(var, collapse = " "), "\\s+")))
+  var_list <- toupper(unlist(stringr::str_split(paste(var, collapse = " "), "\\s+")))
   var_list <- var_list[var_list != ""]
   varcnt   <- length(var_list)
   if (varcnt == 0L) {
@@ -711,10 +711,10 @@ doevents <- function(var,
   }
 
   ev_width <- if (is.null(evfmt)) .count_width(max_ev) else {
-    as.integer(gsub("\\..*", "", evfmt))
+    as.integer(stringr::str_replace_all(evfmt, "\\..*", ""))
   }
   pe_width <- if (is.null(pefmt)) .count_width(max_pe) else {
-    as.integer(gsub("\\..*", "", pefmt))
+    as.integer(stringr::str_replace_all(pefmt, "\\..*", ""))
   }
 
   # Total column format widths (SAS lines 679-722)
@@ -1140,7 +1140,7 @@ doevents <- function(var,
       data_width <- 0L
     }
     # Header width
-    header_parts <- unlist(strsplit(col_headers[j], split, fixed = TRUE))
+    header_parts <- unlist(stringr::str_split(col_headers[j], stringr::fixed(split)))
     header_width <- if (length(header_parts) > 0L) max(nchar(header_parts)) else 0L
     col_widths[j] <- max(data_width, header_width)
   }
@@ -1152,7 +1152,7 @@ doevents <- function(var,
     } else {
       0L
     }
-    tot_head_parts <- unlist(strsplit(tot_header, split, fixed = TRUE))
+    tot_head_parts <- unlist(stringr::str_split(tot_header, stringr::fixed(split)))
     tot_head_w <- if (length(tot_head_parts) > 0L) max(nchar(tot_head_parts)) else 0L
     clentot <- max(tot_data_w, tot_head_w)
     totwidth <- totwidth + clentot + spacing
@@ -1277,10 +1277,10 @@ doevents <- function(var,
         paste0("<tr>", paste0("<th>", display_names, "</th>", collapse = ""), "</tr>")
       )
       for (r in seq_len(nrow(output_df))) {
-        cells <- vapply(seq_along(valid_cols), function(ci) {
+        cells <- purrr::map_chr(seq_along(valid_cols), function(ci) {
           val <- output_df[[ci]][r]
           if (is.na(val)) "" else as.character(val)
-        }, character(1L))
+        })
         html_lines <- c(html_lines, paste0("<tr>", paste0("<td>", cells, "</td>", collapse = ""), "</tr>"))
       }
       html_lines <- c(html_lines, "</table></body></html>")
@@ -1299,22 +1299,22 @@ doevents <- function(var,
       # Header separator
       sep_line <- strrep("-", totwidth)
       # Column header lines — split by split char
-      max_header_lines <- max(vapply(display_names, function(h) {
-        length(unlist(strsplit(h, split, fixed = TRUE)))
-      }, integer(1L)))
+      max_header_lines <- max(purrr::map_int(display_names, function(h) {
+        length(unlist(stringr::str_split(h, stringr::fixed(split))))
+      }))
 
-      header_parts_list <- lapply(display_names, function(h) {
-        parts <- unlist(strsplit(h, split, fixed = TRUE))
+      header_parts_list <- purrr::map(display_names, function(h) {
+        parts <- unlist(stringr::str_split(h, stringr::fixed(split)))
         # Pad to max lines
         c(rep("", max_header_lines - length(parts)), parts)
       })
 
       for (hl in seq_len(max_header_lines)) {
-        header_cells <- vapply(seq_along(valid_cols), function(ci) {
+        header_cells <- purrr::map_chr(seq_along(valid_cols), function(ci) {
           part <- header_parts_list[[ci]][hl]
           w <- if (ci == 1L) dlen else col_widths[min(ci - 1L, numcols)]
           formatC(part, width = w, flag = if (ci == 1L) "-" else " ")
-        }, character(1L))
+        })
         ascii_lines <- c(ascii_lines, paste0(strrep(" ", startcol - 1L),
                                               paste(header_cells, collapse = strrep(" ", spacing))))
       }
@@ -1330,12 +1330,12 @@ doevents <- function(var,
           ascii_lines <- c(ascii_lines, "")
         }
 
-        cells <- vapply(seq_along(valid_cols), function(ci) {
+        cells <- purrr::map_chr(seq_along(valid_cols), function(ci) {
           val <- output_df[[ci]][r]
           if (is.na(val)) val <- ""
           w <- if (ci == 1L) dlen else col_widths[min(ci - 1L, numcols)]
           formatC(as.character(val), width = w, flag = if (ci == 1L) "-" else " ")
-        }, character(1L))
+        })
         ascii_lines <- c(ascii_lines, paste0(strrep(" ", startcol - 1L),
                                               paste(cells, collapse = strrep(" ", spacing))))
 
@@ -1353,11 +1353,11 @@ doevents <- function(var,
             current_page <- current_page + 1L
             # Re-print headers
             for (hl in seq_len(max_header_lines)) {
-              header_cells <- vapply(seq_along(valid_cols), function(ci) {
+              header_cells <- purrr::map_chr(seq_along(valid_cols), function(ci) {
                 part <- header_parts_list[[ci]][hl]
                 w <- if (ci == 1L) dlen else col_widths[min(ci - 1L, numcols)]
                 formatC(part, width = w, flag = if (ci == 1L) "-" else " ")
-              }, character(1L))
+              })
               ascii_lines <- c(ascii_lines, paste0(strrep(" ", startcol - 1L),
                                                     paste(header_cells, collapse = strrep(" ", spacing))))
             }
@@ -1389,7 +1389,7 @@ doevents <- function(var,
     }
   }
   # Remove _den columns
-  den_cols <- grep("^_den[0-9]+$", colnames(result_df), value = TRUE)
+  den_cols <- stringr::str_subset(colnames(result_df), "^_den[0-9]+$")
   for (dc in den_cols) result_df[[dc]] <- NULL
 
   # ============================================================================

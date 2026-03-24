@@ -244,9 +244,9 @@ chk_val <- function(data, var, values, cs = FALSE, count = FALSE,
         chk       = rep("VAL", length(values)),
         ds        = rep(ds_upper, length(values)),
         var       = rep(var_upper, length(values)),
-        val       = vapply(values, function(v) {
+        val       = purrr::map_chr(values, function(v) {
           if (is.na(v)) "MISSING" else as.character(v)
-        }, character(1L)),
+        }),
         condition = rep(cond_label, length(values)),
         ind       = rep(-1L, length(values))
       )

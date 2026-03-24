@@ -22,6 +22,7 @@ library(Tplyr)
 library(r2rtf)
 library(janitor)
 library(stringr)
+library(purrr)
 library(tibble)
 
 # =============================================================================
@@ -407,7 +408,7 @@ ae_serious <- function(adae_path, adsl_path, output_path = NULL) {
     #      define trt54/"Treatment 1#N=&trtcn54"
     #      define trt81/"Treatment 2#N=&trtcn81"
     #      define cvalue1/"p-value*b"
-    trt_labels <- vapply(trt_nums, function(tn) {
+    trt_labels <- purrr::map_chr(trt_nums, function(tn) {
       label <- dplyr::case_when(
         tn == 0  ~ "Placebo",
         tn == 54 ~ "Treatment 1",
@@ -417,7 +418,7 @@ ae_serious <- function(adae_path, adsl_path, output_path = NULL) {
       # Use \n for line break within column header (SAS # split character)
       # CRITICAL: r2rtf uses | as column separator — do NOT embed | in labels
       paste0(label, "\nN=", trt_counts[as.character(tn)])
-    }, character(1))
+    })
 
     col_header <- paste(
       c("Preferred Term", trt_labels, "p-value*b"),

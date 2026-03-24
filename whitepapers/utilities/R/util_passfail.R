@@ -149,7 +149,7 @@ util_passfail <- function(test_defs,
 
   # Normalise test_args: ensure every element is a list
 
-  test_defs$test_args <- lapply(test_defs$test_args, function(a) {
+  test_defs$test_args <- purrr::map(test_defs$test_args, function(a) {
     if (is.null(a)) list() else if (!is.list(a)) list(a) else a
   })
 
