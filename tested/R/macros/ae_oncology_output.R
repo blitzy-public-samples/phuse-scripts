@@ -24,8 +24,28 @@
 #   write_formatted_data, write_data_table, write_header_rows,
 #   apply_page_setup, get_style_by_name
 # sl_gs_output.R provides: group_subset_write_ws
-source(file.path(dirname(sys.frame(1)$ofile %||% "."), "..", "utilities", "xml_output.R"))
-source(file.path(dirname(sys.frame(1)$ofile %||% "."), "..", "utilities", "sl_gs_output.R"))
+local({
+  this_dir <- tryCatch(
+    dirname(sys.frame(1L)$ofile),
+    error = function(e) NULL
+  )
+  util_dir <- if (!is.null(this_dir)) {
+    file.path(dirname(this_dir), "utilities")
+  } else {
+    fp <- "tested/R/utilities"
+    if (dir.exists(fp)) fp else file.path("..", "utilities")
+  }
+
+  xml_path <- file.path(util_dir, "xml_output.R")
+  if (file.exists(xml_path) && !exists("create_workbook", mode = "function")) {
+    source(xml_path, local = FALSE)
+  }
+
+  sl_path <- file.path(util_dir, "sl_gs_output.R")
+  if (file.exists(sl_path) && !exists("group_subset_write_ws", mode = "function")) {
+    source(sl_path, local = FALSE)
+  }
+})
 
 
 # =============================================================================

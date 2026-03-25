@@ -460,7 +460,7 @@ liver_lbstnrhilo_missing <- function(lb, dm, alt_codes, ast_codes, alp_codes,
       ),
       # Format result string: value + unit
       lbstres = stringr::str_c(
-        format(round(.data$lbstresn, 1), nsmall = 1),
+        format(janitor::round_half_up(.data$lbstresn, 1), nsmall = 1),
         " ",
         dplyr::if_else(is.na(.data$lbstresu), "", as.character(.data$lbstresu))
       ) %>% stringr::str_trim(),
