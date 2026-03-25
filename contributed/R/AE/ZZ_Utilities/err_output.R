@@ -1,25 +1,25 @@
 ###############################################################################
 #         PROGRAM NAME: Generic Panel Error Output (R Migration)              #
 #                                                                             #
-#          DESCRIPTION: Create an Excel error summary workbook when the       #
-#                       AE panel encounters missing variables or    #
-#                       no subjects. Replaces SpreadsheetML XML generation    #
-#                       with openxlsx workbook API.                          #
+#          DESCRIPTION: Create an Excel error summary workbook when a panel   #
+#                       encounters missing variables or no subjects.           #
+#                       Replaces SAS SpreadsheetML XML generation with         #
+#                       openxlsx workbook API.                                #
 #                                                                             #
 #      ORIGINAL AUTHOR: David Kretch (david.kretch@us.ibm.com)               #
 #                                                                             #
 #        ORIGINAL DATE: March 28, 2011                                        #
 #                                                                             #
 #   MIGRATION DETAILS:                                                        #
-#     - Migrated from: contributed/AE/ZZ_Utilities/err_output.sas
+#     - Migrated from: contributed/AE/ZZ_Utilities/err_output.sas (282 lines) #
 #     - Migration target: Idiomatic R using openxlsx for Excel output         #
 #     - SAS %error_summary macro -> R error_summary() function                #
 #     - SpreadsheetML XML -> openxlsx workbook API                            #
 #     - SAS global macro variables -> R function parameters                   #
-#     - SAS %put -> cli messages                                              #
+#     - SAS %put -> cli::cli_inform() messages                                #
+#     - SAS %wb/%styles -> create_workbook()/create_styles() from xml_output.R#
 #                                                                             #
-#  EXTERNAL FILES USED: None (self-contained utility; openxlsx replaces       #
-#                       xml_output.sas dependency)                            #
+#  EXTERNAL FILES USED: xml_output.R -- Excel workbook/style functions        #
 #                                                                             #
 #  PARAMETERS REQUIRED: err_file -- filename and path of the output           #
 #                       panel_title -- title of the panel                     #
@@ -28,7 +28,7 @@
 #                                                                             #
 #            MADE WITH: R >= 4.3.0, openxlsx >= 4.2.5                         #
 #                                                                             #
-#                NOTES: This file is source()'d by AE analysis scripts             #
+#                NOTES: This file is source()'d by AE analysis scripts.       #
 #                       In SAS, it was included via:                           #
 #                       %include "&utilpath.\err_output.sas";                 #
 #                                                                             #
@@ -47,108 +47,170 @@ library(dplyr)
 library(cli)
 
 # --------------------------------------------------------------------------- #
-# error_summary() — Generate Excel Error Summary Workbook
+# Source xml_output.R dependency
+# Replaces SAS: %include "&utilpath.\xml_output.sas"; (SAS line 42)
+# Provides: create_workbook() and create_styles()
+# --------------------------------------------------------------------------- #
+if (!exists("create_workbook", mode = "function") ||
+    !exists("create_styles", mode = "function")) {
+  local({
+    # Determine the directory containing this script
+    this_dir <- tryCatch(
+      dirname(sys.frame(2)$ofile),
+      error = function(e) NULL
+    )
+    # Fallback: try known relative path from project root
+    if (is.null(this_dir) || !nzchar(this_dir)) {
+      this_dir <- "contributed/R/AE/ZZ_Utilities"
+    }
+    xml_path <- file.path(this_dir, "xml_output.R")
+    if (file.exists(xml_path)) {
+      source(xml_path, local = FALSE)
+    } else {
+      cli::cli_warn(paste0(
+        "xml_output.R not found at {.path ", xml_path, "}. ",
+        "Ensure create_workbook() and create_styles() are available."
+      ))
+    }
+  })
+}
+
+
+# --------------------------------------------------------------------------- #
+# error_summary() -- Generate Excel Error Summary Workbook
 # --------------------------------------------------------------------------- #
 #' Generate an Excel Error Summary Workbook
 #'
-#' Creates an Excel workbook with error summary information when the
-#' AE panel encounters missing variables or no subjects.
-#' This replaces the SAS \%error_summary macro which generated
+#' Creates an Excel workbook with error summary information when a panel
+#' encounters missing variables or no subjects. This replaces the SAS
+#' \code{\%error_summary} macro (SAS lines 44-282) which generated
 #' SpreadsheetML XML output.
 #'
 #' @param err_file Character. Output file path for the Excel workbook.
-#'   Must be parameterized — no hardcoded paths.
-#' @param panel_title Character. Title of the panel (e.g., "Demographics").
+#'   Must be parameterized -- no hardcoded paths.
+#' @param panel_title Character. Title of the panel (e.g., "Adverse Events").
 #'   Used in the workbook header and print header.
-#' @param panel_desc Character. Optional panel description text. If non-empty,
-#'   displayed with word wrap and merged across 6 columns.
 #' @param ndabla Character. NDA/BLA identifier for the study.
 #' @param studyid Character. Study identifier.
-#' @param sl_subset Tibble or NULL. Script Launcher subsetting tibble with
-#'   columns 'outer_operator' and 'name'. Used when err_nosubj is TRUE
-#'   to describe the subsetting criteria.
-#' @param rpt_chk_var_req Tibble or NULL. Required variable check tibble with
-#'   columns 'ind', 'ds', 'var'. Used when err_missvar is TRUE to list
-#'   missing variables.
 #' @param err_nosubj Logical. If TRUE, indicates no subjects were found in DM.
-#'   Defaults to FALSE.
+#'   Defaults to FALSE. Replaces SAS macro param err_nosubj=0.
 #' @param err_missvar Logical. If TRUE, indicates required variables are missing.
-#'   Defaults to FALSE.
+#'   Defaults to FALSE. Replaces SAS macro param err_missvar=0.
 #' @param err_seterr Logical. If TRUE, sets error status to 5 in the return
-#'   value. Defaults to TRUE. Replaces SAS \%let errstatus = 5.
+#'   value. Defaults to TRUE. Replaces SAS macro param err_seterr=1.
 #' @param err_desc Character. Optional custom error description text.
+#'   Defaults to "". Replaces SAS macro param err_desc=.
+#' @param panel_desc Character. Optional panel description text. If non-empty,
+#'   displayed with word wrap and merged across 7 columns.
+#'   Replaces SAS global macro variable panel_desc.
+#' @param sl_subset Data frame or NULL. Script Launcher subsetting data with
+#'   columns \code{outer_operator} and \code{name}. Used when err_nosubj is
+#'   TRUE to describe the subsetting criteria.
+#'   Replaces SAS dataset sl_subset.
+#' @param rpt_chk_var_req Data frame or NULL. Required variable check data with
+#'   columns \code{ind}, \code{ds}, \code{var}. Used when err_missvar is TRUE
+#'   to list missing variables.
+#'   Replaces SAS dataset rpt_chk_var_req.
 #'
-#' @return A list with components:
+#' @return A named list with component:
 #'   \describe{
-#'     \item{success}{Logical. Always FALSE (this function is called on error).}
-#'     \item{errstatus}{Integer. 5 if err_seterr is TRUE, 0 otherwise.}
-#'     \item{err_file}{Character. Path to the generated error workbook.}
+#'     \item{errstatus}{Integer. 5 if err_seterr is TRUE, 0 otherwise.
+#'       Replaces SAS global macro variable \code{errstatus} (SAS lines 278-280).}
 #'   }
 #'
 #' @examples
 #' \dontrun{
 #' # No subjects error
 #' result <- error_summary(
-#'   err_file = "output/error_summary.xlsx",
+#'   err_file    = "output/error_summary.xlsx",
 #'   panel_title = "Demographics",
-#'   ndabla = "125476",
-#'   studyid = "C13007",
-#'   err_nosubj = TRUE,
-#'   sl_subset = tibble(outer_operator = "and", name = c("AGE > 18", "SEX = F"))
+#'   ndabla      = "125476",
+#'   studyid     = "C13007",
+#'   err_nosubj  = TRUE,
+#'   sl_subset   = data.frame(
+#'     outer_operator = c("and", "and"),
+#'     name = c("AGE > 18", "SEX = F"),
+#'     stringsAsFactors = FALSE
+#'   )
 #' )
 #'
 #' # Missing variables error
 #' result <- error_summary(
-#'   err_file = "output/error_summary.xlsx",
-#'   panel_title = "Demographics",
-#'   ndabla = "125476",
-#'   studyid = "C13007",
-#'   err_missvar = TRUE,
-#'   rpt_chk_var_req = tibble(ind = c(1, 0, 0), ds = c("DM", "DM", "DS"),
-#'                            var = c("USUBJID", "AGE", "DSDECOD"))
+#'   err_file        = "output/error_summary.xlsx",
+#'   panel_title     = "Demographics",
+#'   ndabla          = "125476",
+#'   studyid         = "C13007",
+#'   err_missvar     = TRUE,
+#'   rpt_chk_var_req = data.frame(
+#'     ind = c(1, 0, 0),
+#'     ds  = c("DM", "DM", "DS"),
+#'     var = c("USUBJID", "AGE", "DSDECOD"),
+#'     stringsAsFactors = FALSE
+#'   )
 #' )
 #' }
 error_summary <- function(err_file,
                           panel_title,
-                          panel_desc = "",
                           ndabla,
                           studyid,
-                          sl_subset = NULL,
-                          rpt_chk_var_req = NULL,
                           err_nosubj = FALSE,
                           err_missvar = FALSE,
                           err_seterr = TRUE,
-                          err_desc = "") {
-
-  # Construct the workbook title (SAS line 46)
-  wbtitle <- paste0(panel_title, " Error Summary")
+                          err_desc = "",
+                          panel_desc = "",
+                          sl_subset = NULL,
+                          rpt_chk_var_req = NULL) {
 
   # ----------------------------------------------------------------------- #
-  # Phase 3: No-Subjects Error Preprocessing (SAS lines 48-69)
+  # Input validation
+  # ----------------------------------------------------------------------- #
+  if (!is.character(err_file) || length(err_file) != 1L || !nzchar(err_file)) {
+    cli::cli_warn("{.arg err_file} must be a non-empty character string.")
+    return(list(errstatus = if (isTRUE(err_seterr)) 5L else 0L))
+  }
+  if (!is.character(panel_title) || length(panel_title) != 1L) {
+    cli::cli_warn("{.arg panel_title} must be a single character string.")
+    panel_title <- as.character(panel_title)[1L]
+  }
+  if (!is.character(ndabla)) ndabla <- as.character(ndabla)
+  if (!is.character(studyid)) studyid <- as.character(studyid)
+  if (!is.character(err_desc)) err_desc <- as.character(err_desc)
+  if (!is.character(panel_desc)) panel_desc <- as.character(panel_desc)
+
+  # Construct the workbook title (SAS line 46: %let wbtitle = &panel_title. Error Summary)
+  wbtitle <- paste(panel_title, "Error Summary")
+
+  # Sheet name constant
+
+  sheet <- "Error Summary"
+
+  # ----------------------------------------------------------------------- #
+  # No-Subjects Preprocessing (SAS lines 48-69)
+  # Conditional on err_nosubj
   # ----------------------------------------------------------------------- #
   sl_subset_desc <- ""
 
   if (isTRUE(err_nosubj)) {
-    cli::cli_alert_warning("PANEL NO SUBJECTS ERROR PREPROCESSING")
+    # SAS line 50: %put PANEL NO SUBJECTS ERROR PREPROCESSING
+    cli::cli_inform("PANEL NO SUBJECTS ERROR PREPROCESSING")
 
-    # Count rows in sl_subset tibble (SAS lines 52-55)
+    # Count rows in sl_subset (SAS lines 52-55: select count(1) into: sl_subset_count)
     sl_subset_count <- 0L
     if (!is.null(sl_subset) && is.data.frame(sl_subset)) {
       sl_subset_count <- nrow(sl_subset)
     }
 
+    # Build subset description (SAS lines 57-68)
     if (sl_subset_count > 0L) {
-      # Derive operator from lowercased outer_operator column (SAS lines 59-61)
+      # SAS lines 59-61: select lowcase(outer_operator) into: operator
       operator <- sl_subset %>%
         dplyr::pull(.data$outer_operator) %>%
         tolower() %>%
         unique()
-      # Use the first operator value (SAS selects into single macro var)
+      # SAS selects into a single macro variable -- use first value
       operator <- operator[1L]
 
-      # Build sl_subset_desc by collapsing distinct name values with operator
-      # separator (SAS lines 63-64: select distinct name into: sl_subset_desc
-      # separated by " &operator. ")
+      # SAS lines 63-64: select distinct name into: sl_subset_desc separated by " &operator. "
       sl_subset_desc <- sl_subset %>%
         dplyr::distinct(.data$name) %>%
         dplyr::pull(.data$name) %>%
@@ -160,181 +222,154 @@ error_summary <- function(err_file,
   }
 
   # ----------------------------------------------------------------------- #
-  # Phase 4: Missing Variable Error Preprocessing (SAS lines 71-80)
+  # Missing-Variable Preprocessing (SAS lines 71-80)
+  # Conditional on err_missvar
   # ----------------------------------------------------------------------- #
   err_missing_var <- NULL
 
   if (isTRUE(err_missvar)) {
-    cli::cli_alert_warning("PANEL MISSING VARIABLE ERROR PREPROCESSING")
+    # SAS line 73: %put PANEL MISSING VARIABLE ERROR PREPROCESSING
+    cli::cli_inform("PANEL MISSING VARIABLE ERROR PREPROCESSING")
 
-    # Create err_missing_var tibble from rpt_chk_var_req where ind != 1,
-    # keeping only ds and var columns (SAS lines 75-79)
+    # SAS lines 75-79: data err_missing_var; set rpt_chk_var_req; where ind ne 1; keep ds var;
     if (!is.null(rpt_chk_var_req) && is.data.frame(rpt_chk_var_req)) {
       err_missing_var <- rpt_chk_var_req %>%
         dplyr::filter(.data$ind != 1) %>%
         dplyr::select("ds", "var")
     } else {
-      # Safety fallback: empty tibble if rpt_chk_var_req is NULL
-      err_missing_var <- tibble::tibble(ds = character(0), var = character(0))
+      # Safety fallback: empty data frame if rpt_chk_var_req is NULL
+      err_missing_var <- data.frame(ds = character(0), var = character(0),
+                                    stringsAsFactors = FALSE)
     }
   }
 
   # ----------------------------------------------------------------------- #
-  # Phase 5: Excel Workbook Creation (SAS lines 83-267)
-  # Replaces SpreadsheetML XML generation
+  # Create Workbook (SAS lines 83-113)
   # ----------------------------------------------------------------------- #
-  cli::cli_alert_info("SCRIPT LAUNCHER ERROR SUMMARY OUTPUT")
+  # SAS line 83: %put SCRIPT LAUNCHER ERROR SUMMARY OUTPUT
+  cli::cli_inform("SCRIPT LAUNCHER ERROR SUMMARY OUTPUT")
 
-  # Create workbook (replaces SAS %wb call at line 87)
-  wb <- openxlsx::createWorkbook()
+  # SAS line 87: %wb -- create workbook via xml_output.R's create_workbook()
+  wb <- create_workbook(title = wbtitle)
 
-  # Add "Error Summary" worksheet (SAS line 93)
-  sheet <- "Error Summary"
+  # SAS line 88: %styles -- create style gallery via xml_output.R's create_styles()
+  styles <- create_styles()
+
+  # SAS lines 91-93: add "Error Summary" worksheet
   openxlsx::addWorksheet(wb, sheet)
 
-  # Define styles using openxlsx::createStyle() (replaces SAS %styles at line 88)
-  # SAS "Header" style: Font size 12, bold, italic
-  header_style <- openxlsx::createStyle(
-    fontSize = 12,
-    textDecoration = c("bold", "italic")
-  )
-
-  # SAS "Default10" style: Font size 10, top-aligned
-  default10_style <- openxlsx::createStyle(
-    fontSize = 10,
-    valign = "top"
-  )
-
-  # SAS "Default10Wrap" style: Font size 10, top-aligned, word wrap
-  default10_wrap_style <- openxlsx::createStyle(
-    fontSize = 10,
-    valign = "top",
-    wrapText = TRUE
-  )
-
-  # SAS "ColumnOutline" style: Bold, centered, white on dark blue, all borders
-  column_outline_style <- openxlsx::createStyle(
-    fontSize = 10,
-    fontColour = "#FFFFFF",
-    fgFill = "#333399",
-    halign = "center",
-    valign = "center",
-    wrapText = TRUE,
-    textDecoration = "bold",
-    border = "TopBottomLeftRight",
-    borderStyle = "thin"
-  )
-
-  # SAS "Table" style: Font size 10, centered, all borders
-  table_style <- openxlsx::createStyle(
-    fontSize = 10,
-    halign = "center",
-    valign = "top",
-    border = "TopBottomLeftRight",
-    borderStyle = "thin"
-  )
-
-  # Set column widths (SAS lines 104-108)
-  # SAS: Column ss:Width="150" → approx 21.4 character widths
-  # SAS: Column ss:Width="250" → approx 35.7 character widths
-  # Third column is auto-width (SAS: <Column/>)
-  openxlsx::setColWidths(wb, sheet, cols = 1L, widths = 21.4)
-  openxlsx::setColWidths(wb, sheet, cols = 2L, widths = 35.7)
-  openxlsx::setColWidths(wb, sheet, cols = 3L, widths = "auto")
+  # SAS lines 104-108: set column widths
+  # Column 1: ss:Width="150" -> 150/7 ≈ 21.4 character widths
+  # Column 2: ss:Width="250" -> 250/7 ≈ 35.7 character widths
+  # Column 3: auto width (SAS: <Column/>)
+  openxlsx::setColWidths(wb, sheet, cols = 1:3,
+                         widths = c(150 / 7, 250 / 7, "auto"))
 
   # ----------------------------------------------------------------------- #
-  # Phase 6: Header Content (SAS lines 116-198)
+  # Header Section (SAS lines 116-198)
+  # Track current row position (replaces SAS %let row = 0 with increment)
   # ----------------------------------------------------------------------- #
-  # Track current row position (replaces SAS %let row = 0; with incrementing)
-  current_row <- 1L
+  current_row <- 0L
 
-  # Row 1: Blank (SAS lines 124-125)
-  # (Row 1 is left empty by default)
+  # Row 1: Blank (SAS lines 124-125: Row=1; Data=''; output)
   current_row <- current_row + 1L
+  # (left empty by default)
 
-  # Row 2: "{panel_title} Error Summary" with header style (SAS lines 127-128)
-  openxlsx::writeData(wb, sheet, x = wbtitle, startCol = 1L, startRow = current_row)
-  openxlsx::addStyle(wb, sheet, style = header_style, rows = current_row, cols = 1L)
+  # Row 2: "{panel_title} Error Summary" with Header style (SAS lines 127-128)
   current_row <- current_row + 1L
+  openxlsx::writeData(wb, sheet, x = wbtitle,
+                      startCol = 1L, startRow = current_row)
+  openxlsx::addStyle(wb, sheet, style = styles$Header,
+                     rows = current_row, cols = 1L)
 
   # Row 3: Blank (SAS lines 130-131)
   current_row <- current_row + 1L
 
-  # Row 4: "NDA/BLA: {ndabla}" with default10 style (SAS lines 135-136)
+  # Row 4: "NDA/BLA: {ndabla}" with Default10 style (SAS lines 133-136)
+  current_row <- current_row + 1L
   openxlsx::writeData(wb, sheet, x = paste0("NDA/BLA: ", ndabla),
                       startCol = 1L, startRow = current_row)
-  openxlsx::addStyle(wb, sheet, style = default10_style,
+  openxlsx::addStyle(wb, sheet, style = styles$Default10,
                      rows = current_row, cols = 1L)
-  current_row <- current_row + 1L
 
-  # Row 5: "Study: {studyid}" with default10 style (SAS lines 137-138)
+  # Row 5: "Study: {studyid}" with Default10 style (SAS lines 137-138)
+  current_row <- current_row + 1L
   openxlsx::writeData(wb, sheet, x = paste0("Study: ", studyid),
                       startCol = 1L, startRow = current_row)
-  openxlsx::addStyle(wb, sheet, style = default10_style,
+  openxlsx::addStyle(wb, sheet, style = styles$Default10,
                      rows = current_row, cols = 1L)
+
+  # Row 6: "Analysis run date: YYYY-MM-DD HH:MM:SS AM/PM" with Default10
+  # SAS line 140: put(date(),e8601da.) || ' ' || put(time(),timeampm11.)
   current_row <- current_row + 1L
-
-
-  # Row 6: Analysis run date (SAS line 139-140)
-  # SAS: put(date(),e8601da.) gives ISO date; put(time(),timeampm11.) gives AM/PM time
-  run_date_str <- paste0("Analysis run date: ",
-                         format(Sys.Date(), "%Y-%m-%d"), " ",
-                         format(Sys.time(), "%I:%M:%S %p"))
+  run_date_str <- paste("Analysis run date:",
+                        format(Sys.Date(), "%Y-%m-%d"),
+                        format(Sys.time(), "%I:%M:%S %p"))
   openxlsx::writeData(wb, sheet, x = run_date_str,
                       startCol = 1L, startRow = current_row)
-  openxlsx::addStyle(wb, sheet, style = default10_style,
+  openxlsx::addStyle(wb, sheet, style = styles$Default10,
                      rows = current_row, cols = 1L)
+
+  # Row 7: Blank (SAS lines 141-142: row increment without output)
   current_row <- current_row + 1L
 
-  # Row 7: Blank (SAS lines 141-142 — row increment without output)
-  current_row <- current_row + 1L
-
-  # Row 8: Blank (SAS lines 143-144)
+  # Row 8: Blank (SAS lines 143-144: Data=''; output)
   current_row <- current_row + 1L
 
   # ----------------------------------------------------------------------- #
-  # Panel description (SAS lines 146-160)
+  # Panel Description (SAS lines 146-160)
+  # Conditional: only if panel_desc is non-empty
   # ----------------------------------------------------------------------- #
   if (nchar(panel_desc) > 0L) {
+    current_row <- current_row + 1L
+
+    # Write panel_desc with Default10Wrap style (SAS line 149: StyleID = 'Default10Wrap')
     openxlsx::writeData(wb, sheet, x = panel_desc,
                         startCol = 1L, startRow = current_row)
-    openxlsx::addStyle(wb, sheet, style = default10_wrap_style,
+    openxlsx::addStyle(wb, sheet, style = styles$Default10Wrap,
                        rows = current_row, cols = 1L)
-    # Merge across 6 columns (SAS line 153: MergeAcross = 6)
+
+    # Merge across 7 columns (SAS line 153: MergeAcross = 6 means span 7 total)
     openxlsx::mergeCells(wb, sheet, cols = 1L:7L, rows = current_row)
-    # Calculate row height based on text length (SAS line 154)
-    # SAS: Height = ceil(length(trim("&panel_desc."))/150)*12.75;
-    calc_height <- ceiling(nchar(trimws(panel_desc)) / 150) * 12.75
-    # openxlsx does not have a direct setRowHeights for individual rows in
-    # the same way, but we can approximate by increasing the default
-    # Note: openxlsx handles row height auto-sizing with wrap text, but
-    # we explicitly set it for closer SAS parity
-    current_row <- current_row + 1L
+
+    # Row height based on text length (SAS line 154:
+    # Height = ceil(length(trim("&panel_desc."))/150)*12.75)
+    pd_height <- ceiling(nchar(trimws(panel_desc)) / 150) * 12.75
+    openxlsx::setRowHeights(wb, sheet, rows = current_row, heights = pd_height)
 
     # Blank row after panel_desc (SAS lines 157-158)
     current_row <- current_row + 1L
   }
 
   # ----------------------------------------------------------------------- #
-  # Error description section (SAS lines 162-197)
+  # Error Description Section (SAS lines 162-197)
   # ----------------------------------------------------------------------- #
 
   # Custom error message (SAS lines 170-176)
   if (nchar(err_desc) > 0L) {
+    current_row <- current_row + 1L
+
     openxlsx::writeData(wb, sheet, x = err_desc,
                         startCol = 1L, startRow = current_row)
-    openxlsx::addStyle(wb, sheet, style = default10_wrap_style,
+    openxlsx::addStyle(wb, sheet, style = styles$Default10Wrap,
                        rows = current_row, cols = 1L)
-    # Merge across 6 columns (SAS line 166: MergeAcross = 6)
+
+    # Merge across 7 columns (SAS line 166: MergeAcross = 6)
     openxlsx::mergeCells(wb, sheet, cols = 1L:7L, rows = current_row)
-    current_row <- current_row + 1L
+
+    # Row height based on text length (SAS line 167:
+    # Height = ceil(length(trim(Data))/130)*12.75)
+    ed_height <- ceiling(nchar(trimws(err_desc)) / 130) * 12.75
+    openxlsx::setRowHeights(wb, sheet, rows = current_row, heights = ed_height)
 
     # Blank row after err_desc (SAS lines 174-175)
     current_row <- current_row + 1L
   }
 
-  # No subjects in DM error message (SAS lines 178-187)
+  # No-subjects error message (SAS lines 178-187)
   if (isTRUE(err_nosubj)) {
+    current_row <- current_row + 1L
+
     # Build the no-subjects message (SAS lines 181-183)
     nosubj_msg <- "There are no subjects in the demographics domain (DM) dataset"
     if (nchar(sl_subset_desc) > 0L) {
@@ -344,65 +379,77 @@ error_summary <- function(err_file,
 
     openxlsx::writeData(wb, sheet, x = nosubj_msg,
                         startCol = 1L, startRow = current_row)
-    openxlsx::addStyle(wb, sheet, style = default10_wrap_style,
+    openxlsx::addStyle(wb, sheet, style = styles$Default10Wrap,
                        rows = current_row, cols = 1L)
     openxlsx::mergeCells(wb, sheet, cols = 1L:7L, rows = current_row)
-    current_row <- current_row + 1L
+
+    # Row height: SAS line 167 pattern — estimate from message length
+    ns_height <- ceiling(nchar(trimws(nosubj_msg)) / 130) * 12.75
+    openxlsx::setRowHeights(wb, sheet, rows = current_row, heights = ns_height)
 
     # Blank row after no-subjects message (SAS lines 185-186)
     current_row <- current_row + 1L
   }
 
-  # Missing variable error message (SAS lines 189-194)
+  # Missing variable error message (SAS lines 190-194)
   if (isTRUE(err_missvar)) {
+    current_row <- current_row + 1L
+
     missvar_msg <- paste0(
       "Some variables that are required by this panel are missing. ",
       "These variables are shown in the following table."
     )
-
     openxlsx::writeData(wb, sheet, x = missvar_msg,
                         startCol = 1L, startRow = current_row)
-    openxlsx::addStyle(wb, sheet, style = default10_wrap_style,
+    openxlsx::addStyle(wb, sheet, style = styles$Default10Wrap,
                        rows = current_row, cols = 1L)
     openxlsx::mergeCells(wb, sheet, cols = 1L:7L, rows = current_row)
-    current_row <- current_row + 1L
+
+    # Row height for missing variable message
+    mv_height <- ceiling(nchar(trimws(missvar_msg)) / 130) * 12.75
+    openxlsx::setRowHeights(wb, sheet, rows = current_row, heights = mv_height)
   }
 
   # Trailing blank row (SAS lines 196-197)
   current_row <- current_row + 1L
 
   # ----------------------------------------------------------------------- #
-  # Phase 7: Missing Variable Table (SAS lines 202-230)
+  # Missing Variable Table (SAS lines 202-230)
+  # Conditional on err_missvar
   # ----------------------------------------------------------------------- #
-  if (isTRUE(err_missvar) && !is.null(err_missing_var) && nrow(err_missing_var) > 0L) {
+  if (isTRUE(err_missvar) && !is.null(err_missing_var) &&
+      nrow(err_missing_var) > 0L) {
 
     # Column headers (SAS lines 206-217)
-    # "Domain/Dataset" in column 1, "Variable" in column 2
+    # "Domain/Dataset" in col 1, "Variable" in col 2 with ColumnOutline style
     openxlsx::writeData(wb, sheet, x = "Domain/Dataset",
                         startCol = 1L, startRow = current_row)
-    openxlsx::addStyle(wb, sheet, style = column_outline_style,
+    openxlsx::addStyle(wb, sheet, style = styles$ColumnOutline,
                        rows = current_row, cols = 1L)
 
     openxlsx::writeData(wb, sheet, x = "Variable",
                         startCol = 2L, startRow = current_row)
-    openxlsx::addStyle(wb, sheet, style = column_outline_style,
+    openxlsx::addStyle(wb, sheet, style = styles$ColumnOutline,
                        rows = current_row, cols = 2L)
+
+    # Row height: 30 (SAS line 214: Height = 30)
+    openxlsx::setRowHeights(wb, sheet, rows = current_row, heights = 30)
 
     current_row <- current_row + 1L
 
-    # Write err_missing_var data rows (SAS lines 221-228)
-    # Each row has ds in column 1 and var in column 2 with table_style
+    # Data rows from err_missing_var (SAS lines 221-228)
+    # Write ds and var columns with Table style
     for (i in seq_len(nrow(err_missing_var))) {
       # Domain/Dataset value
       openxlsx::writeData(wb, sheet, x = err_missing_var$ds[i],
                           startCol = 1L, startRow = current_row)
-      openxlsx::addStyle(wb, sheet, style = table_style,
+      openxlsx::addStyle(wb, sheet, style = styles$Table,
                          rows = current_row, cols = 1L)
 
       # Variable value
       openxlsx::writeData(wb, sheet, x = err_missing_var$var[i],
                           startCol = 2L, startRow = current_row)
-      openxlsx::addStyle(wb, sheet, style = table_style,
+      openxlsx::addStyle(wb, sheet, style = styles$Table,
                          rows = current_row, cols = 2L)
 
       current_row <- current_row + 1L
@@ -410,94 +457,100 @@ error_summary <- function(err_file,
   }
 
   # ----------------------------------------------------------------------- #
-  # Phase 8: Worksheet Options (SAS lines 232-250)
+  # Page Setup (SAS lines 232-250)
   # ----------------------------------------------------------------------- #
-  # Set page setup: Landscape orientation (SAS line 236)
-  # Set print header and footer (SAS lines 237-239)
-  # Set fit-to-page, scale 78% (SAS lines 241-249)
-  openxlsx::pageSetup(
-    wb,
-    sheet,
-    orientation = "landscape",
-    fitToWidth = TRUE,
-    fitToHeight = FALSE,
-    # SAS line 237-238: Header with panel_title on left, NDA/BLA and Study on right
+  # Landscape orientation, fit-to-page (SAS lines 236, 241, 243)
+  openxlsx::pageSetup(wb, sheet,
+                      orientation = "landscape",
+                      fitToWidth = TRUE,
+                      fitToHeight = FALSE)
+
+  # Header and Footer (SAS lines 237-239)
+  # SAS header: &L panel_title  &R NDA/BLA ndabla \n Study studyid
+  # SAS footer: Page &P of &N
+  openxlsx::setHeaderFooter(wb, sheet,
     header = c(
-      panel_title,
-      NA_character_,
-      paste0("NDA/BLA ", ndabla, "\nStudy ", studyid)
+      panel_title,                                          # left section
+      NA_character_,                                        # center section
+      paste0("NDA/BLA ", ndabla, "\nStudy ", studyid)       # right section
     ),
-    # SAS line 239: Footer with "Page X of Y"
     footer = c(
-      NA_character_,
-      "Page &[Page] of &[Pages]",
-      NA_character_
-    ),
-    # SAS line 245: Scale 78%
-    scale = 78
+      NA_character_,                                        # left section
+      "Page &[Page] of &[Pages]",                           # center section
+      NA_character_                                         # right section
+    )
   )
 
   # ----------------------------------------------------------------------- #
-  # Phase 9: Save Workbook and Error Status (SAS lines 252-282)
+  # Save Workbook (SAS lines 252-273)
   # ----------------------------------------------------------------------- #
-
   # Ensure the output directory exists before saving
   output_dir <- dirname(err_file)
-  if (nchar(output_dir) > 0L && output_dir != ".") {
+  if (nzchar(output_dir) && output_dir != ".") {
     if (!dir.exists(output_dir)) {
       dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
     }
   }
 
-  # Save workbook (SAS lines 269-273: DATA _NULL_ file writing)
-  openxlsx::saveWorkbook(wb, err_file, overwrite = TRUE)
+  # Save workbook (replaces SAS DATA _NULL_; file "&err_file." ls=32767; put string;)
+  tryCatch(
+    openxlsx::saveWorkbook(wb, err_file, overwrite = TRUE),
+    error = function(e) {
+      cli::cli_warn("Failed to save error workbook to {.path {err_file}}: {e$message}")
+    }
+  )
 
-  # Set the error status (SAS lines 277-280: %let errstatus = 5)
+  # ----------------------------------------------------------------------- #
+  # Error Status (SAS lines 277-280)
+  # SAS: %if &err_seterr. = 1 %then %do; %let errstatus = 5; %end;
+  # ----------------------------------------------------------------------- #
   errstatus <- if (isTRUE(err_seterr)) 5L else 0L
 
-  # Return error status as a list (replaces SAS global macro variable)
-  return(list(
-    success = FALSE,
-    errstatus = errstatus,
-    err_file = err_file
-  ))
+  # Return error status as a named list (replaces SAS global macro variable)
+  list(errstatus = errstatus)
 }
+
 
 # ============================================================
 #### MIGRATION NOTES
 #### ============================================================
 #### ASSUMPTIONS:
-####    - SpreadsheetML XML generation is fully replaced by openxlsx
-####    - Cell merge and height calculations approximate SAS behavior
-####    - Error status signaling via return value replaces SAS ERRSTATUS macro variable
-####    - The SAS %include of xml_output.sas is no longer needed; openxlsx provides
-####      all workbook creation and styling functionality directly
-####    - SAS global variables (panel_title, ndabla, studyid, sl_subset, rpt_chk_var_req)
-####      are passed as function parameters instead
+####    - openxlsx column width conversion from SpreadsheetML: SAS Width
+####      in points divided by 7 gives approximate character widths
+####      (150/7 ~= 21.4, 250/7 ~= 35.7)
+####    - err_nosubj and err_missvar are logical (TRUE/FALSE) in R,
+####      replacing SAS numeric 0/1 macro variables
+####    - err_seterr is logical TRUE (default) replacing SAS numeric 1
+####    - SAS global macro variables (panel_title, ndabla, studyid,
+####      panel_desc) are passed as explicit function parameters
+####    - create_workbook() and create_styles() from xml_output.R replace
+####      the inline SAS %wb and %styles macros
+####    - SAS MergeAcross=6 means merge 7 columns (cols 1:7 in openxlsx)
 #### POTENTIAL NUMERICAL DIFFERENCES:
-####    - Date/time formatting may differ slightly from SAS e8601da. and timeampm11.
-####      SAS e8601da. produces ISO 8601 date (YYYY-MM-DD); R format(Sys.Date(), "%Y-%m-%d")
-####      produces the same format. SAS timeampm11. produces HH:MM:SS AM/PM; R
-####      format(Sys.time(), "%I:%M:%S %p") produces the same format.
+####    - None expected -- this is an error output module producing text only
+####    - Date/time formatting: SAS e8601da. -> R "%Y-%m-%d" (identical);
+####      SAS timeampm11. -> R "%I:%M:%S %p" (identical format)
 #### NO DIRECT R EQUIVALENT:
-####    - SAS %wb/%styles/%markup/%annotate macros -> openxlsx workbook API
-####    - SAS global macro variable ERRSTATUS -> R function return value
-####    - SAS DATA _NULL_ file writing -> openxlsx::saveWorkbook()
-####    - SAS WorksheetOptions XML (FitToPage, Scale, Resolution) -> openxlsx::pageSetup()
-####    - SAS HorizontalResolution/VerticalResolution XML -> no direct openxlsx equivalent
-####      (resolution is determined by the Excel application at print time)
-####    - SAS FitHeight XML -> openxlsx fitToHeight parameter
+####    - SAS SpreadsheetML streaming XML generation -> openxlsx API
+####    - SAS %markup/%annotate macros -> direct openxlsx writeData/addStyle
+####    - SAS &strlen. length variable -> not needed (openxlsx handles internally)
+####    - SAS WorksheetOptions XML -> openxlsx::pageSetup()
+####    - SAS HorizontalResolution/VerticalResolution XML -> no openxlsx
+####      equivalent (resolution is determined by Excel at print time)
+####    - SAS FitHeight=100 -> openxlsx fitToHeight=FALSE (unlimited pages)
+####    - SAS Scale=78 -> omitted because fitToWidth overrides scale in Excel
 #### PACKAGE SELECTION RATIONALE:
-####    - openxlsx: Replaces SpreadsheetML XML generation; full Excel workbook API
-####      with native R cell-level formatting, merging, and page setup
-####    - dplyr: Tidyverse data manipulation for sl_subset and rpt_chk_var_req
-####      preprocessing (AAP mandates tidyverse over base R)
-####    - cli: User-facing error/warning messages replacing SAS %put with rich
-####      terminal formatting consistent with other migrated utility files
+####    - openxlsx: Replaces SpreadsheetML XML generation with native R
+####      Excel workbook API providing cell-level formatting, merging,
+####      page setup, and header/footer support
+####    - dplyr: Tidyverse data manipulation for filtering rpt_chk_var_req
+####      (AAP mandates tidyverse over base R)
+####    - cli: User-facing diagnostic messages replacing SAS %put with
+####      rich terminal formatting via cli_inform()/cli_warn()
 #### OPEN QUESTIONS:
-####    - Exact pixel-to-character-width conversion for column widths (SAS 150px
-####      approximated as 21.4 chars, SAS 250px as 35.7 chars)
-####    - Whether print scale/resolution settings match SAS output exactly
-####    - Whether openxlsx pageSetup header/footer tokens (&[Page], &[Pages])
+####    - Verify openxlsx setHeaderFooter() tokens (&[Page], &[Pages])
 ####      render identically to SAS &P/&N tokens in all Excel versions
+####    - Confirm column width mapping accuracy (SAS points / 7)
+####    - Whether openxlsx newline in header right section (\n between
+####      NDA/BLA and Study) renders correctly in all Excel versions
 #### ============================================================
