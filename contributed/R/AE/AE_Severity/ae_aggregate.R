@@ -5,15 +5,15 @@
 #
 # Overview:
 #   Core analytical computation functions for the AE Severity panel.
-#   - ab(): Analyses A/B — AE counts per preferred term, per arm
-#   - cd(): Analyses C/D — AE counts per severity level per arm
+#   - ae_ab(): Analyses A/B — AE counts per preferred term, per arm
+#   - ae_cd(): Analyses C/D — AE counts per severity level per arm
 #   - build_severity_lookup(): Canonical severity ordering utility
 #
 #   These functions are called by the main ae() driver.
 #
 # SAS-to-R Migration:
-#   %ab macro  (SAS lines 4-67)  → ab() function
-#   %cd macro  (SAS lines 72-234) → cd() function
+#   %ab macro  (SAS lines 4-67)  → ae_ab() function
+#   %cd macro  (SAS lines 72-234) → ae_cd() function
 #   Inline severity builder       → build_severity_lookup() function
 #
 # Original SAS Authors: PhUSE CS Working Group 5
@@ -129,7 +129,7 @@ build_severity_lookup <- function(ds_base) {
 
 
 # ============================================================
-# ab() — Analysis A/B: Adverse Events Per Preferred Term
+# ae_ab() — Analysis A/B: Adverse Events Per Preferred Term
 # ============================================================
 # Migrated from SAS %ab macro (lines 4-67)
 #
@@ -157,7 +157,7 @@ build_severity_lookup <- function(ds_base) {
 #
 # Sorted by: aebodsys ascending, arm_pct_total descending
 # ============================================================
-ab <- function(ds_base_bysubjpt, config, aeser = "no") {
+ae_ab <- function(ds_base_bysubjpt, config, aeser = "no") {
   # --- Input validation ---
   if (!is.data.frame(ds_base_bysubjpt)) {
     stop("ab: ds_base_bysubjpt must be a data frame.", call. = FALSE)
@@ -275,7 +275,7 @@ ab <- function(ds_base_bysubjpt, config, aeser = "no") {
 
 
 # ============================================================
-# cd() — Analysis C/D: Adverse Events Per Severity Level
+# ae_cd() — Analysis C/D: Adverse Events Per Severity Level
 # ============================================================
 # Migrated from SAS %cd macro (lines 72-234)
 #
@@ -302,7 +302,7 @@ ab <- function(ds_base_bysubjpt, config, aeser = "no") {
 #   rpt_missing - single-row tibble: report label + arm*_missing + arm*_missing_pct
 #   sev_lookup  - the severity lookup used (for reuse in subsequent calls)
 # ============================================================
-cd <- function(ds_base, config, aeser = "no", sev_lookup = NULL) {
+ae_cd <- function(ds_base, config, aeser = "no", sev_lookup = NULL) {
   # --- Input validation ---
   if (!is.data.frame(ds_base)) {
     stop("cd: ds_base must be a data frame.", call. = FALSE)

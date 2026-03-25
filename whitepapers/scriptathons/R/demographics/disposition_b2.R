@@ -29,6 +29,7 @@ library(rlang)
 library(r2rtf)
 library(stringr)
 library(janitor)
+library(cli)
 
 # =============================================================================
 # Helper Function: disp_count
@@ -140,7 +141,7 @@ generate_disposition_b2 <- function(data_path, output_path = "disposition_b2.rtf
 
   adsl_path <- file.path(data_path, "adsl.xpt")
   if (!file.exists(adsl_path)) {
-    stop(
+    cli::cli_abort(
       "ADSL transport file not found: ", adsl_path,
       "\nEnsure data_path points to a directory containing adsl.xpt.",
       call. = FALSE
@@ -156,7 +157,7 @@ generate_disposition_b2 <- function(data_path, output_path = "disposition_b2.rtf
   required_vars <- c("USUBJID", "TRT01AN", "TRT01A", "DCREASCD", "ITTFL")
   missing_vars <- setdiff(required_vars, names(adsl_raw))
   if (length(missing_vars) > 0L) {
-    stop(
+    cli::cli_abort(
       "Required variables missing from ADSL: ",
       paste(missing_vars, collapse = ", "),
       call. = FALSE
@@ -169,7 +170,7 @@ generate_disposition_b2 <- function(data_path, output_path = "disposition_b2.rtf
     dplyr::filter(ITTFL == "Y")
 
   if (nrow(adsl) == 0L) {
-    stop("No subjects remain after filtering for ITTFL == 'Y'.", call. = FALSE)
+    cli::cli_abort("No subjects remain after filtering for ITTFL == 'Y'.", call. = FALSE)
   }
 
   # ===========================================================================

@@ -46,6 +46,7 @@ library(r2rtf)        # RTF/PDF table output (rtf_body, rtf_title, etc.)
 library(openxlsx)     # Excel workbook output (write.xlsx)
 library(stringr)      # String manipulation (str_trim, str_pad)
 library(gridExtra)    # Multi-panel composition (arrangeGrob, tableGrob)
+library(cli)
 # stats is a base package — fisher.test() and table() always available
 
 # =============================================================================
@@ -111,20 +112,24 @@ outliers_scatter_quant <- function(data_path,
   # ---------------------------------------------------------------------------
   # Input Validation
   # ---------------------------------------------------------------------------
-  stopifnot(
-    "data_path must be a non-empty character string" =
-      is.character(data_path) && length(data_path) == 1 && nchar(data_path) > 0,
-    "output_path must be a non-empty character string" =
-      is.character(output_path) && length(output_path) == 1 && nchar(output_path) > 0,
-    "paramcd must be a non-empty character string" =
-      is.character(paramcd) && length(paramcd) == 1 && nchar(paramcd) > 0,
-    "atptn must be a single numeric value" =
-      is.numeric(atptn) && length(atptn) == 1,
-    "major_tick must be a positive numeric value" =
-      is.numeric(major_tick) && length(major_tick) == 1 && major_tick > 0,
-    "output_format must contain valid format(s): 'pdf', 'rtf', 'xlsx'" =
-      is.character(output_format) && all(output_format %in% c("pdf", "rtf", "xlsx"))
-  )
+  if (!is.character(data_path) || length(data_path) != 1L || nchar(data_path) == 0L) {
+    cli::cli_abort("{.arg data_path} must be a non-empty character string.")
+  }
+  if (!is.character(output_path) || length(output_path) != 1L || nchar(output_path) == 0L) {
+    cli::cli_abort("{.arg output_path} must be a non-empty character string.")
+  }
+  if (!is.character(paramcd) || length(paramcd) != 1L || nchar(paramcd) == 0L) {
+    cli::cli_abort("{.arg paramcd} must be a non-empty character string.")
+  }
+  if (!is.numeric(atptn) || length(atptn) != 1L) {
+    cli::cli_abort("{.arg atptn} must be a single numeric value.")
+  }
+  if (!is.numeric(major_tick) || length(major_tick) != 1L || major_tick <= 0) {
+    cli::cli_abort("{.arg major_tick} must be a positive numeric value.")
+  }
+  if (!is.character(output_format) || !all(output_format %in% c("pdf", "rtf", "xlsx"))) {
+    cli::cli_abort("{.arg output_format} must contain valid format(s): 'pdf', 'rtf', 'xlsx'.")
+  }
 
   # Create output directory if it does not exist
   if (!dir.exists(output_path)) {
@@ -141,7 +146,7 @@ outliers_scatter_quant <- function(data_path,
 
   xpt_file <- file.path(data_path, "advsmax.xpt")
   if (!file.exists(xpt_file)) {
-    stop("Data file not found: ", xpt_file,
+    cli::cli_abort("Data file not found: ", xpt_file,
          "\nPlease verify data_path points to a directory containing advsmax.xpt")
   }
 

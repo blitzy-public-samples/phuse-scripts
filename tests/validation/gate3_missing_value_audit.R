@@ -26,6 +26,7 @@ library(purrr)
 library(stringr)
 library(readr)
 library(yaml)
+library(cli)
 
 # -----------------------------------------------------------------------------
 # Configuration Loading
@@ -95,10 +96,10 @@ config <- tryCatch(
 catalog_missing_values <- function(dataset, dataset_name) {
   # Validate inputs
   if (!is.data.frame(dataset)) {
-    stop("catalog_missing_values: 'dataset' must be a data frame or tibble.")
+    cli::cli_abort("catalog_missing_values: {.arg dataset} must be a data frame or tibble.")
   }
   if (!is.character(dataset_name) || length(dataset_name) != 1L) {
-    stop("catalog_missing_values: 'dataset_name' must be a single character string.")
+    cli::cli_abort("catalog_missing_values: {.arg dataset_name} must be a single character string.")
   }
 
   n_total <- nrow(dataset)
@@ -463,7 +464,29 @@ discover_adam_datasets <- function(adam_path) {
 #' @param r_source_paths Named list of R source directory paths.
 #' @return Character vector of full file paths to migrated R source files.
 discover_r_source_files <- function(r_source_paths) {
+  # Start with config-provided paths
+
   all_paths <- unlist(r_source_paths, use.names = FALSE)
+
+
+  # Append ALL migrated R directories per AAP §0.4.1 target structure
+
+  # to ensure comprehensive scanning across the entire migration scope
+
+  additional_dirs <- c(
+    "tested/R/AE",
+    "tested/R/DM",
+    "tested/R/DS",
+    "tested/R/EX",
+    "tested/R/LB",
+    "tested/R/MedDRA",
+    "whitepapers/WPCT",
+    "whitepapers/scriptathons/R",
+    "contributed/R",
+    "lang/R"
+  )
+  all_paths <- unique(c(all_paths, additional_dirs))
+
   existing_paths <- all_paths[dir.exists(all_paths)]
 
   if (length(existing_paths) == 0L) {
@@ -479,7 +502,8 @@ discover_r_source_files <- function(r_source_paths) {
     use.names = FALSE
   )
 
-  r_files
+  # Deduplicate in case config paths overlap with additional dirs
+  unique(r_files)
 }
 
 #' Safely load an XPT dataset with error handling

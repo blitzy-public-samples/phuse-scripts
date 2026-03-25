@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Document Version** | 1.0 |
-| **Date** | [YYYY-MM-DD] |
+| **Date** | 2026-03-25 |
 | **Author** | PhUSE CS Working Group 5 (WG5) — Standard Analyses |
 | **Purpose** | Documents the validation gate results for the SAS (9.4) → R (4.3+) migration of the `phuse-scripts` repository |
 | **Scope** | All migrated SAS scripts across `tested/`, `whitepapers/`, `lang/`, `contributed/` domains |
@@ -765,7 +765,7 @@ This conversion maintains the same quality assurance rigor while using R-native 
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
-| 1.0 | [YYYY-MM-DD] | PhUSE CS WG5 | Initial validation report structure |
+| 1.0 | 2026-03-25 | PhUSE CS WG5 | Initial validation report structure |
 
 ---
 

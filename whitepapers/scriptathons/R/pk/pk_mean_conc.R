@@ -227,8 +227,8 @@ pk_mean_conc <- function(data_path,
     mean_data,
     ggplot2::aes(x = PCTPT, y = PCmean, group = TRTAN, color = TRTAN)
   ) +
-    ggplot2::geom_line(color = "black") +
-    ggplot2::geom_point(color = "black", size = 1.5)
+    ggplot2::geom_line() +
+    ggplot2::geom_point(size = 1.5)
 
   # --- Conditional SD error bars (matches SAS IF _SD logic) ---
   if (SD == "BOTH") {
@@ -236,7 +236,6 @@ pk_mean_conc <- function(data_path,
     p_linear <- p_linear +
       ggplot2::geom_errorbar(
         ggplot2::aes(ymin = PCmean - PCSD, ymax = PCmean + PCSD),
-        color = "black",
         width = 0.3
       )
   } else if (SD == "UPPER") {
@@ -244,7 +243,6 @@ pk_mean_conc <- function(data_path,
     p_linear <- p_linear +
       ggplot2::geom_errorbar(
         ggplot2::aes(ymin = PCmean, ymax = PCmean + PCSD),
-        color = "black",
         width = 0.3
       )
   }
@@ -280,8 +278,8 @@ pk_mean_conc <- function(data_path,
     mean_data,
     ggplot2::aes(x = PCTPT, y = PCmean, group = TRTAN, color = TRTAN)
   ) +
-    ggplot2::geom_line(color = "black") +
-    ggplot2::geom_point(color = "black", size = 1.5) +
+    ggplot2::geom_line() +
+    ggplot2::geom_point(size = 1.5) +
     ggplot2::scale_y_log10() +
     ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = 0.02)) +
     ggplot2::expand_limits(x = 0) +

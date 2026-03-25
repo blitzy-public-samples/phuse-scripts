@@ -1187,8 +1187,14 @@ test_that("Gate 7: Features with no direct R equivalent are documented", {
   # This test reports coverage; full strictness depends on project maturity.
   coverage_pct <- 100 * mean(has_migration_notes)
 
+  # Validate that a meaningful proportion of migrated R files contain
+
+  # MIGRATION NOTES blocks. Coverage should be >0% indicating the
+  # migration convention is being applied. A strict 100% threshold is
+  # not enforced because infrastructure/utility files (e.g., gate scripts,
+  # config loaders) are R but not direct SAS migrations.
   expect_true(
-    TRUE,
+    coverage_pct > 0 || nrow(r_inv) == 0L,
     info = sprintf(
       "MIGRATION NOTES coverage: %.1f%% (%d/%d R files)\nFiles without notes:\n%s",
       coverage_pct,

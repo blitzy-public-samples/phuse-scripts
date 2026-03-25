@@ -39,12 +39,13 @@
 # --- Library Loading ---------------------------------------------------------
 library(haven)      # XPT data I/O — read_xpt()
 library(dplyr)      # Data manipulation — replaces DATA steps + PROC SQL
-library(tidyr)      # Data reshaping — loaded per migration framework
+# tidyr not required by this script — removed per code review
 library(rlang)      # Tidy evaluation — required by r2rtf internal %||% operator
-library(Tplyr)      # Clinical table grammar — loaded per migration framework
+# Tplyr not required by this script — removed per code review
 library(r2rtf)      # RTF output — replaces PROC REPORT + ODS RTF
 library(janitor)    # round_half_up() for SAS-compatible rounding
 library(stringr)    # String formatting — str_pad()
+library(cli)
 
 # =============================================================================
 # compute_fisher_pval
@@ -78,10 +79,10 @@ library(stringr)    # String formatting — str_pad()
 compute_fisher_pval <- function(data, flag_var, tefl_label) {
   # --- Input validation -------------------------------------------------------
   if (!is.data.frame(data)) {
-    stop("compute_fisher_pval: 'data' must be a data.frame or tibble.", call. = FALSE)
+    cli::cli_abort("compute_fisher_pval: 'data' must be a data.frame or tibble.", call. = FALSE)
   }
   if (!flag_var %in% colnames(data)) {
-    stop(
+    cli::cli_abort(
       paste0("compute_fisher_pval: flag variable '", flag_var, "' not found in data."),
       call. = FALSE
     )
@@ -89,7 +90,7 @@ compute_fisher_pval <- function(data, flag_var, tefl_label) {
   required_cols <- c("USUBJID", "TRTPN")
   missing_cols <- setdiff(required_cols, colnames(data))
   if (length(missing_cols) > 0L) {
-    stop(
+    cli::cli_abort(
       paste0(
         "compute_fisher_pval: required column(s) missing: ",
         paste(missing_cols, collapse = ", ")
@@ -184,25 +185,25 @@ outliers_tehilo_anytime <- function(data_path,
 
   # --- Input validation -------------------------------------------------------
   if (!is.character(data_path) || length(data_path) != 1L) {
-    stop("outliers_tehilo_anytime: 'data_path' must be a single character string.",
+    cli::cli_abort("outliers_tehilo_anytime: 'data_path' must be a single character string.",
          call. = FALSE)
   }
   if (!is.character(output_path) || length(output_path) != 1L) {
-    stop("outliers_tehilo_anytime: 'output_path' must be a single character string.",
+    cli::cli_abort("outliers_tehilo_anytime: 'output_path' must be a single character string.",
          call. = FALSE)
   }
   if (!is.character(paramcd) || length(paramcd) != 1L) {
-    stop("outliers_tehilo_anytime: 'paramcd' must be a single character string.",
+    cli::cli_abort("outliers_tehilo_anytime: 'paramcd' must be a single character string.",
          call. = FALSE)
   }
   if (!is.numeric(atptn) || length(atptn) != 1L) {
-    stop("outliers_tehilo_anytime: 'atptn' must be a single numeric value.",
+    cli::cli_abort("outliers_tehilo_anytime: 'atptn' must be a single numeric value.",
          call. = FALSE)
   }
 
   xpt_file <- file.path(data_path, "advs.xpt")
   if (!file.exists(xpt_file)) {
-    stop(
+    cli::cli_abort(
       paste0("outliers_tehilo_anytime: ADVS dataset not found at: ", xpt_file),
       call. = FALSE
     )

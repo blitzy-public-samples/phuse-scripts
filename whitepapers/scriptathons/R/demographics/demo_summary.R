@@ -50,6 +50,8 @@ library(Tplyr)
 library(r2rtf)
 library(janitor)
 library(stringr)
+library(purrr)
+library(cli)
 
 # ============================================================
 # SAS FORMAT MAPPINGS -> R Named Vectors
@@ -338,7 +340,7 @@ freq_stats <- function(data, var_name, var_fmt, ord_fmt, display_name,
 
     n_vals   <- all_data[[n_col]]
     is_n_row <- all_data[["var_val"]] == "N"
-    all_data[[col_col]] <- vapply(seq_along(n_vals), function(idx) {
+    all_data[[col_col]] <- purrr::map_chr(seq_along(n_vals), function(idx) {
       n <- n_vals[idx]
       count_str <- stringr::str_trim(sprintf("%6.0f", n))
       # Denominator (N) row: display count only, no percentage
@@ -347,7 +349,7 @@ freq_stats <- function(data, var_name, var_fmt, ord_fmt, display_name,
       }
       pct_str <- format_prcnt(n, d, pct_dec = 1)
       paste0(count_str, pct_str)
-    }, character(1))
+    })
   }
 
   # Apply format labels and ordering (SAS lines 230-233)
@@ -400,8 +402,10 @@ generate_demo_summary <- function(data_path,
   # Read ADSL transport (replaces SAS filename url + libname xport, lines 3-4)
   adsl_path <- file.path(data_path, "adsl.xpt")
   if (!file.exists(adsl_path)) {
-    stop("ADSL transport file not found at: ", adsl_path,
-         "\nVerify data_path points to directory containing adsl.xpt")
+    cli::cli_abort(c(
+      "ADSL transport file not found at: {.file {adsl_path}}",
+      "i" = "Verify {.arg data_path} points to directory containing adsl.xpt"
+    ))
   }
   adsl <- haven::read_xpt(adsl_path)
 
@@ -410,10 +414,10 @@ generate_demo_summary <- function(data_path,
 
   # Apply population filter (replaces SAS where ittfl='Y', line 79)
   data_filtered <- adsl %>%
-    dplyr::filter(eval(parse(text = pop_filter)))
+    dplyr::filter(!!rlang::parse_expr(pop_filter))
 
   if (nrow(data_filtered) == 0) {
-    stop("No subjects remain after applying population filter: ", pop_filter)
+    cli::cli_abort("No subjects remain after applying population filter: {.val {pop_filter}}")
   }
 
   # ---- Phase 2: Treatment Mapping and Big-N ----

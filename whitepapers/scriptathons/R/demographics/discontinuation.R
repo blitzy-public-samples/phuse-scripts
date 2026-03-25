@@ -51,6 +51,7 @@ library(rlang)
 library(r2rtf)
 library(stringr)
 library(janitor)
+library(cli)
 
 # =============================================================================
 # generate_discontinuation_listing
@@ -127,25 +128,25 @@ generate_discontinuation_listing <- function(data_path,
   # Input Validation — Type checks first, filesystem checks second
   # ---------------------------------------------------------------------------
   if (!is.character(data_path) || length(data_path) != 1L || nchar(data_path) == 0L) {
-    stop("'data_path' must be a non-empty single character string.", call. = FALSE)
+    cli::cli_abort("'data_path' must be a non-empty single character string.", call. = FALSE)
   }
 
   if (!is.character(output_path) || length(output_path) != 1L || nchar(output_path) == 0L) {
-    stop("'output_path' must be a non-empty single character string.", call. = FALSE)
+    cli::cli_abort("'output_path' must be a non-empty single character string.", call. = FALSE)
   }
 
   if (!is.character(pop_flag) || length(pop_flag) != 1L) {
-    stop("'pop_flag' must be a single character string ('Y' or other).", call. = FALSE)
+    cli::cli_abort("'pop_flag' must be a single character string ('Y' or other).", call. = FALSE)
   }
 
   if (!is.character(pop_type) || length(pop_type) != 1L || nchar(pop_type) == 0L) {
-    stop("'pop_type' must be a non-empty single character string.", call. = FALSE)
+    cli::cli_abort("'pop_type' must be a non-empty single character string.", call. = FALSE)
   }
 
   # Filesystem validation — after all type checks pass
   adsl_file <- file.path(data_path, "adsl.xpt")
   if (!file.exists(adsl_file)) {
-    stop(
+    cli::cli_abort(
       paste0("ADSL transport file not found at expected location: ", adsl_file,
              "\nEnsure data_path points to a directory containing adsl.xpt."),
       call. = FALSE
@@ -164,7 +165,7 @@ generate_discontinuation_listing <- function(data_path,
   required_vars <- c("USUBJID", "TRTAN", "DSREASCD", "DSTERM")
   missing_vars <- setdiff(required_vars, names(adsl))
   if (length(missing_vars) > 0L) {
-    stop(
+    cli::cli_abort(
       paste0("Required variable(s) not found in ADSL: ",
              paste(missing_vars, collapse = ", "),
              "\nAvailable variables: ",
@@ -183,7 +184,7 @@ generate_discontinuation_listing <- function(data_path,
   #   %if ... %then %let _pp = Randomized; %else %let _pp = Enrolled;
   if (toupper(pop_flag) == "Y") {
     if (!"ITTFL" %in% names(adsl)) {
-      stop(
+      cli::cli_abort(
         "Population flag 'ITTFL' not found in ADSL but pop_flag='Y' requires it. ",
         "Set pop_flag to a value other than 'Y' to skip ITT filtering, ",
         "or ensure ITTFL is present in the ADSL dataset.",

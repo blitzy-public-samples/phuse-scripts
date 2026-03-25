@@ -41,6 +41,7 @@ library(stringr)  # String functions: str_squish() replaces SAS compbl()
 library(rlang)    # Tidy evaluation: sym(), %||% (required by r2rtf internals)
 library(r2rtf)    # RTF output: replaces SAS ODS RTF + PROC REPORT
 library(janitor)  # SAS-compatible rounding: round_half_up()
+library(cli)
 
 # ---------------------------------------------------------------------------
 # generate_medication_listing
@@ -92,25 +93,25 @@ generate_medication_listing <- function(data_path,
   # Input Validation
   # =========================================================================
   if (!is.character(data_path) || length(data_path) != 1L || is.na(data_path)) {
-    stop("'data_path' must be a single non-NA character string.", call. = FALSE)
+    cli::cli_abort("'data_path' must be a single non-NA character string.", call. = FALSE)
   }
   if (!is.character(output_path) || length(output_path) != 1L ||
       is.na(output_path)) {
-    stop("'output_path' must be a single non-NA character string.",
+    cli::cli_abort("'output_path' must be a single non-NA character string.",
          call. = FALSE)
   }
   if (!is.character(pop_var) || length(pop_var) != 1L || is.na(pop_var)) {
-    stop("'pop_var' must be a single non-NA character string.", call. = FALSE)
+    cli::cli_abort("'pop_var' must be a single non-NA character string.", call. = FALSE)
   }
   if (!is.character(pop_label) || length(pop_label) != 1L ||
       is.na(pop_label)) {
-    stop("'pop_label' must be a single non-NA character string.",
+    cli::cli_abort("'pop_label' must be a single non-NA character string.",
          call. = FALSE)
   }
 
   adcm_file <- file.path(data_path, "adcm.xpt")
   if (!file.exists(adcm_file)) {
-    stop(
+    cli::cli_abort(
       paste0("ADCM transport file not found: ", adcm_file),
       call. = FALSE
     )
@@ -126,7 +127,7 @@ generate_medication_listing <- function(data_path,
 
   # Verify population flag variable exists
   if (!pop_var %in% names(adcm_raw)) {
-    stop(
+    cli::cli_abort(
       paste0(
         "Population variable '", pop_var,
         "' not found in ADCM dataset. Available columns: ",

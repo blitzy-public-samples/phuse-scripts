@@ -16,7 +16,7 @@
 #   strlen buffer-sizing concept is removed — openxlsx handles string
 #   lengths internally.
 #
-# EXPORTS: wb_create, create_styles, ws_header, ws_data, ws_rowcount,
+# EXPORTS: wb_create, create_workbook_styles, ws_header, ws_data, ws_rowcount,
 #          annotate_data, write_annotated, style_from_spec
 # ============================================================================
 
@@ -79,7 +79,7 @@ wb_create <- function(title = "",
 
 
 # ============================================================================
-# create_styles — Comprehensive style gallery for Excel output
+# create_workbook_styles — Comprehensive style gallery for Excel output
 # Replaces SAS %styles macro (lines 72-558 of xml_output.sas)
 #
 # Returns a named list of 66 openxlsx Style objects corresponding to every
@@ -93,7 +93,7 @@ wb_create <- function(title = "",
 # @param size Numeric. Base font size in points (default 9).
 # @return Named list of openxlsx Style objects.
 # ============================================================================
-create_styles <- function(size = 9) {
+create_workbook_styles <- function(size = 9) {
 
   # Common border definitions for reuse
   border_lr   <- c("left", "right")
@@ -515,7 +515,7 @@ create_styles <- function(size = 9) {
 #' @param header_df A data.frame with columns: \code{group} (character grouping
 #'   variable, e.g. "Header", "SubHeader", "Default"), and \code{text}
 #'   (character content to write).
-#' @param styles Named list of openxlsx Style objects from \code{create_styles()}.
+#' @param styles Named list of openxlsx Style objects from \code{create_workbook_styles()}.
 #' @param start_row Integer row number to begin writing (default 1).
 #' @param start_col Integer column number to begin writing (default 1).
 #'
@@ -590,7 +590,7 @@ ws_header <- function(wb, sheet, header_df, styles, start_row = 1L,
 #' @param wb An openxlsx workbook object.
 #' @param sheet Character string or integer identifying the worksheet.
 #' @param data_df A data.frame of values to write.
-#' @param styles Named list of openxlsx Style objects from \code{create_styles()}.
+#' @param styles Named list of openxlsx Style objects from \code{create_workbook_styles()}.
 #' @param start_row Integer row number to begin writing (default 1).
 #' @param start_col Integer column number to begin writing (default 1).
 #' @param fmt Logical; if TRUE, enable format mode with header row and
@@ -972,7 +972,7 @@ annotate_data <- function(data_df, style_id = "Data", height = NULL,
 #' @param wb An openxlsx workbook object.
 #' @param sheet Character string or integer identifying the worksheet.
 #' @param annotations A tibble from \code{annotate_data()} with cell metadata.
-#' @param styles Named list of openxlsx Style objects from \code{create_styles()}.
+#' @param styles Named list of openxlsx Style objects from \code{create_workbook_styles()}.
 #' @param start_row Integer row offset to add to all row numbers (default 0).
 #' @param start_col Integer column offset to add to all column numbers (default 0).
 #'

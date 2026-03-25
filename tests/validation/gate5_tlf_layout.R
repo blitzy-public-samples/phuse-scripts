@@ -36,6 +36,7 @@ library(purrr)
 library(readr)
 library(openxlsx)
 library(yaml)
+library(cli)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -44,11 +45,10 @@ library(yaml)
 # SAS %let globals and libname statements (AAP §0.5.2).
 gate5_load_config <- function(config_path = "config/migration_config.yaml") {
   if (!file.exists(config_path)) {
-    stop(
-      "Configuration file not found: ", config_path,
-      "\nEnsure config/migration_config.yaml exists at the repository root.",
-      call. = FALSE
-    )
+    cli::cli_abort(c(
+      "Configuration file not found: {.file {config_path}}",
+      "i" = "Ensure {.file config/migration_config.yaml} exists at the repository root."
+    ))
   }
   yaml::read_yaml(config_path)
 }

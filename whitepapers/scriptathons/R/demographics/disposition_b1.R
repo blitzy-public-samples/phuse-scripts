@@ -37,6 +37,7 @@ library(rlang)       # Required: r2rtf 1.3.0 uses rlang's %||% operator internal
 library(r2rtf)
 library(stringr)
 library(janitor)
+library(cli)
 
 # ==============================================================================
 # generate_disposition_b1
@@ -90,7 +91,7 @@ generate_disposition_b1 <- function(data_path, output_path = "disposition_b1.rtf
   adsl_path <- file.path(data_path, "adsl.xpt")
 
   if (!file.exists(adsl_path)) {
-    stop(
+    cli::cli_abort(
       "ADSL transport file not found at: ", adsl_path,
       "\nEnsure data_path points to the directory containing adsl.xpt.",
       call. = FALSE
@@ -103,7 +104,7 @@ generate_disposition_b1 <- function(data_path, output_path = "disposition_b1.rtf
   required_vars <- c("USUBJID", "TRT01P", "TRT01PN", "DCREASCD", "ITTFL")
   missing_vars <- setdiff(required_vars, names(adsl))
   if (length(missing_vars) > 0L) {
-    stop(
+    cli::cli_abort(
       "Required variables missing from ADSL: ",
       paste(missing_vars, collapse = ", "),
       call. = FALSE

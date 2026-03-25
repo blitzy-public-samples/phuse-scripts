@@ -48,10 +48,11 @@ library(dplyr)      # Data manipulation (replaces DATA steps, PROC SQL, PROC SUM
 library(tidyr)      # Pivoting and reshaping (replaces DATA step array processing)
 library(stringr)    # String formatting (replaces SAS PROPCASE/CATX)
 library(rlang)      # Tidy evaluation primitives (provides %||% required by r2rtf)
-library(Tplyr)      # Clinical table generation engine (pharmaverse standard)
+# Tplyr not required by this script — removed per code review
 library(r2rtf)      # RTF output (replaces ODS RTF + PROC REPORT)
 library(janitor)    # round_half_up for SAS-compatible rounding
 library(forcats)    # Factor level ordering (replaces SAS FORMAT ordering)
+library(cli)
 
 # =============================================================================
 # outliers_shift_table
@@ -101,14 +102,14 @@ outliers_shift_table <- function(data_path,
   # 0. Input validation
   # -------------------------------------------------------------------------
   if (!is.character(data_path) || length(data_path) != 1L || nchar(data_path) == 0L) {
-    stop("`data_path` must be a non-empty character string.", call. = FALSE)
+    cli::cli_abort("`data_path` must be a non-empty character string.", call. = FALSE)
   }
   if (!is.character(output_path) || length(output_path) != 1L || nchar(output_path) == 0L) {
-    stop("`output_path` must be a non-empty character string.", call. = FALSE)
+    cli::cli_abort("`output_path` must be a non-empty character string.", call. = FALSE)
   }
   xpt_file <- file.path(data_path, "advs.xpt")
   if (!file.exists(xpt_file)) {
-    stop("ADVS transport file not found: ", xpt_file, call. = FALSE)
+    cli::cli_abort("ADVS transport file not found: ", xpt_file, call. = FALSE)
   }
   if (!dir.exists(output_path)) {
     dir.create(output_path, recursive = TRUE, showWarnings = FALSE)

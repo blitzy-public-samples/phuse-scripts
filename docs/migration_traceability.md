@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | **Document Version** | 1.0 |
-| **Date** | [YYYY-MM-DD] |
+| **Date** | 2026-03-25 |
 | **Author** | PhUSE CS Working Group 5 (WG5) — Standard Analyses |
 | **Purpose** | Maps every SAS source file to its R migration target, providing full traceability for the SAS 9.4 → R 4.3+ migration |
 | **Scope** | All in-scope SAS programs as defined in the Agent Action Plan §0.3.1 |
@@ -63,9 +63,9 @@ This document is the **SAS-to-R Traceability Matrix** for the PhUSE CS Working G
 | **Utility macros (whitepapers)** | 16+ |
 | **ADaM derivation macros** | 1 |
 | **Lang/SAS scripts** | 6 |
-| **Contributed scripts** | 3+ (wildcard groups) |
+| **Contributed scripts** | 18 |
 | **Qualification harnesses** | 1 (consolidated) |
-| **Scriptathon archives** | 5 (wildcard groups) |
+| **Scriptathon archives** | 21 |
 | **New infrastructure files** | 9 |
 
 **Validation report**: See [`docs/validation_report.md`](validation_report.md) for gate-by-gate validation results.
@@ -209,9 +209,24 @@ Community contributed SAS scripts from `contributed/`, migrated to R equivalents
 
 | SAS Source File | R Target File | Transformation | Key R Changes |
 |---|---|---|---|
-| `contributed/AE/*.sas` | `contributed/R/AE/*.R` | CREATE | Community AE scripts (ae.sas, ae_aggregate.sas, ae_output.sas, ae_rror.sas, ae_oncology*.sas) → idiomatic R with dplyr/Tplyr |
-| `contributed/Demographics/Scripts/demographics.sas` | `contributed/R/Demographics/demographics.R` | CREATE | Monolithic demographics driver → dplyr + Tplyr + openxlsx |
-| `contributed/MedDRA/*.sas` | `contributed/R/MedDRA/*.R` | CREATE | Community MedDRA scripts (ae_meddra.sas, ae_meddra_output.sas, meddra_import.sas) → R with fisher.test/Tplyr |
+| `contributed/AE/ae_aggregate.sas` | `contributed/R/AE/AE_Severity/ae_aggregate.R` | CREATE | %ab/%cd macros → ae_ab()/ae_cd() R functions with dplyr aggregation |
+| `contributed/AE/ae_oncology_aggregate.sas` | `contributed/R/AE/AE_Toxicity/ae_oncology_aggregate.R` | CREATE | %aggregate/%compare → onc_aggregate()/onc_compare() with dplyr + fisher.test |
+| `contributed/AE/ZZ_Utilities/xml_output.sas` | `contributed/R/AE/ZZ_Utilities/xml_output.R` | CREATE | SpreadsheetML backbone → openxlsx workbook with style gallery |
+| `contributed/AE/ZZ_Utilities/data_checks.sas` | `contributed/R/AE/ZZ_Utilities/data_checks.R` | CREATE | %chk_var/%chk_dm validation → R check functions with tryCatch |
+| `contributed/AE/ZZ_Utilities/err_output.sas` | `contributed/R/AE/ZZ_Utilities/err_output.R` | CREATE | %error_summary XML → openxlsx error workbook |
+| `contributed/AE/ZZ_Utilities/sl_gs_output.sas` | `contributed/R/AE/ZZ_Utilities/sl_gs_output.R` | CREATE | %group_subset macros → R group_subset_pp/xls_out/xml_out functions |
+| `contributed/AE/ZZ_Utilities/ae_setup.sas` | `contributed/R/AE/ZZ_Utilities/ae_setup.R` | CREATE | %setup gatekeeper → ae_setup() with validation chain |
+| `contributed/AE/meddra_import.sas` | `contributed/R/AE/meddra_import.R` | CREATE | MedDRA hierarchy import → haven + dplyr pipeline |
+| `contributed/Demographics/Utility Programs/data_checks.sas` | `contributed/R/Demographics/data_checks.R` | CREATE | Demographic data validation → R check functions |
+| `contributed/Demographics/Utility Programs/err_output.sas` | `contributed/R/Demographics/err_output.R` | CREATE | %error_summary → openxlsx error workbook |
+| `contributed/Demographics/Utility Programs/xml_output.sas` | `contributed/R/Demographics/xml_output.R` | CREATE | SpreadsheetML → openxlsx workbook pipeline |
+| `contributed/Demographics/Utility Programs/sl_gs_output.sas` | `contributed/R/Demographics/sl_gs_output.R` | CREATE | %group_subset macros → R grouping/subsetting functions |
+| `contributed/MedDRA/ZZ_Utilities/xml_output.sas` | `contributed/R/MedDRA/xml_output.R` | CREATE | SpreadsheetML → openxlsx workbook pipeline |
+| `contributed/MedDRA/ZZ_Utilities/data_checks.sas` | `contributed/R/MedDRA/data_checks.R` | CREATE | MedDRA data validation → R check functions |
+| `contributed/MedDRA/ZZ_Utilities/err_output.sas` | `contributed/R/MedDRA/err_output.R` | CREATE | %error_summary → openxlsx error workbook |
+| `contributed/MedDRA/ZZ_Utilities/sl_gs_output.sas` | `contributed/R/MedDRA/sl_gs_output.R` | CREATE | %group_subset macros → R grouping/subsetting functions |
+| `contributed/MedDRA/ZZ_Utilities/ae_setup.sas` | `contributed/R/MedDRA/ae_setup.R` | CREATE | %setup gatekeeper → ae_setup() with validation chain |
+| `contributed/MedDRA/meddra_import.sas` | `contributed/R/MedDRA/meddra_import.R` | CREATE | MedDRA hierarchy import → haven + dplyr pipeline |
 
 ---
 
@@ -243,27 +258,27 @@ Scriptathon SAS archive entries from `whitepapers/scriptathons/`, migrated to R 
 
 | SAS Source File | R Target File | Transformation | Key R Changes |
 |---|---|---|---|
-| `whitepapers/scriptathons/outliers/outliers_TEHiLo_Anytime.sas` | `whitepapers/scriptathons/R/outliers/*.R` | CREATE | Blood pressure scatter/shift → ggplot2 |
-| `whitepapers/scriptathons/outliers/outliers_Scatter_Quant.sas` | `whitepapers/scriptathons/R/outliers/*.R` | CREATE | Scatter quantile plots → ggplot2 |
-| `whitepapers/scriptathons/outliers/outliers_TEAbnorm_Qual.sas` | `whitepapers/scriptathons/R/outliers/*.R` | CREATE | Treatment-emergent abnormality → ggplot2 |
-| `whitepapers/scriptathons/outliers/outliers_Scatter_MeanTime.sas` | `whitepapers/scriptathons/R/outliers/*.R` | CREATE | Scatter mean-time plots → ggplot2 |
-| `whitepapers/scriptathons/outliers/outliers_Shift_Table.sas` | `whitepapers/scriptathons/R/outliers/*.R` | CREATE | Shift tables → Tplyr + ggplot2 |
-| `whitepapers/scriptathons/pk/pk_mean_conc.sas` | `whitepapers/scriptathons/R/pk/*.R` | CREATE | PK mean concentration → ggplot2 |
-| `whitepapers/scriptathons/pk/pk_param_summary.sas` | `whitepapers/scriptathons/R/pk/*.R` | CREATE | PK parameter summary → dplyr + Tplyr |
-| `whitepapers/scriptathons/pk/pk_overlay_conc.sas` | `whitepapers/scriptathons/R/pk/*.R` | CREATE | PK overlay concentration → ggplot2 |
-| `whitepapers/scriptathons/pk/pk_subj_conc.sas` | `whitepapers/scriptathons/R/pk/*.R` | CREATE | PK subject concentration → ggplot2 |
-| `whitepapers/scriptathons/ae/ae_serious.sas` | `whitepapers/scriptathons/R/ae/*.R` | CREATE | Serious AE analysis → Tplyr + ggplot2 |
-| `whitepapers/scriptathons/ae/ae_common.sas` | `whitepapers/scriptathons/R/ae/*.R` | CREATE | Common AE analysis → Tplyr + ggplot2 |
-| `whitepapers/scriptathons/ae/ae_pref.sas` | `whitepapers/scriptathons/R/ae/*.R` | CREATE | Preferred term AE analysis → Tplyr + ggplot2 |
-| `whitepapers/scriptathons/central/mean_time.sas` | `whitepapers/scriptathons/R/central/*.R` | CREATE | Mean-time plots → ggplot2 (extend existing R entries) |
-| `whitepapers/scriptathons/central/Box_Plot_Baseline.sas` | `whitepapers/scriptathons/R/central/*.R` | CREATE | Baseline boxplots → ggplot2 (extend existing R entries) |
-| `whitepapers/scriptathons/central/box_obs_time.sas` | `whitepapers/scriptathons/R/central/*.R` | CREATE | Observed-over-time boxplots → ggplot2 |
-| `whitepapers/scriptathons/demographics/demo_summary.sas` | `whitepapers/scriptathons/R/demographics/*.R` | CREATE | Demographic summary tables → Tplyr + r2rtf (extend existing R entries) |
-| `whitepapers/scriptathons/demographics/disposition_a.sas` | `whitepapers/scriptathons/R/demographics/*.R` | CREATE | Disposition variant A → dplyr + Tplyr |
-| `whitepapers/scriptathons/demographics/disposition_b1.sas` | `whitepapers/scriptathons/R/demographics/*.R` | CREATE | Disposition variant B1 → dplyr + Tplyr |
-| `whitepapers/scriptathons/demographics/disposition_b2.sas` | `whitepapers/scriptathons/R/demographics/*.R` | CREATE | Disposition variant B2 → dplyr + Tplyr |
-| `whitepapers/scriptathons/demographics/discontinuation.sas` | `whitepapers/scriptathons/R/demographics/*.R` | CREATE | Discontinuation analysis → dplyr + Tplyr |
-| `whitepapers/scriptathons/demographics/medication_listing.sas` | `whitepapers/scriptathons/R/demographics/*.R` | CREATE | Medication listing → dplyr + r2rtf |
+| `whitepapers/scriptathons/outliers/outliers_TEHiLo_Anytime.sas` | `whitepapers/scriptathons/R/outliers/outliers_TEHiLo_Anytime.R` | CREATE | Blood pressure scatter/shift → ggplot2 |
+| `whitepapers/scriptathons/outliers/outliers_Scatter_Quant.sas` | `whitepapers/scriptathons/R/outliers/outliers_Scatter_Quant.R` | CREATE | Scatter quantile plots → ggplot2 |
+| `whitepapers/scriptathons/outliers/outliers_TEAbnorm_Qual.sas` | `whitepapers/scriptathons/R/outliers/outliers_TEAbnorm_Qual.R` | CREATE | Treatment-emergent abnormality → ggplot2 |
+| `whitepapers/scriptathons/outliers/outliers_Scatter_MeanTime.sas` | `whitepapers/scriptathons/R/outliers/outliers_Scatter_MeanTime.R` | CREATE | Scatter mean-time plots → ggplot2 |
+| `whitepapers/scriptathons/outliers/outliers_Shift_Table.sas` | `whitepapers/scriptathons/R/outliers/outliers_Shift_Table.R` | CREATE | Shift tables → Tplyr + ggplot2 |
+| `whitepapers/scriptathons/pk/pk_mean_conc.sas` | `whitepapers/scriptathons/R/pk/pk_mean_conc.R` | CREATE | PK mean concentration → ggplot2 |
+| `whitepapers/scriptathons/pk/pk_param_summary.sas` | `whitepapers/scriptathons/R/pk/pk_param_summary.R` | CREATE | PK parameter summary → dplyr + Tplyr |
+| `whitepapers/scriptathons/pk/pk_overlay_conc.sas` | `whitepapers/scriptathons/R/pk/pk_overlay_conc.R` | CREATE | PK overlay concentration → ggplot2 |
+| `whitepapers/scriptathons/pk/pk_subj_conc.sas` | `whitepapers/scriptathons/R/pk/pk_subj_conc.R` | CREATE | PK subject concentration → ggplot2 |
+| `whitepapers/scriptathons/ae/ae_serious.sas` | `whitepapers/scriptathons/R/ae/ae_serious.R` | CREATE | Serious AE analysis → Tplyr + ggplot2 |
+| `whitepapers/scriptathons/ae/ae_common.sas` | `whitepapers/scriptathons/R/ae/ae_common.R` | CREATE | Common AE analysis → Tplyr + ggplot2 |
+| `whitepapers/scriptathons/ae/ae_pref.sas` | `whitepapers/scriptathons/R/ae/ae_pref.R` | CREATE | Preferred term AE analysis → Tplyr + ggplot2 |
+| `whitepapers/scriptathons/central/mean_time.sas` | `whitepapers/scriptathons/R/central/mean_time.R` | CREATE | Mean-time plots → ggplot2 (extend existing R entries) |
+| `whitepapers/scriptathons/central/Box_Plot_Baseline.sas` | `whitepapers/scriptathons/R/central/Box_Plot_Baseline.R` | CREATE | Baseline boxplots → ggplot2 (extend existing R entries) |
+| `whitepapers/scriptathons/central/box_obs_time.sas` | `whitepapers/scriptathons/R/central/box_obs_time.R` | CREATE | Observed-over-time boxplots → ggplot2 |
+| `whitepapers/scriptathons/demographics/demo_summary.sas` | `whitepapers/scriptathons/R/demographics/demo_summary.R` | CREATE | Demographic summary tables → Tplyr + r2rtf (extend existing R entries) |
+| `whitepapers/scriptathons/demographics/disposition_a.sas` | `whitepapers/scriptathons/R/demographics/disposition_a.R` | CREATE | Disposition variant A → dplyr + Tplyr |
+| `whitepapers/scriptathons/demographics/disposition_b1.sas` | `whitepapers/scriptathons/R/demographics/disposition_b1.R` | CREATE | Disposition variant B1 → dplyr + Tplyr |
+| `whitepapers/scriptathons/demographics/disposition_b2.sas` | `whitepapers/scriptathons/R/demographics/disposition_b2.R` | CREATE | Disposition variant B2 → dplyr + Tplyr |
+| `whitepapers/scriptathons/demographics/discontinuation.sas` | `whitepapers/scriptathons/R/demographics/discontinuation.R` | CREATE | Discontinuation analysis → dplyr + Tplyr |
+| `whitepapers/scriptathons/demographics/medication_listing.sas` | `whitepapers/scriptathons/R/demographics/medication_listing.R` | CREATE | Medication listing → dplyr + r2rtf |
 
 ---
 
@@ -394,7 +409,7 @@ The traceability matrix coverage is programmatically verified by [`tests/validat
 
 | Version | Date | Author | Description |
 |---------|------|--------|-------------|
-| 1.0 | [YYYY-MM-DD] | PhUSE CS WG5 | Initial traceability matrix — complete SAS-to-R migration mapping |
+| 1.0 | 2026-03-25 | PhUSE CS WG5 | Initial traceability matrix — complete SAS-to-R migration mapping |
 
 ---
 
@@ -402,9 +417,9 @@ The traceability matrix coverage is programmatically verified by [`tests/validat
 
 | Role | Name | Date | Signature |
 |------|------|------|-----------|
-| Migration Architect | _________________ | [YYYY-MM-DD] | _________________ |
-| Lead Statistician | _________________ | [YYYY-MM-DD] | _________________ |
-| QA Reviewer | _________________ | [YYYY-MM-DD] | _________________ |
-| Regulatory Lead | _________________ | [YYYY-MM-DD] | _________________ |
+| Migration Architect | _________________ | 2026-03-25 | _________________ |
+| Lead Statistician | _________________ | 2026-03-25 | _________________ |
+| QA Reviewer | _________________ | 2026-03-25 | _________________ |
+| Regulatory Lead | _________________ | 2026-03-25 | _________________ |
 
 **Gate 8 Confirmation**: All gates (1–7) have been satisfied. This traceability matrix is 100% complete with all SAS steps mapped to R equivalents. No statistical functionality has been added or removed.

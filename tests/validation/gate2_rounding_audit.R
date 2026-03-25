@@ -34,6 +34,7 @@ library(purrr)
 library(stringr)
 library(readr)
 library(yaml)
+library(cli)
 
 # -----------------------------------------------------------------------------
 # Configuration Loading
@@ -109,7 +110,7 @@ scan_rounding_locations <- function(r_file_path) {
   # Validate input
 
 if (!is.character(r_file_path) || length(r_file_path) != 1L) {
-    stop("scan_rounding_locations: 'r_file_path' must be a single character string.")
+    cli::cli_abort("scan_rounding_locations: {.arg r_file_path} must be a single character string.")
   }
   if (!file.exists(r_file_path)) {
     warning(paste0("scan_rounding_locations: File not found — ", r_file_path))
@@ -353,15 +354,17 @@ if (!is.character(r_file_path) || length(r_file_path) != 1L) {
 scan_all_migrated_files <- function(base_path = ".") {
   # Validate input
   if (!is.character(base_path) || length(base_path) != 1L) {
-    stop("scan_all_migrated_files: 'base_path' must be a single character string.")
+    cli::cli_abort("scan_all_migrated_files: {.arg base_path} must be a single character string.")
   }
 
   # Define directories to scan for migrated R files
+  # Comprehensive list covering all migrated R directories per AAP
   scan_dirs <- c(
     file.path(base_path, "tested", "R"),
     file.path(base_path, "whitepapers", "WPCT"),
     file.path(base_path, "whitepapers", "utilities", "R"),
     file.path(base_path, "whitepapers", "ADaM", "R"),
+    file.path(base_path, "whitepapers", "scriptathons", "R"),
     file.path(base_path, "lang", "R"),
     file.path(base_path, "contributed", "R")
   )
@@ -662,7 +665,7 @@ run_rounding_tests <- function(scan_results = NULL, base_path = ".") {
       if (file.exists(ae_xpt_path)) {
         ae_baseline <- haven::read_xpt(ae_xpt_path)
         # Verify the dataset loaded successfully — numeric column count check
-        num_cols <- sum(vapply(ae_baseline, is.numeric, logical(1L)))
+        num_cols <- sum(purrr::map_lgl(ae_baseline, is.numeric))
         testthat::expect_gte(
           num_cols, 0L,
           label = "AE baseline numeric column count"
@@ -914,7 +917,7 @@ run_rounding_tests <- function(scan_results = NULL, base_path = ".") {
 generate_rounding_audit_report <- function(scan_results) {
   # Validate input
   if (!is.data.frame(scan_results)) {
-    stop("generate_rounding_audit_report: 'scan_results' must be a data frame or tibble.")
+    cli::cli_abort("generate_rounding_audit_report: {.arg scan_results} must be a data frame or tibble.")
   }
 
   # Handle empty scan results

@@ -39,6 +39,8 @@ library(janitor)
 library(dplyr)
 library(readr)
 library(yaml)
+library(purrr)
+library(cli)
 
 # =============================================================================
 # SECTION 1: Utility Functions for Parity Comparison
@@ -180,8 +182,8 @@ compare_numeric_parity <- function(sas_df, r_df, keys, tolerance = 1e-10) {
   )
 
   # Identify numeric columns common to both data frames
-  sas_numeric_cols <- names(sas_df)[vapply(sas_df, is.numeric, logical(1))]
-  r_numeric_cols <- names(r_df)[vapply(r_df, is.numeric, logical(1))]
+  sas_numeric_cols <- names(sas_df)[purrr::map_lgl(sas_df, is.numeric)]
+  r_numeric_cols <- names(r_df)[purrr::map_lgl(r_df, is.numeric)]
   common_numeric <- intersect(sas_numeric_cols, r_numeric_cols)
 
   # Exclude key columns from numeric comparison (they are join keys)
@@ -362,8 +364,8 @@ compare_string_parity <- function(sas_df, r_df, keys) {
   )
 
   # Identify character columns common to both data frames
-  sas_char_cols <- names(sas_df)[vapply(sas_df, is.character, logical(1))]
-  r_char_cols <- names(r_df)[vapply(r_df, is.character, logical(1))]
+  sas_char_cols <- names(sas_df)[purrr::map_lgl(sas_df, is.character)]
+  r_char_cols <- names(r_df)[purrr::map_lgl(r_df, is.character)]
   common_char <- intersect(sas_char_cols, r_char_cols)
 
   # Exclude key columns from character comparison
@@ -485,14 +487,14 @@ compare_formatted_values <- function(sas_output, r_output) {
   if (is.data.frame(sas_output) && is.data.frame(r_output)) {
     sas_chars <- unlist(
       lapply(
-        names(sas_output)[vapply(sas_output, is.character, logical(1))],
+        names(sas_output)[purrr::map_lgl(sas_output, is.character)],
         function(col) as.character(sas_output[[col]])
       ),
       use.names = FALSE
     )
     r_chars <- unlist(
       lapply(
-        names(r_output)[vapply(r_output, is.character, logical(1))],
+        names(r_output)[purrr::map_lgl(r_output, is.character)],
         function(col) as.character(r_output[[col]])
       ),
       use.names = FALSE
@@ -605,10 +607,9 @@ summarize_parity_results <- function(comparison_results, domain_name) {
 
   total <- length(comparison_results)
   pass_count <- sum(
-    vapply(
+    purrr::map_lgl(
       comparison_results,
-      function(x) isTRUE(x$passed),
-      logical(1)
+      function(x) isTRUE(x$passed)
     )
   )
   fail_count <- total - pass_count
@@ -1278,10 +1279,7 @@ test_wpct_domain_parity <- function(config) {
 run_gate1_validation <- function(config_path = "config/migration_config.yaml") {
   # Load configuration
   if (!file.exists(config_path)) {
-    stop(
-      sprintf("Configuration file not found: %s", config_path),
-      call. = FALSE
-    )
+    cli::cli_abort("Configuration file not found: {.file {config_path}}")
   }
   config <- yaml::read_yaml(config_path)
 
@@ -1290,11 +1288,9 @@ run_gate1_validation <- function(config_path = "config/migration_config.yaml") {
                          "domain_settings")
   missing_sections <- setdiff(required_sections, names(config))
   if (length(missing_sections) > 0L) {
-    stop(
-      sprintf(
-        "Configuration missing required sections: %s",
-        paste(missing_sections, collapse = ", ")
-      ),
+    cli::cli_abort(
+      c("Configuration missing required sections:",
+        "x" = "{.val {missing_sections}}"),
       call. = FALSE
     )
   }

@@ -7,7 +7,7 @@
 #'
 #'               Functions provided:
 #'                 create_workbook   -- create an openxlsx workbook object
-#'                 create_styles     -- define ~66 named cell styles
+#'                 create_workbook_styles     -- define ~66 named cell styles
 #'                 annotate_data     -- convert data frame to long format
 #'                 write_annotated_data -- write annotated data to worksheet
 #'                 write_header      -- write title/subtitle header rows
@@ -74,7 +74,7 @@ create_workbook <- function(title, author = "US Food & Drug Administration",
 
 
 # =============================================================================
-# create_styles() — Replaces SAS %styles macro (lines 72-558)
+# create_workbook_styles() — Replaces SAS %styles macro (lines 72-558)
 # =============================================================================
 #' Create the Complete Style Gallery
 #'
@@ -86,7 +86,7 @@ create_workbook <- function(title, author = "US Food & Drug Administration",
 #' @param size Integer font size for the default style (default: 9).
 #'   SAS equivalent: %styles(size=9)
 #' @return Named list of openxlsx Style objects
-create_styles <- function(size = 9) {
+create_workbook_styles <- function(size = 9) {
 
   styles <- list()
 
@@ -575,6 +575,10 @@ create_styles <- function(size = 9) {
 
 # =============================================================================
 # annotate_data() — Replaces SAS %annotate macro (lines 713-742)
+# NOTE: Intentional divergence from tested/R/utilities/xml_output.R which uses
+# get_style_by_name() for style lookups. annotate_data() serves a different
+# purpose: converting wide-format data to cell-level long format for Excel writing.
+# These are not counterpart functions — they address distinct SAS macro translations.
 # =============================================================================
 #' Annotate a Data Frame for Cell-Level Excel Writing
 #'
@@ -654,7 +658,7 @@ annotate_data <- function(df) {
 #' @param sheet Sheet name or index
 #' @param annotated_data A tibble/data frame with columns: Row, varname, Data.
 #'   Optional columns: StyleID, MergeAcross, MergeDown, Height, Index, Type.
-#' @param styles Named list of openxlsx Style objects (from create_styles)
+#' @param styles Named list of openxlsx Style objects (from create_workbook_styles)
 #' @param start_row Integer row offset for writing (default: 1)
 #' @return The workbook object (invisibly), modified in place
 write_annotated_data <- function(wb, sheet, annotated_data, styles, start_row = 1) {
@@ -777,7 +781,7 @@ write_annotated_data <- function(wb, sheet, annotated_data, styles, start_row = 
 #' @param header_data A data frame with columns: group (character), data (character).
 #'   group values: "title" → Header style, "subtitle" → SubHeader style,
 #'   anything else → Default style
-#' @param styles Named list of openxlsx Style objects (from create_styles)
+#' @param styles Named list of openxlsx Style objects (from create_workbook_styles)
 #' @param start_row Integer row to begin writing (default: 1)
 #' @return Integer: the next available row after the header section
 write_header <- function(wb, sheet, header_data, styles, start_row = 1) {
@@ -848,7 +852,7 @@ write_header <- function(wb, sheet, header_data, styles, start_row = 1) {
 #' @param wb An openxlsx Workbook object
 #' @param sheet Sheet name or index
 #' @param df Data frame to write
-#' @param styles Named list of openxlsx Style objects (from create_styles)
+#' @param styles Named list of openxlsx Style objects (from create_workbook_styles)
 #' @param start_row Integer row to begin writing (default: 1)
 #' @param sort_var Character name of the sort variable column (for Highlight);
 #'   NULL if not applicable

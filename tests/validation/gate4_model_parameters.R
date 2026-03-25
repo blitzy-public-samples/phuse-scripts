@@ -26,6 +26,8 @@ library(car)
 library(stringr)
 library(purrr)
 library(yaml)
+library(readr)
+library(cli)
 
 # -----------------------------------------------------------------------------
 # Configuration Loading
@@ -77,7 +79,7 @@ config <- tryCatch(
 #' @return Character vector of lines in the file, or character(0) on failure.
 safe_read_lines <- function(r_file_path) {
   tryCatch(
-    readLines(r_file_path, warn = FALSE),
+    readr::read_lines(r_file_path),
     error = function(e) {
       message(sprintf("WARNING: Cannot read file: %s — %s", r_file_path, e$message))
       character(0)
@@ -100,6 +102,7 @@ discover_migrated_r_files <- function() {
     "whitepapers/WPCT",
     "whitepapers/utilities/R",
     "whitepapers/ADaM/R",
+    "whitepapers/scriptathons/R",
     "lang/R",
     "contributed/R"
   )

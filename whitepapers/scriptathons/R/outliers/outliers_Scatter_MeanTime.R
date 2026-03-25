@@ -45,6 +45,7 @@ library(dplyr)      # Data manipulation (replaces DATA step, PROC SORT, PROC SQL
 library(ggplot2)    # Visualization (replaces PROC TEMPLATE + PROC SGRENDER)
 library(janitor)    # round_half_up for SAS-compatible rounding (Gate 2 compliance)
 library(forcats)    # Factor level management for treatment ordering
+library(cli)
 
 # ============================================================================
 # outliers_scatter_meantime
@@ -92,30 +93,30 @@ outliers_scatter_meantime <- function(adsl_path,
   # ==========================================================================
   # Validate all input arguments before proceeding
   if (!is.character(adsl_path) || length(adsl_path) != 1L || nchar(adsl_path) == 0L) {
-    stop("adsl_path must be a non-empty character string specifying the ADSL XPT file.",
+    cli::cli_abort("adsl_path must be a non-empty character string specifying the ADSL XPT file.",
          call. = FALSE)
   }
   if (!is.character(advsmax_path) || length(advsmax_path) != 1L || nchar(advsmax_path) == 0L) {
-    stop("advsmax_path must be a non-empty character string specifying the ADVSMAX XPT file.",
+    cli::cli_abort("advsmax_path must be a non-empty character string specifying the ADVSMAX XPT file.",
          call. = FALSE)
   }
   if (!is.character(output_path) || length(output_path) != 1L || nchar(output_path) == 0L) {
-    stop("output_path must be a non-empty character string specifying the output directory.",
+    cli::cli_abort("output_path must be a non-empty character string specifying the output directory.",
          call. = FALSE)
   }
   if (!is.character(paramcd) || length(paramcd) != 1L || nchar(paramcd) == 0L) {
-    stop("paramcd must be a non-empty character string (e.g. 'DIABP').", call. = FALSE)
+    cli::cli_abort("paramcd must be a non-empty character string (e.g. 'DIABP').", call. = FALSE)
   }
   if (!is.numeric(atptn) || length(atptn) != 1L || is.na(atptn)) {
-    stop("atptn must be a single non-missing numeric value (e.g. 815).", call. = FALSE)
+    cli::cli_abort("atptn must be a single non-missing numeric value (e.g. 815).", call. = FALSE)
   }
 
   # Verify input files exist
   if (!file.exists(adsl_path)) {
-    stop("ADSL file not found: ", adsl_path, call. = FALSE)
+    cli::cli_abort("ADSL file not found: ", adsl_path, call. = FALSE)
   }
   if (!file.exists(advsmax_path)) {
-    stop("ADVSMAX file not found: ", advsmax_path, call. = FALSE)
+    cli::cli_abort("ADVSMAX file not found: ", advsmax_path, call. = FALSE)
   }
 
   # ==========================================================================

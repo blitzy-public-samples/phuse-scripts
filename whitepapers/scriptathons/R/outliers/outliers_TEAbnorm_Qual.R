@@ -54,6 +54,7 @@ library(dplyr)      # Core tidyverse data manipulation (replaces DATA steps, PRO
 library(ggplot2)    # Visualization engine (replaces PROC GPLOT + ANNOTATE facility)
 library(janitor)    # round_half_up() for SAS-compatible rounding (AAP §0.7.2)
 library(stringr)    # Tidyverse string manipulation (replaces SAS trim(left()))
+library(cli)
 
 # ---------------------------------------------------------------------------
 # Main Function: outliers_teabnorm_qual
@@ -115,27 +116,27 @@ outliers_teabnorm_qual <- function(data_path,
   # Input Validation
   # -------------------------------------------------------------------------
   if (!is.character(data_path) || length(data_path) != 1L || nchar(data_path) == 0L) {
-    stop("data_path must be a non-empty character string specifying the directory containing advs.xpt",
+    cli::cli_abort("data_path must be a non-empty character string specifying the directory containing advs.xpt",
          call. = FALSE)
   }
   if (!is.character(output_path) || length(output_path) != 1L || nchar(output_path) == 0L) {
-    stop("output_path must be a non-empty character string specifying the output directory",
+    cli::cli_abort("output_path must be a non-empty character string specifying the output directory",
          call. = FALSE)
   }
   if (!is.character(paramcd) || length(paramcd) != 1L) {
-    stop("paramcd must be a single character string (e.g., 'DIABP')", call. = FALSE)
+    cli::cli_abort("paramcd must be a single character string (e.g., 'DIABP')", call. = FALSE)
   }
   if (!is.character(atpt_filter) || length(atpt_filter) != 1L) {
-    stop("atpt_filter must be a single character string", call. = FALSE)
+    cli::cli_abort("atpt_filter must be a single character string", call. = FALSE)
   }
   if (!output_format %in% c("pdf", "png")) {
-    stop("output_format must be one of 'pdf' or 'png'", call. = FALSE)
+    cli::cli_abort("output_format must be one of 'pdf' or 'png'", call. = FALSE)
   }
 
   # Verify input file exists
   advs_file <- file.path(data_path, "advs.xpt")
   if (!file.exists(advs_file)) {
-    stop(paste0("ADVS dataset not found: ", advs_file,
+    cli::cli_abort(paste0("ADVS dataset not found: ", advs_file,
                 "\nPlease verify data_path points to the directory containing advs.xpt"),
          call. = FALSE)
   }

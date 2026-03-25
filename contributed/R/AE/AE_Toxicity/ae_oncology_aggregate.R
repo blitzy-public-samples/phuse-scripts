@@ -50,7 +50,7 @@ safe_fisher <- function(a, c_val, b, d) {
 }
 
 # =============================================================================
-# aggregate_ae — Migrate SAS %aggregate (lines 5-192)
+# onc_aggregate — Migrate SAS %aggregate (lines 5-192)
 # =============================================================================
 #' Aggregate oncology AE data by toxicity grade per arm
 #'
@@ -68,7 +68,7 @@ safe_fisher <- function(a, c_val, b, d) {
 #' @param report      Logical; generate rpt_key / rpt_missing metadata.
 #' @param output      Logical; generate a column-subset output data frame.
 #' @return Named list: data, output, rpt_key, rpt_missing.
-aggregate_ae <- function(dsin, dsout_name, by_vars,
+onc_aggregate <- function(dsin, dsout_name, by_vars,
                          arm_count, arm_subjcnt, arm_names,
                          toxgr_min = 1L, toxgr_max = 5L,
                          toxgr_grp5_sw = 1L,
@@ -318,7 +318,7 @@ rpt_key <- function(dsout_name, key, max_arg, meddra = "N",
 # =============================================================================
 #' Summarise missing toxicity grade counts across the aggregated dataset
 #'
-#' @param ds                   Aggregated data frame from aggregate_ae().
+#' @param ds                   Aggregated data frame from onc_aggregate().
 #' @param ds_name              Character label for this dataset.
 #' @param arm_count            Integer number of arms.
 #' @param existing_rpt_missing Optional existing rpt_missing tibble to append to.
@@ -352,7 +352,7 @@ rpt_missing <- function(ds, ds_name, arm_count,
 }
 
 # =============================================================================
-# compare_ae — Migrate SAS %compare (lines 260-661)
+# onc_compare — Migrate SAS %compare (lines 260-661)
 # =============================================================================
 #' Pairwise comparison of oncology AE rates between two arms
 #'
@@ -380,7 +380,7 @@ rpt_missing <- function(ds, ds_name, arm_count,
 #' @param all_arm        Optional data frame with arm_num column for Cartesian
 #'                       product construction; if NULL, uses c(exp, ctl).
 #' @return Named list: data, output, output_cc_ind, rpt_key, rpt_missing.
-compare_ae <- function(dsin, dsout_name, by_vars,
+onc_compare <- function(dsin, dsout_name, by_vars,
                        exp, ctl, arm_count, arm_subjcnt, arm_names,
                        cmpgr = "all", cc = 0, cc_sw = 0, cc_whole = 1,
                        ae_rate_ci_sw = 1, toxgr_grp5_sw = 1,
@@ -451,7 +451,7 @@ compare_ae <- function(dsin, dsout_name, by_vars,
   # --- 6. Assign sequential term numbers (SAS lines 348-358) -----------------
   if (nrow(filtered) == 0L) {
     # Edge case: no data after filtering — return empty results
-    cli::cli_warn("No data remain after filtering for compare_ae({dsout_name}).")
+    cli::cli_warn("No data remain after filtering for onc_compare({dsout_name}).")
     return(list(data = dplyr::tibble(), output = dplyr::tibble(),
                 output_cc_ind = NULL, rpt_key = NULL, rpt_missing = NULL))
   }
@@ -819,7 +819,7 @@ compare_ae <- function(dsin, dsout_name, by_vars,
 #' header rows at group boundaries, and separates output from indicators.
 #'
 #' @param ds          Data frame to format (output or output_cc_ind from
-#'                    compare_ae or aggregate_ae).
+#'                    onc_compare or onc_aggregate).
 #' @param ds_name     Character label matching an entry in rpt_key.
 #' @param rpt_key     rpt_key tibble (from rpt_key()).
 #' @param cc_sw       Continuity correction switch (0/1/2).

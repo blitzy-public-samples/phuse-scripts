@@ -36,7 +36,7 @@ library(dplyr)
 library(tidyr)
 library(purrr)
 library(stringr)
-library(Tplyr)
+# Tplyr not required by this script — removed per code review
 library(r2rtf)
 library(janitor)
 library(cli)

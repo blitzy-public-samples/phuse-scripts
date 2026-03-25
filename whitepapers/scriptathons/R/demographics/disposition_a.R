@@ -37,6 +37,7 @@ library(rlang)
 library(r2rtf)
 library(stringr)
 library(janitor)
+library(cli)
 
 # --------------------------------------------------------------------------
 # generate_disposition_a
@@ -56,15 +57,15 @@ generate_disposition_a <- function(data_path, output_path = "disposition_a.rtf")
   # INPUT VALIDATION
   # ==========================================================================
   if (!is.character(data_path) || length(data_path) != 1L) {
-    stop("data_path must be a single character string.", call. = FALSE)
+    cli::cli_abort("data_path must be a single character string.", call. = FALSE)
   }
   if (!is.character(output_path) || length(output_path) != 1L) {
-    stop("output_path must be a single character string.", call. = FALSE)
+    cli::cli_abort("output_path must be a single character string.", call. = FALSE)
   }
 
   adsl_file <- file.path(data_path, "adsl.xpt")
   if (!file.exists(adsl_file)) {
-    stop("ADSL transport file not found at: ", adsl_file, call. = FALSE)
+    cli::cli_abort("ADSL transport file not found at: ", adsl_file, call. = FALSE)
   }
 
   # ==========================================================================
@@ -86,7 +87,7 @@ generate_disposition_a <- function(data_path, output_path = "disposition_a.rtf")
                      "DCREASCD", "DSRAEFL", "DTHFL", "DCDECOD")
   missing_vars <- setdiff(required_vars, names(adsl))
   if (length(missing_vars) > 0L) {
-    stop("Required variables not found in ADSL: ",
+    cli::cli_abort("Required variables not found in ADSL: ",
          paste(missing_vars, collapse = ", "), call. = FALSE)
   }
 
