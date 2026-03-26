@@ -693,7 +693,7 @@ wpct_f_07_06 <- function(
 
         # Re-level STUDYVISITN_F for this page's studies only
         page_svn <- page_data %>%
-          dplyr::distinct(STUDYVISITN, STUDYVISITN_F) %>%
+          dplyr::distinct(STUDYVISITN, STUDYVISITN_F, AVISIT) %>%
           dplyr::arrange(STUDYVISITN)
         page_data <- page_data %>%
           dplyr::mutate(
