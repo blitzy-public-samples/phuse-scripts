@@ -111,7 +111,7 @@ Rating:
     Date: 03/10/2016
     Association: Accenture
     Stars: 4.5
-Dependencies:
+R_Dependencies:
   - package: haven
     version: ">= 2.5.5"
     purpose: "SAS/XPT data I/O"

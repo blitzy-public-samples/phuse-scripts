@@ -104,6 +104,40 @@ Rating:
     Date: 03/10/2016
     Association: Accenture
     Stars: 5
+R_Dependencies:
+  - package: haven
+    version: ">= 2.5.5"
+    purpose: "SAS/XPT data I/O"
+  - package: dplyr
+    version: ">= 1.1.0"
+    purpose: "Data manipulation (replaces DATA steps, PROC SQL)"
+  - package: tidyr
+    version: ">= 1.3.0"
+    purpose: "Data reshaping and pivoting"
+  - package: Tplyr
+    version: ">= 1.2.1"
+    purpose: "Clinical summary tables (replaces PROC FREQ, PROC MEANS)"
+  - package: r2rtf
+    version: ">= 1.1.1"
+    purpose: "RTF output generation"
+  - package: openxlsx
+    version: ">= 4.2.5"
+    purpose: "Excel output (replaces PCFILES engine)"
+  - package: janitor
+    version: ">= 2.2.0"
+    purpose: "SAS-compatible round-half-up rounding"
+  - package: cli
+    version: ">= 3.6.0"
+    purpose: "User-facing messages and errors"
+  - package: stringr
+    version: ">= 1.5.0"
+    purpose: "String manipulation (replaces SAS character functions)"
+  - package: forcats
+    version: ">= 1.0.0"
+    purpose: "Factor level management (replaces SAS format ordering)"
+  - package: purrr
+    version: ">= 1.0.0"
+    purpose: "Functional programming (replaces SAS array/macro loops)"
 Migration:
   source_file: tested/SAS/LB/liver_v2.sas
   source_manifest: tested/SAS/LB/liver_v2_sas.yml

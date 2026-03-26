@@ -257,11 +257,11 @@ adsl <- haven::read_xpt(file.path(config$data_paths$adam_path, "adsl.xpt"))
 adae <- haven::read_xpt(file.path(config$data_paths$adam_path, "adae.xpt"))
 
 # Access reference data
-exdosfrq <- readr::read_csv(file.path(config$data_paths$ref_path, "exposure_exdosfrq.csv"))
+exdosfrq <- readr::read_csv(config$reference_data$exposure_exdosfrq)
 
 # Output paths
-output_rtf <- file.path(config$output_paths$rtf_path, "ae_summary.rtf")
-output_xlsx <- file.path(config$output_paths$xlsx_path, "ae_summary.xlsx")
+output_rtf <- file.path(config$output_paths$rtf_output_path, "ae_summary.rtf")
+output_xlsx <- file.path(config$output_paths$excel_output_path, "ae_summary.xlsx")
 ```
 
 **Configuration transformation from SAS:**
@@ -270,8 +270,8 @@ output_xlsx <- file.path(config$output_paths$xlsx_path, "ae_summary.xlsx")
 |-------------|-------------|
 | `%let data_path = /study/data;` | `config$data_paths$adam_path` (from YAML) |
 | `libname adam "&data_path" access=readonly;` | `haven::read_xpt(file.path(config$data_paths$adam_path, "adsl.xpt"))` |
-| `%include "&macros_path/ae_aggregate.sas";` | `source(file.path(config$r_macros_path, "ae_aggregate.R"))` |
-| `ods rtf file="&output_path/report.rtf";` | `r2rtf::write_rtf(tbl, file = file.path(config$output_paths$rtf_path, "report.rtf"))` |
+| `%include "&macros_path/ae_aggregate.sas";` | `source(file.path(config$r_source_paths$r_macros_path, "ae_aggregate.R"))` |
+| `ods rtf file="&output_path/report.rtf";` | `r2rtf::write_rtf(tbl, file = file.path(config$output_paths$rtf_output_path, "report.rtf"))` |
 
 ### 10. Reproducibility
 

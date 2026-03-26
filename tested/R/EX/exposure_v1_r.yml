@@ -133,7 +133,7 @@ Rating:
     Date: 03/10/2016
     Association: Accenture
     Stars: 5
-Dependencies:
+R_Dependencies:
   packages:
     - name: haven
       version: ">= 2.5.5"

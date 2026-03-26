@@ -163,7 +163,7 @@ Utility macros from `whitepapers/utilities/` (assert and util families), migrate
 | `whitepapers/utilities/assert_dset_exist.sas` | `whitepapers/utilities/R/assert_dset_exist.R` | CREATE | Dataset existence check → file.exists() or object existence check |
 | `whitepapers/utilities/assert_depend_crumbs.sas` | `whitepapers/utilities/R/assert_depend_crumbs.R` | CREATE | Dependency assertion → R function/package existence check |
 | `whitepapers/utilities/assert_var_exist.sas` | `whitepapers/utilities/R/assert_var_exist.R` | CREATE | Variable existence assertion → colnames() check |
-| `whitepapers/utilities/assert_macro_exist.sas` | `whitepapers/utilities/R/assert_macro_exist.R` | CREATE | Macro existence → assert_function_exist.R (R function existence check via exists() + is.function()) |
+| `whitepapers/utilities/assert_macro_exist.sas` | `whitepapers/utilities/R/assert_function_exist.R` | CREATE | Macro existence → R function existence check via exists() + is.function(); renamed from assert_macro_exist to assert_function_exist for R idiom |
 | `whitepapers/utilities/util_boxplot_block_ranges.sas` | `whitepapers/utilities/R/util_boxplot_block_ranges.R` | CREATE | Block range calculation → R numeric computation |
 | `whitepapers/utilities/util_axis_order.sas` | `whitepapers/utilities/R/util_axis_order.R` | CREATE | Axis ordering → R factor levels + ggplot2 scale manipulation |
 | `whitepapers/utilities/util_count_unique_values.sas` | `whitepapers/utilities/R/util_count_unique_values.R` | CREATE | Unique value count → dplyr::n_distinct |
@@ -171,9 +171,9 @@ Utility macros from `whitepapers/utilities/` (assert and util families), migrate
 | `whitepapers/utilities/util_get_reference.sas` | `whitepapers/utilities/R/util_get_reference.R` | CREATE | Reference line data → R tibble getter |
 | `whitepapers/utilities/util_get_var_min_max.sas` | `whitepapers/utilities/R/util_get_var_min_max.R` | CREATE | Variable min/max → dplyr::summarise(min, max) |
 | `whitepapers/utilities/util_labels_from_var.sas` | `whitepapers/utilities/R/util_labels_from_var.R` | CREATE | SAS labels → haven/attribute-based label extraction |
-| `whitepapers/utilities/util_value_of_macro.sas` | `whitepapers/utilities/R/util_value_of_macro.R` | CREATE | Macro value resolution → util_value_of_param.R (R parameter getter) |
+| `whitepapers/utilities/util_value_of_macro.sas` | `whitepapers/utilities/R/util_value_of_param.R` | CREATE | Macro value resolution → R parameter getter; renamed from util_value_of_macro to util_value_of_param for R idiom |
 | `whitepapers/utilities/util_passfail.sas` | `whitepapers/utilities/R/util_passfail.R` | CREATE | PASS/FAIL testing → testthat expect_* wrappers |
-| `whitepapers/utilities/util_proc_template.sas` | `whitepapers/utilities/R/util_proc_template.R` | CREATE | PhUSEboxplot GTL template registration → ggplot2 theme_phuse() |
+| `whitepapers/utilities/util_proc_template.sas` | `whitepapers/utilities/R/util_ggplot_theme.R` | CREATE | PhUSEboxplot GTL template registration → ggplot2 theme_phuse(); renamed from util_proc_template to util_ggplot_theme for R idiom |
 | `whitepapers/utilities/util_boxplot_visit_ranges.sas` | `whitepapers/utilities/R/util_boxplot_visit_ranges.R` | CREATE | Visit range calculation → R date/visit computation |
 
 ---
@@ -209,8 +209,8 @@ Community contributed SAS scripts from `contributed/`, migrated to R equivalents
 
 | SAS Source File | R Target File | Transformation | Key R Changes |
 |---|---|---|---|
-| `contributed/AE/ae_aggregate.sas` | `contributed/R/AE/AE_Severity/ae_aggregate.R` | CREATE | %ab/%cd macros → ae_ab()/ae_cd() R functions with dplyr aggregation |
-| `contributed/AE/ae_oncology_aggregate.sas` | `contributed/R/AE/AE_Toxicity/ae_oncology_aggregate.R` | CREATE | %aggregate/%compare → onc_aggregate()/onc_compare() with dplyr + fisher.test |
+| `contributed/AE/AE_Severity/ae_aggregate.sas` | `contributed/R/AE/AE_Severity/ae_aggregate.R` | CREATE | %ab/%cd macros → ae_ab()/ae_cd() R functions with dplyr aggregation |
+| `contributed/AE/AE_Toxicity/ae_oncology_aggregate.sas` | `contributed/R/AE/AE_Toxicity/ae_oncology_aggregate.R` | CREATE | %aggregate/%compare → onc_aggregate()/onc_compare() with dplyr + fisher.test |
 | `contributed/AE/ZZ_Utilities/xml_output.sas` | `contributed/R/AE/ZZ_Utilities/xml_output.R` | CREATE | SpreadsheetML backbone → openxlsx workbook with style gallery |
 | `contributed/AE/ZZ_Utilities/data_checks.sas` | `contributed/R/AE/ZZ_Utilities/data_checks.R` | CREATE | %chk_var/%chk_dm validation → R check functions with tryCatch |
 | `contributed/AE/ZZ_Utilities/err_output.sas` | `contributed/R/AE/ZZ_Utilities/err_output.R` | CREATE | %error_summary XML → openxlsx error workbook |
@@ -288,8 +288,8 @@ SAS YAML governance manifests are mapped to corresponding R manifests for each t
 
 | SAS Manifest | R Manifest | Key Fields |
 |---|---|---|
-| `tested/SAS/AE/ae_v1upd_sas.yml` | `tested/R/AE/ae_v1upd_r.yml` | Language: R, Runtime: R 4.3+, Script: ae_v1upd.R |
-| `tested/SAS/AE/ae_oncology_v1upd_sas.yml` | `tested/R/AE/ae_oncology_v1upd_r.yml` | Language: R, Runtime: R 4.3+ |
+| `tested/SAS/AE/ae_v1upd_sas.yml` | `tested/R/AE/ae_v1upd_r.yml` | Language: R, Runtime: R 4.3+, Script: ae_v1upd.R (covers both severity and oncology panels) |
+| `tested/SAS/AE/ae_oncology_v1upd_sas.yml` | `tested/R/AE/ae_v1upd_r.yml` | Language: R, Runtime: R 4.3+ (consolidated into single AE manifest covering both ae_v1upd.R and ae_oncology_v1upd.R) |
 | `tested/SAS/DM/demographics_v1_sas.yml` | `tested/R/DM/demographics_v1_r.yml` | Language: R, Runtime: R 4.3+ |
 | `tested/SAS/DS/disposition_v2_sas.yml` | `tested/R/DS/disposition_v2_r.yml` | Language: R, Runtime: R 4.3+ |
 | `tested/SAS/EX/exposure_v1_sas.yml` | `tested/R/EX/exposure_v1_r.yml` | Language: R, Runtime: R 4.3+ |

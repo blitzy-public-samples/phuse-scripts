@@ -41,7 +41,7 @@ We maintain Task Lists (to-do lists) for both:
 
 ### Overview
 
-This repository includes R implementations of SAS clinical reporting scripts, being migrated for use in regulated pharmaceutical environments. The foundation layer (infrastructure, core utilities, macros, and standalone scripts) has been migrated, with remaining domain panels and WPCT figures to follow in subsequent milestones. The R migration targets **100% functional parity** with the original SAS programs — every statistic, count, and formatted value produced by SAS is reproduced by the corresponding R script.
+This repository includes R implementations of SAS clinical reporting scripts, migrated for use in regulated pharmaceutical environments. All layers of the migration have been completed — infrastructure, core utilities, macros, standalone scripts, all 6 tested domain panels (AE, DM, DS, EX, LB, MedDRA), and all 8 WPCT standard figures (F.07.01 through F.07.08). The R migration targets **100% functional parity** with the original SAS programs — every statistic, count, and formatted value produced by SAS is reproduced by the corresponding R script.
 
 SAS source files are preserved in their original locations (e.g., `tested/SAS/`) alongside the new R equivalents (e.g., `tested/R/`). This side-by-side structure ensures full traceability between SAS originals and R implementations. A comprehensive traceability matrix is available in [`docs/migration_traceability.md`](docs/migration_traceability.md).
 
