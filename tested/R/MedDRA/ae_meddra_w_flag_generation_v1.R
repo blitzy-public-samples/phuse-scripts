@@ -729,7 +729,7 @@ load_and_run_meddra_panel <- function(study_path,
       meddra_data <- if (grepl("\\.xpt$", meddra_file, ignore.case = TRUE)) {
         haven::read_xpt(meddra_file)
       } else {
-        haven::read_xpt(meddra_file)
+        haven::read_sas(meddra_file)
       }
     } else {
       cli::cli_warn("No MedDRA hierarchy file found in: {.path {meddra_path}}")
@@ -753,7 +753,7 @@ load_and_run_meddra_panel <- function(study_path,
       dme_data <- if (grepl("\\.xpt$", dme_file, ignore.case = TRUE)) {
         haven::read_xpt(dme_file)
       } else {
-        haven::read_xpt(dme_file)
+        haven::read_sas(dme_file)
       }
     } else {
       cli::cli_warn("No DME file found in: {.path {dme_path}}")
