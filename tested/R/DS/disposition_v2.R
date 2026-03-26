@@ -736,7 +736,7 @@ ds_by_arm <- function(data, checks, dm_ds_fallback = NULL) {
   # --- Step 12: Reorder columns ---
   # Build final column order: dscat_display, dsscat_display, dsdecod, then
   # for each arm: total_count_N, num_by_cat_N, pct_N, arm_N
-  arm_col_groups <- lapply(seq_len(num_random), function(n) {
+  arm_col_groups <- purrr::map(seq_len(num_random), function(n) {
     c(paste0("total_count_", n),
       paste0("num_by_cat_", n),
       paste0("pct_", n),

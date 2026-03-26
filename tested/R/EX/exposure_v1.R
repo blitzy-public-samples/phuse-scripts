@@ -41,7 +41,6 @@ library(dplyr)
 library(tidyr)
 library(readr)
 library(haven)
-library(survival)
 library(ggplot2)
 library(Tplyr)
 library(r2rtf)
@@ -1714,7 +1713,9 @@ run_exposure_panel <- function(dm, ex,
 #    - haven: SAS XPT data I/O (AAP mandated)
 #    - dplyr/tidyr: core data manipulation (AAP mandated over base R)
 #    - readr: CSV reading for exposure_exdosfrq.csv
-#    - survival: loaded for availability if formal retention analysis needed
+#    - survival: NOT imported — Analysis 1 uses cumulative counting matching
+#      SAS DATA step behavior (not Kaplan-Meier); no PROC LIFETEST equivalent
+#      needed. Package available via renv.lock if future extension is required.
 #    - ggplot2: loaded for availability for visualization
 #    - Tplyr: loaded for availability for formatted clinical tables
 #    - r2rtf: loaded for availability for RTF output

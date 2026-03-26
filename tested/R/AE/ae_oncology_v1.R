@@ -23,37 +23,65 @@ library(janitor)    # SAS-compatible rounding via round_half_up()
 library(openxlsx)   # Excel output replacing SAS SpreadsheetML XML generation
 
 # --- Source internal dependencies ---------------------------------------------
-# All paths are relative to repository root; sourced for environment
-# availability of the functions defined in each module.
-# NOTE: In production use, callers should ensure the working directory
-# is set to the repository root, or adjust paths via a config object.
+# Replaces SAS: %include "&utilpath.\ae_setup.sas"; etc. (lines 283-289)
+# Uses file.path() with script-relative paths for portability. Each
+# source() call is guarded to prevent re-sourcing if already loaded.
+local({
+  # Determine script directory for relative path resolution
+  this_dir <- tryCatch(
+    dirname(sys.frame(1L)$ofile),
+    error = function(e) NULL
+  )
 
-# Determine the directory of this script for relative sourcing
-.ae_onc_v1_script_dir <- tryCatch(
-  normalizePath(dirname(sys.frame(1)$ofile), mustWork = FALSE),
-  error = function(e) "."
-)
-.ae_onc_v1_repo_root <- tryCatch(
-  normalizePath(file.path(.ae_onc_v1_script_dir, "..", "..", ".."),
-                mustWork = FALSE),
-  error = function(e) "."
-)
+  # Build base paths: macros and utilities directories relative to this file
+  if (!is.null(this_dir)) {
+    macro_dir <- file.path(dirname(this_dir), "macros")
+    util_dir  <- file.path(dirname(this_dir), "utilities")
+  } else {
+    # Fallback: search relative to working directory (CWD = project root)
+    macro_dir <- "tested/R/macros"
+    util_dir  <- "tested/R/utilities"
+    if (!dir.exists(macro_dir)) macro_dir <- file.path("..", "macros")
+    if (!dir.exists(util_dir))  util_dir  <- file.path("..", "utilities")
+  }
 
-# Source dependency modules using repo-root-relative paths
-# These correspond to SAS %include statements (lines 283-289 of ae_oncology_v1.sas)
-source(file.path(.ae_onc_v1_repo_root, "tested", "R", "utilities", "ae_setup.R"))
-source(file.path(.ae_onc_v1_repo_root, "tested", "R", "macros",
-                 "ae_oncology_aggregate.R"))
-source(file.path(.ae_onc_v1_repo_root, "tested", "R", "macros",
-                 "ae_oncology_output.R"))
-source(file.path(.ae_onc_v1_repo_root, "tested", "R", "utilities",
-                 "data_checks.R"))
-source(file.path(.ae_onc_v1_repo_root, "tested", "R", "utilities",
-                 "err_output.R"))
-source(file.path(.ae_onc_v1_repo_root, "tested", "R", "utilities",
-                 "sl_gs_output.R"))
-source(file.path(.ae_onc_v1_repo_root, "tested", "R", "utilities",
-                 "xml_output.R"))
+  # Source utility files first (foundational layer)
+  xml_path <- file.path(util_dir, "xml_output.R")
+  if (file.exists(xml_path) && !exists("create_workbook", mode = "function")) {
+    source(xml_path, local = FALSE)
+  }
+
+  sl_path <- file.path(util_dir, "sl_gs_output.R")
+  if (file.exists(sl_path) && !exists("group_subset_pp", mode = "function")) {
+    source(sl_path, local = FALSE)
+  }
+
+  dc_path <- file.path(util_dir, "data_checks.R")
+  if (file.exists(dc_path) && !exists("chk_var", mode = "function")) {
+    source(dc_path, local = FALSE)
+  }
+
+  err_path <- file.path(util_dir, "err_output.R")
+  if (file.exists(err_path) && !exists("error_summary", mode = "function")) {
+    source(err_path, local = FALSE)
+  }
+
+  setup_path <- file.path(util_dir, "ae_setup.R")
+  if (file.exists(setup_path) && !exists("setup_validation", mode = "function")) {
+    source(setup_path, local = FALSE)
+  }
+
+  # Source macro files (analytical layer)
+  agg_path <- file.path(macro_dir, "ae_oncology_aggregate.R")
+  if (file.exists(agg_path) && !exists("onc_aggregate", mode = "function")) {
+    source(agg_path, local = FALSE)
+  }
+
+  out_path <- file.path(macro_dir, "ae_oncology_output.R")
+  if (file.exists(out_path) && !exists("onc_out_workbook", mode = "function")) {
+    source(out_path, local = FALSE)
+  }
+})
 
 
 # ==============================================================================
