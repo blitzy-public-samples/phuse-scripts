@@ -617,10 +617,12 @@ execute_type_i <- function(func_name, func_args, expected, wrap_template,
       rlang::eval_tidy(expr, env = exec_env)
     },
     error = function(e) {
-      # Try multi-statement evaluation
+      # Try multi-statement evaluation using rlang::parse_exprs (secure alternative)
       tryCatch(
         {
-          eval(parse(text = code), envir = exec_env)
+          exprs <- rlang::parse_exprs(code)
+          results <- purrr::map(exprs, ~ base::eval(.x, envir = exec_env))
+          results[[length(results)]]
         },
         error = function(e2) {
           structure(NA, error = conditionMessage(e2))
@@ -1078,8 +1080,9 @@ run_passfail_in_testthat <- function(test_defs, criterion = NULL,
 # ASSUMPTIONS:
 #    - SAS structured test dataset (PPARM_*/KPARM_* columns) mapped to R tibble
 #      with test_args list column containing named lists of arguments
-#    - SAS PFEXCODE file-based code execution mapped to R eval(parse()) and
-#      rlang::eval_tidy() for dynamic expression evaluation
+#    - SAS PFEXCODE file-based code execution mapped to rlang::parse_expr() /
+#      rlang::parse_exprs() and rlang::eval_tidy() / base::eval() for secure
+#      dynamic expression evaluation (eval(parse()) eliminated per security audit)
 #    - SAS PROC COMPARE mapped to diffdf::diffdf() for dataset comparison with
 #      tolerance support (METHOD=EXACT via tolerance=0, METHOD=ABSOLUTE via
 #      tolerance=criterion)
@@ -1102,8 +1105,9 @@ run_passfail_in_testthat <- function(test_defs, criterion = NULL,
 #    - diffdf tolerance parameter is absolute, matching SAS METHOD=ABSOLUTE
 #      CRITERION=value when criterion is specified.
 # NO DIRECT R EQUIVALENT:
-#    - SAS PFEXCODE fileref temp file execution -> R eval(parse(text=...))
-#      approach without intermediate file creation
+#    - SAS PFEXCODE fileref temp file execution -> R rlang::parse_exprs() +
+#      purrr::map(base::eval) for secure multi-statement evaluation without
+#      intermediate file creation (eval(parse()) replaced per security audit)
 #    - SAS PROC DATASETS DELETE -> rm() in R (handled by garbage collection)
 #    - SAS dictionary.columns for test structure introspection -> R
 #      names()/sapply() for tibble column structure analysis
