@@ -69,8 +69,11 @@ if (!exists("create_workbook_styles", mode = "function") ||
     !exists("annotate_data", mode = "function") ||
     !exists("write_annotated", mode = "function")) {
   local({
+    # Determine script directory safely (R < 4.4 lacks base %||%)
+    script_dir <- tryCatch(dirname(sys.frame(1L)$ofile), error = function(e) ".")
+    if (is.null(script_dir) || !nzchar(script_dir)) script_dir <- "."
     candidates <- c(
-      file.path(dirname(sys.frame(1L)$ofile %||% "."), "xml_output.R"),
+      file.path(script_dir, "xml_output.R"),
       "contributed/R/MedDRA/xml_output.R",
       file.path(".", "xml_output.R")
     )
