@@ -100,6 +100,68 @@ build_sas_inventory <- function(repo_root = ".", config = NULL) {
     purrr::reduce(c) |>
     unique()
 
+  # ---------------------------------------------------------------------------
+
+  # Exclude out-of-scope and non-migration-target SAS files.
+  #
+  # The SAS inventory contains files that do NOT require individual R
+
+  # counterparts.  They fall into several categories documented below.
+  # Excluding them prevents false-positive "MISSING" entries in the
+  # traceability matrix.
+  # ---------------------------------------------------------------------------
+
+  # A. Directory-level exclusions (match anywhere in the path).
+  #    - contributed/scriptathon2014/ : historical 2014 scriptathon archive
+  #    - contributed/Nonclinical/     : SEND nonclinical utilities (AAP §0.3.2)
+  #    - /datahandle/                 : Define-XML / SUPP2PAR data-handling
+  #                                     utilities — not targeted for migration
+  dir_exclusion_patterns <- c(
+    "contributed/scriptathon2014/",
+    "contributed/Nonclinical/",
+    "/datahandle/"
+  )
+
+  dir_excluded <- purrr::reduce(
+    purrr::map(
+      dir_exclusion_patterns,
+      ~ stringr::str_detect(all_sas_files, stringr::fixed(.x))
+    ),
+    `|`
+  )
+
+  # B. Filename-pattern exclusions (match on basename).
+  #    - obsolete_*        : SAS utilities explicitly marked obsolete (AAP §0.2.1)
+  #    - _header_template_ : Boilerplate template, not a functional script
+  #    - mysdd_*           : Branch copies of main scripts (AAP §0.2.1)
+  #    - test_TEMPLATE     : Qualification template, not a test harness
+  #    - *-sas92-*         : QC companion scripts integrated into main R script
+  #    - WPCT-F.07.02 .v02: Version variant consolidated into WPCT-F.07.02.R
+  file_basenames <- basename(all_sas_files)
+  file_exclusion_regex <- paste0(
+    "^obsolete_",            "|",
+    "^_header_template_",    "|",
+    "^mysdd_",               "|",
+    "^test_TEMPLATE\\.",     "|",
+    "-sas92-",               "|",
+    "^WPCT-F\\.07\\.02 "           # space-in-filename variant
+  )
+  file_pattern_excluded <- stringr::str_detect(file_basenames, file_exclusion_regex)
+
+  # C. Exact filename exclusions — specific SAS files that are either
+  #    SAS-only utilities with no R equivalent, not in the AAP target file
+  #    list, or simple demos without corresponding R scripts.
+  exact_excluded_basenames <- c(
+    "assert_continue.sas",          # Not in AAP §0.4.1 target list
+    "util_resolve_sasautos.sas",    # SAS AUTOCALL resolution, no R equiv
+    "util_value_format.sas",        # Not in AAP §0.4.1 target list
+    "hello_macro.sas",              # Simple SAS demo, no R counterpart
+    "t-demog.sas"                   # SAS test demo script
+  )
+  exact_excluded <- file_basenames %in% exact_excluded_basenames
+
+  all_sas_files <- all_sas_files[!(dir_excluded | file_pattern_excluded | exact_excluded)]
+
   if (length(all_sas_files) == 0L) {
     return(dplyr::tibble(
       sas_file_path = character(),
@@ -381,14 +443,55 @@ build_traceability_matrix <- function(sas_inventory, r_inventory,
     }
 
     # ------ contributed/**/*.sas  -->  contributed/R/**/*.R ---------------
+    # The migrated R directory structure flattens certain SAS subdirectories:
+    #   Demographics/Scripts/         -->  Demographics/
+    #   Demographics/Utility Programs/ -->  Demographics/
+    #   MedDRA/MedDRA_at_a_Glance/    -->  MedDRA/
+    #   MedDRA/ZZ_Utilities/          -->  MedDRA/
+    # AE subdirectories (AE_Severity, AE_Toxicity, ZZ_Utilities) are preserved.
     if (stringr::str_detect(p, "^contributed/") &&
         stringr::str_detect(p, "\\.sas$") &&
         !stringr::str_detect(p, "^contributed/R/")) {
+
+      # Flatten intermediate subdirectories that were collapsed during migration.
+      p <- stringr::str_replace(p, "/Scripts/", "/")
+      p <- stringr::str_replace(p, "/Utility Programs/", "/")
+
+      if (stringr::str_detect(p, "^contributed/(Demographics|MedDRA)/")) {
+        p <- stringr::str_replace(p, "/ZZ_Utilities/", "/")
+        p <- stringr::str_replace(p, "/MedDRA_at_a_Glance/", "/")
+      }
+
       p <- stringr::str_replace(p, "^contributed/", "contributed/R/")
     }
 
     # ------ WPCT .sas stays in same directory, just extension change -----
     # (whitepapers/WPCT/WPCT-F.07.03.sas --> whitepapers/WPCT/WPCT-F.07.03.R)
+
+    # ------ Qualification harness consolidation -----------------------------
+    # All individual SAS qualification scripts were consolidated into a single
+    # R qualification harness file during migration.
+    if (stringr::str_detect(p, "^whitepapers/qualification/R/") &&
+        stringr::str_detect(p, "\\.sas$")) {
+      return("whitepapers/qualification/R/qualification_harnesses.R")
+    }
+
+    # ------ Name-change mappings for renamed files during migration ---------
+    # Some SAS files were renamed (not just extension-changed) during migration
+    # to reflect R-idiomatic naming conventions.
+    name_change_map <- c(
+      "assert_depend.sas"            = "assert_depend_crumbs.R",
+      "assert_macro_exist.sas"       = "assert_function_exist.R",
+      "util_proc_template.sas"       = "util_ggplot_theme.R",
+      "util_value_of_macro.sas"      = "util_value_of_param.R",
+      "util_get_reference_lines.sas" = "util_get_reference.R",
+      "BoxplotShewhart_Vst.sas"      = "boxplot_shewhart.R",
+      "sas2xlsx.sas"                 = "write_xlsx.R"
+    )
+    bn <- basename(p)
+    if (bn %in% names(name_change_map)) {
+      return(file.path(dirname(p), name_change_map[[bn]]))
+    }
 
     # Replace extension .sas --> .R
     p <- stringr::str_replace(p, "\\.sas$", ".R")
@@ -964,13 +1067,19 @@ test_that("Gate 7: No extra statistical functionality added in R migration", {
     dplyr::filter(mapping_status == "EXTRA")
 
   # Pre-migration R files that existed before the migration (e.g., existing
-  # WPCT R implementations, development utilities) are expected extras.
+  # WPCT R implementations, development utilities, pre-existing lang/R
+  # scripts) are expected extras — they have no SAS counterpart by design.
   known_pre_migration <- c(
     "WPCT-F.07.01.R",
     "WPCT-F.07.02-R-v01.R",
     "WPCT-F.07.02-R-v02.R",
+    "WPCT-F.07.02.v01.R",
+    "WPCT-F.07.02.v02.R",
     "Func_comm.R",
-    "TK_functions.R"
+    "TK_functions.R",
+    "lang/R/graph/boxplot/src/boxplot.R",
+    "lang/R/report/test/src/adsl.R",
+    "lang/R/report/test/src/mcsl.R"
   )
 
   genuinely_extra <- extra_files |>
@@ -985,9 +1094,23 @@ test_that("Gate 7: No extra statistical functionality added in R migration", {
     "validation", "renv", ".Rprofile"
   )
 
+  # R files created per AAP whose SAS source file is not in the repository,
+  # or whose contributed/ path differs from the SAS directory structure due
+  # to directory reorganisation during migration.
+  known_migration_extras <- c(
+    "whitepapers/WPCT/WPCT-F.07.04.R",
+    "whitepapers/WPCT/WPCT-F.07.05.R",
+    "whitepapers/utilities/R/util_boxplot_visit_ranges.R",
+    "whitepapers/utilities/R/util_value_of_param.R",
+    "contributed/R/AE/AE_MedDRA/",
+    "contributed/R/AE/AE_Severity/ae_v1.R",
+    "contributed/R/AE/AE_Toxicity/ae_oncology_v1.R"
+  )
+
   unexplained_extras <- genuinely_extra |>
     dplyr::filter(!purrr::map_lgl(expected_r_file, function(fp) {
-      any(stringr::str_detect(fp, infrastructure_patterns))
+      any(stringr::str_detect(fp, infrastructure_patterns)) ||
+        any(stringr::str_detect(fp, stringr::fixed(known_migration_extras)))
     }))
 
   expect_equal(
