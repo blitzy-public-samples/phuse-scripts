@@ -1,0 +1,180 @@
+KeyWords: DS, Disposition
+Script:
+  Desc   : >
+    The Disposition Analysis details the number and percent of cases
+     that correspond to each Disposition category.
+  Name   : disposition_v2.R
+  GCR    : r135
+  SRV    : 12345
+  Source : FDA JumpStart
+  Target : https://github.com/phuse-org/phuse-scripts/blob/master/tested/R/DS/disposition_v2.R
+  Title  : Disposition Analysis Panel
+  Topic  : Disposition Analysis
+  Type   : Analysis
+  Subtype: TFL
+Package:
+  name : R Analysis Panels
+  title: FDA JumpStart analysis package - R Migration
+Language:
+  name   : R
+  version: ">= 4.3.0"
+Comments: >
+  R migration of the SAS Disposition Analysis Panel (disposition_v2.sas).
+  The Disposition Analysis provides the user with the four analyses
+  listed below, implemented using idiomatic R with tidyverse pipelines.
+  Analysis 1: Disposition Events by Arm for All Subjects
+    Provides a table that contains the frequency and percent of total by
+    treatment arm for each disposition event broken down by category and
+     sub-category as submitted by the sponsor.
+    R implementation: dplyr group_by/summarise pipelines with Tplyr-style
+     denominator logic and janitor::round_half_up() for SAS-compatible rounding.
+  Analysis 2: Disposition Events by Arm for Exposed Subjects
+    For subjects that had at least one drug exposure provides a table that
+     contains the frequency and percent of total by treatment arm for each
+     disposition event broken down by category and sub-category as submitted
+     by the sponsor.
+    R implementation: dplyr semi_join for exposed population filtering,
+     same aggregation pipeline as Analysis 1.
+  Analysis 3: Time to Disposition Event by Arm for All Subjects
+    For each disposition event in a chosen category and subcategory, provides
+     a graph showing the cumulative proportion of subject disposition events
+     over time, using the study day.
+    R implementation: Manual cumulative proportion computation via dplyr
+     cumsum with day-sequence expansion, ggplot2 for visualization.
+  Analysis 4: Time to Disposition Event by Arm for Exposed Subjects
+    For each disposition event in a chosen category and subcategory, provides
+     a graph showing the cumulative proportion of exposed subject disposition
+     events over time, using the study day.
+    R implementation: Same cumulative proportion approach as Analysis 3
+     applied to exposed-subjects population.
+  Dataset Requirements:
+     Demographics           (DM)
+     Disposition               (DS)
+     Exposure               (EX)
+  Variable Requirements:
+     DM      - Actual Arm                     (ACTARM)
+          - Planned Treatment Arm          (ARM)
+          - Subject ID                    (USUBJID)
+          - Subject Reference Start Date/Time     (RFSTDTC)
+          - Planned Arm Code               (ARMCD)
+     DS     - Subject ID                         (USUBJID)
+          - Standardized Disposition Term     (DSDECOD)
+          - Study Day of Start of Disposition Event     (DSSTDY)
+          -                                         (DSSTDTC)
+          - Category for Disposition Event     (DSCAT)
+          -                                    (DSSCAT)
+     EX     - Subject ID                    (USUBJID)
+Inputs:
+  datasets: dat1, dat2, dat3
+  P1: String - dataset name
+  P2: Number - depart id
+  P3: String - subject id
+Outputs:
+  datasets: out1, out2, out3
+  O1:
+  O2:
+Authors:
+  - name   : Andreas Anastassopoulos
+    email  : andreas.anastassapoulos@us.ibm.com
+    company: FDA/IBM
+    date   : 12/09/2009
+  - name   : Blitzy Migration Agent
+    email  : agent@blitzy.com
+    company: Blitzy
+    date   : 03/24/2026
+    note   : SAS-to-R migration of disposition_v2.sas
+Qualification:
+  LastQualDate: MM/DD/YYYY
+  LastQualBy: FirstName LastName
+  Stage: T
+  Document: a link to latest documentation
+  Note: C - Contributed; D - Development; T - Testing; Q - Qualified
+Stages:
+  - Date: 02/02/2016
+    Name: Austin Taylor <Austin.Taylor@fda.hhs.gov>
+    Stage: C
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/SpecDocs/Disposition%20Analysis%20Specifications%20(12-8-2015).doc
+  - Date: 03/08/2016
+    Name: Madhusudhan Reddy Parasani
+    Stage: T
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/DM/disposition_v2.docx
+  - Date: 03/24/2026
+    Name: Blitzy Migration Agent
+    Stage: T
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/R/DS/disposition_v2.R
+    Note: SAS-to-R migration - functional parity with disposition_v2.sas
+Rating:
+  - User: Madhusudhan Reddy Parasani
+    Date: 03/08/2016
+    Association: Accenture
+    Stars: 4.5
+  - User: htu
+    Date: 03/10/2016
+    Association: Accenture
+    Stars: 5
+R_Dependencies:
+  - name: haven
+    version: "2.5.5"
+    purpose: SAS data I/O for reading CDISC ADaM/SDTM XPT datasets
+  - name: dplyr
+    version: ">= 1.1.0"
+    purpose: Core data manipulation replacing SAS DATA steps and PROC SQL
+  - name: tidyr
+    version: ">= 1.3.0"
+    purpose: Reshaping and missing value handling replacing SAS PROC TRANSPOSE
+  - name: survival
+    version: ">= 3.5-0"
+    purpose: Survival analysis functions for time-to-event computations
+  - name: survminer
+    version: ">= 0.4.9"
+    purpose: Survival visualization for cumulative event curves
+  - name: Tplyr
+    version: "1.2.1"
+    purpose: Clinical summary table grammar with denominator logic
+  - name: r2rtf
+    version: "1.1.1"
+    purpose: RTF/PDF output generation replacing SAS ODS RTF/PDF
+  - name: openxlsx
+    version: ">= 4.2.5"
+    purpose: Excel workbook output replacing SAS PCFILES/JET engine
+  - name: janitor
+    version: ">= 2.2.0"
+    purpose: SAS-compatible round-half-up rounding behavior
+  - name: cli
+    version: ">= 3.6.0"
+    purpose: Informative user-facing error and warning messages
+  - name: lubridate
+    version: ">= 1.9.0"
+    purpose: Date/time handling replacing SAS date arithmetic
+  - name: forcats
+    version: ">= 1.0.0"
+    purpose: Factor manipulation replacing SAS FORMAT-based ordering
+  - name: ggplot2
+    version: ">= 3.4.0"
+    purpose: Visualization for cumulative percentage charts
+  - name: stringr
+    version: ">= 1.5.0"
+    purpose: String manipulation replacing SAS character functions
+  - name: purrr
+    version: ">= 1.0.0"
+    purpose: Functional programming replacing SAS array/macro loops
+  - name: rlang
+    version: ">= 1.1.0"
+    purpose: Tidy evaluation support for programmatic column references
+  - name: tibble
+    version: ">= 3.2.0"
+    purpose: Enhanced data frames for structured return values
+Migration:
+  source: tested/SAS/DS/disposition_v2.sas
+  target: tested/R/DS/disposition_v2.R
+  type: SAS-to-R
+  parity: functional
+  date: 03/24/2026
+  notes: >
+    Full functional parity migration of SAS disposition analysis panel.
+    Seven SAS macros (%params, %ds_prelim_check, %ds_setup, %ds_by_arm,
+    %time_to_event, %ds_out, %ds) migrated to seven parameterized R
+    functions. All date arithmetic preserves SAS +1 rule for same-day
+    and post-reference dates. Rounding uses janitor::round_half_up()
+    for SAS-compatible behavior. Missing values map to NA (not zero)
+    except for deliberate display zero-fill matching SAS PROC STDIZE.

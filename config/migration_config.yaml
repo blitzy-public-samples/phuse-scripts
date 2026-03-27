@@ -1,0 +1,588 @@
+# =============================================================================
+# PhUSE CS WG5 Standard Analyses — Master Migration Configuration
+# =============================================================================
+#
+# PURPOSE:
+#   Centralized YAML configuration that replaces ALL hardcoded SAS paths
+#   (%let global macro variables, libname statements, hardcoded folder paths)
+#   with parameterized entries for the SAS-to-R migration.
+#
+# LOADING IN R:
+#   config <- yaml::read_yaml("config/migration_config.yaml")
+#
+# ACCESSING VALUES:
+#   config$study$study_id
+#   config$data_paths$adam_path
+#   haven::read_xpt(file.path(config$data_paths$adam_path, "adsl.xpt"))
+#   source(file.path(config$r_source_paths$r_macros_path, "ae_aggregate.R"))
+#
+# REPLACES:
+#   - All SAS %let global macro variables (studyid, ndabla, study_lag, etc.)
+#   - All SAS libname statements (libname inlib, libname meddra, etc.)
+#   - All hardcoded file paths (%let studypath, %let outpath, etc.)
+#   - All SAS %include path resolution (%let saspath, %let utilpath, etc.)
+#
+# NOTE:
+#   All paths are RELATIVE to the repository root and use forward slashes
+#   for cross-platform compatibility. No absolute paths are permitted.
+#   Users must configure null paths (marked ~) before running analyses
+#   that require those resources.
+#
+# =============================================================================
+
+# =============================================================================
+# STUDY SETTINGS
+# =============================================================================
+# Replaces SAS %let globals found in every domain panel driver:
+#   %let studyid = ;          (ae_oncology_v1.sas:122, demographics_v1.sas:121,
+#                               liver_v2.sas:112, ae_meddra.sas:116)
+#   %let ndabla = ;           (ae_oncology_v1.sas:121, demographics_v1.sas:120,
+#                               liver_v2.sas:111)
+#   %let study_lag = 30;      (ae_oncology_v1.sas:141, ae_meddra.sas:140)
+#
+# R usage: config$study$study_id
+study:
+  # Study identifier
+  # Replaces SAS: %let studyid = ;
+  # R usage: config$study$study_id
+  study_id: "CDISCPILOT01"
+
+  # NDA/BLA number for regulatory submissions
+  # Replaces SAS: %let ndabla = ;
+  # R usage: config$study$nda_bla
+  nda_bla: ""
+
+  # Protocol identifier
+  # R usage: config$study$protocol
+  protocol: ""
+
+  # Study lag in days — window after last exposure where AEs are included
+  # Replaces SAS: %let study_lag = 30;
+  # R usage: config$study$study_lag
+  study_lag: 30
+
+  # Analysis population flags — map of flag variable names for subject filtering
+  # Replaces SAS population flag references across all domain panels
+  # R usage: config$study$analysis_populations$safety
+  analysis_populations:
+    safety: "SAFFL"
+    intent_to_treat: "ITTFL"
+    completers: "COMPLFL"
+    full_analysis: "FASFL"
+    per_protocol: "PPROTFL"
+
+# =============================================================================
+# DATA PATHS
+# =============================================================================
+# Replaces all SAS libname statements and %let studypath / data directory globals.
+# All paths are relative to the repository root.
+#
+# SAS patterns replaced:
+#   libname inlib "&studypath.";     (ae_oncology_v1.sas:112, demographics_v1.sas:127,
+#                                     disposition_v2.sas:124, liver_v2.sas:116)
+#   libname folder "&studypath.";    (liver_v2.sas:116)
+#   libname path "&studypath.";      (exposure_v1.sas:106)
+#   libname meddra "&meddrapath.";   (ae_oncology_v1.sas:127, ae_meddra.sas:121)
+#   libname dme "&dmepath.";         (ae_meddra.sas:135)
+#
+# R usage: haven::read_xpt(file.path(config$data_paths$adam_path, "adsl.xpt"))
+data_paths:
+  # Path to ADaM datasets directory containing XPT files
+  # Replaces SAS: libname inlib "&studypath."; / %let studypath = ;
+  # R usage: config$data_paths$adam_path
+  adam_path: "data/adam/cdisc"
+
+  # Path to split ADaM datasets (two pseudo-studies by SITEID parity)
+  # Replaces SAS: references to the cdisc-split data variant
+  # R usage: config$data_paths$adam_split_path
+  adam_split_path: "data/adam/cdisc-split"
+
+  # Path to SDTM datasets directory
+  # Replaces SAS: libname statements pointing to SDTM directories
+  # R usage: config$data_paths$sdtm_path
+  sdtm_path: "data/sdtm/TDF_SDTM_v1.0"
+
+  # Path to MedDRA hierarchy datasets (sas7bdat/xpt files)
+  # Replaces SAS: %let meddrapath = ; / libname meddra "&meddrapath.";
+  # (ae_oncology_v1.sas:125,127; ae_meddra.sas:119,121)
+  # Must be configured by user — set to the directory containing mdhier_x_y files
+  # R usage: config$data_paths$meddra_path
+  meddra_path: ~
+
+  # Path to Designated Medical Events (DME) data directory
+  # Replaces SAS: %let dmepath = ; / libname dme "&dmepath.";
+  # (ae_meddra.sas:133,135)
+  # Must be configured by user — set to directory containing dme.sas7bdat or dme.xpt
+  # R usage: config$data_paths$dme_path
+  dme_path: ~
+
+  # Path to SDTM tabulation CSV files
+  # Replaces SAS: references to SDTM CSV tabulation data
+  # R usage: config$data_paths$tabulations_path
+  tabulations_path: "data/Tabulations/SDTM - Statin Test Data v0"
+
+# =============================================================================
+# REFERENCE DATA
+# =============================================================================
+# Replaces SAS references to CSV lookup tables, Excel templates, and other
+# reference files used by domain panel drivers.
+#
+# R usage: readr::read_csv(file.path(config$reference_data$exposure_exdosfrq))
+reference_data:
+  # Exposure dosing frequency lookup CSV
+  # Replaces SAS: %let dosfrqpath = ; / proc import of exposure_exdosfrq.csv
+  # (exposure_v1.sas:118-119)
+  # R usage: readr::read_csv(config$reference_data$exposure_exdosfrq)
+  exposure_exdosfrq: "tested/SAS/EX/exposure_exdosfrq.csv"
+
+  # Base path to output template files (Excel templates)
+  # Replaces SAS: %let templatepath = ;
+  # (demographics_v1.sas:139, liver_v2.sas:125, disposition_v2.sas:137,
+  #  exposure_v1.sas:122)
+  # Must be configured by user if Excel template-based output is desired
+  # R usage: config$reference_data$template_path
+  template_path: ~
+
+  # Demographics panel Excel template filename
+  # Replaces SAS: %let template = Demographics_Template.xls;
+  # (demographics_v1.sas:140)
+  # R usage: config$reference_data$demographics_template
+  demographics_template: "Demographics_Template.xls"
+
+  # Liver labs panel Excel template filename
+  # Replaces SAS: %let template = Liver_Labs_Template.xls;
+  # (liver_v2.sas:126)
+  # R usage: config$reference_data$liver_template
+  liver_template: "Liver_Labs_Template.xls"
+
+  # Disposition panel Excel template filename
+  # Replaces SAS: %let template = Disposition_Template.xls;
+  # (disposition_v2.sas:138)
+  # R usage: config$reference_data$disposition_template
+  disposition_template: "Disposition_Template.xls"
+
+  # Exposure panel Excel template filename
+  # Replaces SAS: %let template = Exposure_Template.xls;
+  # (exposure_v1.sas:123)
+  # R usage: config$reference_data$exposure_template
+  exposure_template: "Exposure_Template.xls"
+
+# =============================================================================
+# OUTPUT PATHS
+# =============================================================================
+# Replaces all SAS %let outpath and ODS output path patterns.
+# All paths are relative to the repository root.
+#
+# SAS patterns replaced:
+#   %let outpath = ;               (all domain panel drivers)
+#   %let oncaeout = &outpath.\...; (ae_oncology_v1.sas:107)
+#   %let errout = &outpath.\...;   (all panels)
+#   %let outputs_folder = ...;     (WPCT-F.07.01.sas:160)
+#   ODS RTF FILE="..."             (ODS output destinations)
+#
+# R usage: file.path(config$output_paths$base_output_path, "report.rtf")
+output_paths:
+  # Root output directory for all analysis results
+  # Replaces SAS: %let outpath = ;
+  # R usage: config$output_paths$base_output_path
+  base_output_path: "output"
+
+  # Subdirectory for RTF output files
+  # Replaces SAS: ODS RTF destinations
+  # R usage: file.path(config$output_paths$rtf_output_path, "demographics.rtf")
+  rtf_output_path: "output/rtf"
+
+  # Subdirectory for Excel workbook output
+  # Replaces SAS: SpreadsheetML XML and PCFILES/JET output
+  # R usage: file.path(config$output_paths$excel_output_path, "ae_analysis.xlsx")
+  excel_output_path: "output/excel"
+
+  # Subdirectory for figure output (PDF, PNG)
+  # Replaces SAS: %let outputs_folder = ;
+  # (WPCT-F.07.01.sas:34,160)
+  # R usage: file.path(config$output_paths$figure_output_path, "boxplot.pdf")
+  figure_output_path: "output/figures"
+
+  # Subdirectory for execution logs
+  # R usage: file.path(config$output_paths$log_output_path, "run_log.txt")
+  log_output_path: "output/logs"
+
+# =============================================================================
+# R SOURCE PATHS
+# =============================================================================
+# Replaces SAS %let saspath and %let utilpath for %include resolution.
+# These paths point to the migrated R function files that replace SAS macros.
+#
+# SAS patterns replaced:
+#   %let saspath = ;      (ae_oncology_v1.sas:102, liver_v2.sas:122,
+#                          disposition_v2.sas:133, exposure_v1.sas:114)
+#   %let utilpath = ;     (ae_oncology_v1.sas:103, demographics_v1.sas:136,
+#                          disposition_v2.sas:134, exposure_v1.sas:115,
+#                          liver_v2.sas:123, ae_meddra.sas:96-97)
+#   %include "&saspath.\macro_name.sas";  (all panel drivers)
+#   %include "&utilpath.\utility_name.sas"; (all panel drivers)
+#
+# R usage: source(file.path(config$r_source_paths$r_macros_path, "ae_aggregate.R"))
+r_source_paths:
+  # Path to migrated analytical macros (R functions)
+  # Replaces SAS: %let saspath = ;
+  # Contains: ae_aggregate.R, ae_meddra.R, ae_oncology_aggregate.R, etc.
+  # R usage: source(file.path(config$r_source_paths$r_macros_path, "ae_aggregate.R"))
+  r_macros_path: "tested/R/macros"
+
+  # Path to migrated framework utility functions
+  # Replaces SAS: %let utilpath = ;
+  # Contains: data_checks.R, ae_setup.R, err_output.R, xml_output.R, etc.
+  # R usage: source(file.path(config$r_source_paths$r_utilities_path, "data_checks.R"))
+  r_utilities_path: "tested/R/utilities"
+
+  # Path to migrated whitepaper utility functions
+  # Replaces SAS: SASAUTOS path to whitepapers/utilities/
+  # Contains: assert_complete_refds.R, util_boxplot_block_ranges.R, etc.
+  # R usage: source(file.path(config$r_source_paths$wp_utilities_path, "util_passfail.R"))
+  wp_utilities_path: "whitepapers/utilities/R"
+
+  # Path to ADaM derivation R functions
+  # Replaces SAS: SASAUTOS path to whitepapers/ADaM/
+  # Contains: derive_lastminmax_measure.R
+  # R usage: source(file.path(config$r_source_paths$wp_adam_path, "derive_lastminmax_measure.R"))
+  wp_adam_path: "whitepapers/ADaM/R"
+
+# =============================================================================
+# ENVIRONMENT SETTINGS
+# =============================================================================
+# R runtime and reproducibility configuration.
+# These settings are unique to the R migration and have no SAS equivalent.
+#
+# R usage: config$environment$r_version
+environment:
+  # Minimum required R version (per AAP §0.6.1)
+  # R usage: config$environment$r_version
+  r_version: "4.3.0"
+
+  # Whether renv is activated for package management
+  # R usage: config$environment$renv_active
+  renv_active: true
+
+  # Path to the renv lockfile for reproducible package installation
+  # R usage: config$environment$renv_lockfile
+  renv_lockfile: "renv.lock"
+
+# =============================================================================
+# DOMAIN-SPECIFIC SETTINGS
+# =============================================================================
+# Replaces domain-specific %let globals from individual panel drivers.
+# Each sub-section corresponds to a clinical analysis domain.
+#
+# R usage: config$domain_settings$ae$continuity_correction
+domain_settings:
+
+  # ---------------------------------------------------------------------------
+  # Adverse Events (AE) domain settings
+  # ---------------------------------------------------------------------------
+  # Replaces SAS globals from ae_oncology_v1.sas, ae_v1.sas, ae_v1upd.sas,
+  # and ae_meddra_w_flag_generation_v1.sas
+  ae:
+    # Default panel title
+    # Replaces SAS: %let panel_title = AE Toxicity;
+    # (ae_oncology_v1.sas:98)
+    # R usage: config$domain_settings$ae$panel_title
+    panel_title: "AE Toxicity"
+
+    # Continuity correction value for risk calculations
+    # Replaces SAS: %let cc = .5;
+    # (ae_oncology_v1.sas:178, ae_meddra.sas:146)
+    # Methods: numeric constant (e.g. 0.5) or "arm" for reciprocal of opposite arm
+    # R usage: config$domain_settings$ae$continuity_correction
+    continuity_correction: 0.5
+
+    # Minimum valid toxicity grade for oncology panel
+    # Replaces SAS: %let toxgr_min = 1;
+    # (ae_oncology_v1.sas:277)
+    # R usage: config$domain_settings$ae$toxgr_min
+    toxgr_min: 1
+
+    # Maximum valid toxicity grade for oncology panel
+    # Replaces SAS: %let toxgr_max = 5;
+    # (ae_oncology_v1.sas:278)
+    # R usage: config$domain_settings$ae$toxgr_max
+    toxgr_max: 5
+
+    # Experimental arm code (treatment arm number)
+    # Replaces SAS: %let exp = 1;
+    # (ae_oncology_v1.sas:158)
+    # R usage: config$domain_settings$ae$exp_arm
+    exp_arm: 1
+
+    # Control arm code (comparator arm number)
+    # Replaces SAS: %let ctl = 2;
+    # (ae_oncology_v1.sas:159)
+    # R usage: config$domain_settings$ae$ctl_arm
+    ctl_arm: 2
+
+    # Toxicity grade 5 grouping switch (1 = group grade 5 with 3&4)
+    # Replaces SAS: %let toxgr_grp5_sw = 1;
+    # (ae_oncology_v1.sas:149)
+    # R usage: config$domain_settings$ae$toxgr_grp5_sw
+    toxgr_grp5_sw: 1
+
+    # Comparison terms — MedDRA levels for two-term comparison
+    # Replaces SAS: %let cmptrm = soc_name,pt_name;
+    # (ae_oncology_v1.sas:163)
+    # R usage: config$domain_settings$ae$comparison_terms
+    comparison_terms:
+      - "soc_name"
+      - "pt_name"
+
+    # Grades used in two-term comparison (all, 5, 34, 345)
+    # Replaces SAS: %let cmpgr = all;
+    # (ae_oncology_v1.sas:168)
+    # R usage: config$domain_settings$ae$comparison_grades
+    comparison_grades: "all"
+
+    # Sort variable for formatted two-term output (rd, rr, ort, p_value)
+    # Replaces SAS: %let cmpsort = rr;
+    # (ae_oncology_v1.sas:172)
+    # R usage: config$domain_settings$ae$comparison_sort
+    comparison_sort: "rr"
+
+    # Data validation switch for AE processing (1=on, 0=off)
+    # Replaces SAS: %let vld_sw = 1;
+    # (ae_oncology_v1.sas:273, ae_meddra.sas:206)
+    # R usage: config$domain_settings$ae$validation_switch
+    validation_switch: 1
+
+    # Include confidence limits for AE rates (1=on, 0=off)
+    # Replaces SAS: %let ae_rate_ci_sw = 1;
+    # (ae_oncology_v1.sas:281)
+    # R usage: config$domain_settings$ae$ae_rate_ci_switch
+    ae_rate_ci_switch: 1
+
+    # Default risk difference threshold
+    # Replaces SAS: %let rd_th = 5;
+    # (ae_meddra.sas:209)
+    # R usage: config$domain_settings$ae$risk_diff_threshold
+    risk_diff_threshold: 5
+
+    # Default relative risk threshold
+    # Replaces SAS: %let rr_th = 5;
+    # (ae_meddra.sas:210)
+    # R usage: config$domain_settings$ae$relative_risk_threshold
+    relative_risk_threshold: 5
+
+    # MedDRA version identifier
+    # Replaces SAS: %let ver = ;
+    # (ae_oncology_v1.sas:131, ae_meddra.sas:125)
+    # R usage: config$domain_settings$ae$meddra_version
+    meddra_version: ""
+
+  # ---------------------------------------------------------------------------
+  # Demographics (DM) domain settings
+  # ---------------------------------------------------------------------------
+  # Replaces SAS globals from demographics_v1.sas
+  demographics:
+    # Default panel title
+    # Replaces SAS: %let panel_title = Demographics;
+    # (demographics_v1.sas:101)
+    # R usage: config$domain_settings$demographics$panel_title
+    panel_title: "Demographics"
+
+    # Age group boundaries (upper bound of each bucket)
+    # Replaces SAS: %let age_grp1 through %let age_grp7
+    # (demographics_v1.sas:106-112)
+    # Each entry is a string in the format "<value> <unit>"
+    # R usage: config$domain_settings$demographics$age_groups
+    age_groups:
+      - "1 yr"
+      - "35 yr"
+      - "65 yr"
+
+    # Age unit for reporting
+    # Replaces SAS: %let ageunit = years;
+    # (demographics_v1.sas:115)
+    # R usage: config$domain_settings$demographics$age_unit
+    age_unit: "years"
+
+    # Demographic variables to examine
+    # Replaces SAS: %let dm_var = age_flag country ethnic race sex siteid country*siteid;
+    # (demographics_v1.sas:185)
+    # R usage: config$domain_settings$demographics$dm_variables
+    dm_variables:
+      - "age_flag"
+      - "country"
+      - "ethnic"
+      - "race"
+      - "sex"
+      - "siteid"
+
+  # ---------------------------------------------------------------------------
+  # Liver Labs (LB) domain settings
+  # ---------------------------------------------------------------------------
+  # Replaces SAS globals from liver_v2.sas
+  liver:
+    # Default panel title
+    # Replaces SAS: %let panel_title = Liver Labs;
+    # (liver_v2.sas:107)
+    # R usage: config$domain_settings$liver$panel_title
+    panel_title: "Liver Labs"
+
+    # Acceptable LBTESTCD values for ALT (alanine aminotransferase)
+    # Replaces SAS: %let alt = alt,sgpt;
+    # (liver_v2.sas:174)
+    # R usage: config$domain_settings$liver$alt_terms
+    alt_terms:
+      - "alt"
+      - "sgpt"
+
+    # Acceptable LBTESTCD values for AST (aspartate aminotransferase)
+    # Replaces SAS: %let ast = ast,sgot;
+    # (liver_v2.sas:175)
+    # R usage: config$domain_settings$liver$ast_terms
+    ast_terms:
+      - "ast"
+      - "sgot"
+
+    # Acceptable LBTESTCD values for ALP (alkaline phosphatase)
+    # Replaces SAS: %let alp = alp,alkp;
+    # (liver_v2.sas:176)
+    # R usage: config$domain_settings$liver$alp_terms
+    alp_terms:
+      - "alp"
+      - "alkp"
+
+    # Acceptable LBTESTCD values for bilirubin (total)
+    # Replaces SAS: %let bili = bili,bili_tb,tb,tbl,tbil,tbili,tb_bili,bilitot;
+    # (liver_v2.sas:177)
+    # R usage: config$domain_settings$liver$bili_terms
+    bili_terms:
+      - "bili"
+      - "bili_tb"
+      - "tb"
+      - "tbl"
+      - "tbil"
+      - "tbili"
+      - "tb_bili"
+      - "bilitot"
+
+  # ---------------------------------------------------------------------------
+  # Disposition (DS) domain settings
+  # ---------------------------------------------------------------------------
+  # Replaces SAS globals from disposition_v2.sas
+  disposition:
+    # Default panel title
+    # Replaces SAS: %let panel_title = Disposition;
+    # (disposition_v2.sas:106)
+    # R usage: config$domain_settings$disposition$panel_title
+    panel_title: "Disposition"
+
+    # Category variable for disposition filtering
+    # Replaces SAS: %let catc = dscat;
+    # (disposition_v2.sas:115)
+    # R usage: config$domain_settings$disposition$category_var
+    category_var: "dscat"
+
+    # Subcategory variable for disposition filtering
+    # Replaces SAS: %let subc = dsscat;
+    # (disposition_v2.sas:116)
+    # R usage: config$domain_settings$disposition$subcategory_var
+    subcategory_var: "dsscat"
+
+    # Default disposition category filter value
+    # Replaces SAS: %let catdis = 'DISPOSITION EVENT';
+    # (disposition_v2.sas:118)
+    # R usage: config$domain_settings$disposition$category_filter
+    category_filter: "DISPOSITION EVENT"
+
+    # Default disposition subcategory filter value
+    # Replaces SAS: %let subcatdis = 'END OF TREATMENT';
+    # (disposition_v2.sas:119)
+    # R usage: config$domain_settings$disposition$subcategory_filter
+    subcategory_filter: "END OF TREATMENT"
+
+  # ---------------------------------------------------------------------------
+  # Exposure (EX) domain settings
+  # ---------------------------------------------------------------------------
+  # Replaces SAS globals from exposure_v1.sas
+  exposure:
+    # Default panel title
+    # Replaces SAS: %let panel_title = Exposure;
+    # (exposure_v1.sas:94)
+    # R usage: config$domain_settings$exposure$panel_title
+    panel_title: "Exposure"
+
+  # ---------------------------------------------------------------------------
+  # MedDRA at a Glance domain settings
+  # ---------------------------------------------------------------------------
+  # Replaces SAS globals from ae_meddra_w_flag_generation_v1.sas
+  meddra:
+    # Default panel title
+    # Replaces SAS: %let panel_title = MedDRA at a Glance;
+    # (ae_meddra.sas:92)
+    # R usage: config$domain_settings$meddra$panel_title
+    panel_title: "MedDRA at a Glance"
+
+  # ---------------------------------------------------------------------------
+  # WPCT (Central Tendency White Paper) settings
+  # ---------------------------------------------------------------------------
+  # Replaces SAS globals from WPCT-F.07.01.sas and related WPCT scripts
+  wpct:
+    # Default analysis dataset name
+    # Replaces SAS: %let ds = ADLBC;
+    # (WPCT-F.07.01.sas:25,130)
+    # R usage: config$domain_settings$wpct$default_dataset
+    default_dataset: "ADLBC"
+
+    # Maximum number of boxes to display per page in paginated boxplots
+    # Replaces SAS: %let max_boxes_per_page = 20;
+    # (WPCT-F.07.01.sas:157)
+    # R usage: config$domain_settings$wpct$max_boxes_per_page
+    max_boxes_per_page: 20
+
+    # Population flag variable name ('Y' = in population of interest)
+    # Replaces SAS: %let p_fl = saffl;
+    # (WPCT-F.07.01.sas:152)
+    # R usage: config$domain_settings$wpct$population_flag
+    population_flag: "saffl"
+
+    # Analysis flag variable name ('Y' = selected for analysis)
+    # Replaces SAS: %let a_fl = anl01fl;
+    # (WPCT-F.07.01.sas:153)
+    # R usage: config$domain_settings$wpct$analysis_flag
+    analysis_flag: "anl01fl"
+
+    # Reference lines option for boxplots
+    # Replaces SAS: %let ref_lines = UNIFORM;
+    # (WPCT-F.07.01.sas:155)
+    # Options: NONE, UNIFORM, NARROW, ALL, or space-delimited numeric values
+    # R usage: config$domain_settings$wpct$ref_lines
+    ref_lines: "UNIFORM"
+
+    # Treatment name variable in measurement dataset
+    # Replaces SAS: %let t_var = trtp_short;
+    # (WPCT-F.07.01.sas:146)
+    # R usage: config$domain_settings$wpct$treatment_var
+    treatment_var: "trtp_short"
+
+    # Treatment number variable (controls display order)
+    # Replaces SAS: %let tn_var = trtpn;
+    # (WPCT-F.07.01.sas:147)
+    # R usage: config$domain_settings$wpct$treatment_num_var
+    treatment_num_var: "trtpn"
+
+    # Measurement variable in dataset
+    # Replaces SAS: %let m_var = aval;
+    # (WPCT-F.07.01.sas:148)
+    # R usage: config$domain_settings$wpct$measurement_var
+    measurement_var: "aval"
+
+    # Lower limit of reference range variable
+    # Replaces SAS: %let lo_var = a1lo;
+    # (WPCT-F.07.01.sas:149)
+    # R usage: config$domain_settings$wpct$lo_var
+    lo_var: "a1lo"
+
+    # Upper limit of reference range variable
+    # Replaces SAS: %let hi_var = a1hi;
+    # (WPCT-F.07.01.sas:150)
+    # R usage: config$domain_settings$wpct$hi_var
+    hi_var: "a1hi"

@@ -1,0 +1,160 @@
+KeyWords: MedDRA, MedDRA at a Glance, R Migration
+Script:
+  Desc   : >
+    The MedDRA at a Glance Analysis Panel shows the user the adverse events
+     that occurred in the study according to their place in the MedDRA
+     hierarchy and allows them to compare any two arms according to a number
+     of statistics.
+  Name   : ae_meddra_w_flag_generation_v1.R
+  GCR    : r135
+  SRV    : 12345
+  Source : Migrated from tested/SAS/MedDRA/ae_meddra_w_flag_generation_v1.sas
+  Target : https://github.com/phuse-org/phuse-scripts/blob/master/tested/R/MedDRA/ae_meddra_w_flag_generation_v1.R
+  Title  : MedDRA at a Glance Analysis Panel (R)
+  Topic  : MedDRA
+  Type   : Analysis
+  Subtype: TFL
+Package:
+  name : R Analysis Panels
+  title: Migrated from FDA JumpStart SAS analysis package to R
+Language:
+  name   : R
+  version: ">= 4.3.0"
+Comments: >
+  The MedDRA at a Glance Analysis Panel shows the user the adverse events
+  that occurred in the study according to their place in the MedDRA
+  hierarchy, using the system organ class (SOC), high-level group term
+  (HLGT), high-level term (HLT), and preferred term (PT). The user can
+  choose which two arms to compare and set thresholds which determine
+  whether the risk difference, relative risk, or negative log p-value
+  for difference in proportion between the two arms is a signal of interest.
+  The user can also sort and filter by any of the information contained in
+  the report.
+
+  This R implementation replaces the original SAS macro-based architecture
+  with parameterized R functions. SAS macros (%params, %meddra, %meddra_cmp,
+  %ab, %cd) are replaced by composable R functions using dplyr pipelines,
+  Tplyr count layers, and fisher.test() for statistical comparisons.
+
+  R Packages Used:
+     haven        - SAS XPT dataset I/O (read_xpt, read_sas)
+     dplyr        - Data manipulation replacing SAS DATA steps and PROC SQL
+     tidyr        - Data reshaping (pivot_wider, pivot_longer)
+     purrr        - Functional programming replacing SAS macro loops
+     stringr      - String manipulation replacing SAS character functions
+     forcats      - Factor level management replacing SAS format ordering
+     Tplyr        - Clinical summary tables replacing PROC FREQ/MEANS
+     openxlsx     - Excel workbook output replacing SpreadsheetML XML
+     janitor      - SAS-compatible round_half_up() rounding
+     cli          - User-facing messages and error formatting
+
+  Dataset Requirements:
+     Demographics          (DM)
+     Adverse Event         (AE)
+     Exposure              (EX)
+     MedDRA hierarchy - need to specify what version of MedDRA
+     Designated Medical Events
+
+  Variable Requirements (passed as R function arguments or read from data frames):
+     DM  - Actual Arm                          (ACTARM)
+         - Planned Treatment Arm               (ARM)
+         - Subject ID                          (USUBJID)
+         - Planned Arm Code                    (ARMCD)
+         - Subject Reference Start Date/Time   (RFSTDTC)
+         - Subject Reference End Date/Time     (RFENDTC)
+     AE  - Subject ID                          (USUBJID)
+         - Body system/organ class             (AEBODSYS)
+         - Dictionary Derived Term             (AEDECOD)
+         - Toxicity Grade                      (AETOXGR)
+         - Adverse Event Start Date/Time       (AESTDTC)
+     EX  - Subject ID                          (USUBJID)
+         - Exposure Start Date/Time            (EXSTDTC)
+         - Exposure End Date/Time              (EXENDTC)
+     MedDRA Hierarchy for correct version
+     Designated Medical Events
+
+  R Function Architecture:
+     All SAS macro parameters become named R function arguments with matching
+     defaults. SAS %include statements are replaced by source() calls to
+     modular R function files. Global macro variables are replaced by a
+     configuration list object passed as a function argument.
+R_Dependencies:
+  packages:
+    - haven: ">= 2.5.0"
+    - dplyr: ">= 1.1.0"
+    - tidyr: ">= 1.3.0"
+    - Tplyr: ">= 1.2.0"
+    - openxlsx: ">= 4.2.5"
+    - janitor: ">= 2.2.0"
+    - cli: ">= 3.6.0"
+    - purrr: ">= 1.0.0"
+    - stringr: ">= 1.5.0"
+    - forcats: ">= 1.0.0"
+  source_files:
+    - tested/R/macros/ae_meddra.R
+    - tested/R/macros/ae_meddra_output.R
+    - tested/R/macros/ae_rror.R
+    - tested/R/utilities/ae_setup.R
+    - tested/R/utilities/data_checks.R
+    - tested/R/utilities/err_output.R
+    - tested/R/utilities/sl_gs_output.R
+    - tested/R/utilities/xml_output.R
+Inputs:
+  datasets: dat1, dat2, dat3
+  P1: Data frame or file path - Demographics dataset (DM domain)
+  P2: String - MedDRA version identifier for hierarchy lookup
+  P3: Number - Study lag window in days for exposure-based subject filtering
+  P4: String - Continuity correction method (numeric threshold or arm-based)
+Outputs:
+  datasets: out1, out2
+  O1: MedDRA at a Glance Analysis Panel workbook (.xlsx via openxlsx)
+  O2: Error Summary workbook (.xlsx via openxlsx)
+Authors:
+  - name   : David Kretch
+    email  : david.kretch@us.ibm.com
+    company: FDA/IBM
+    date   : 02/12/2011
+  - name   : Blitzy Platform
+    email  : migration@blitzy.com
+    company: Blitzy
+    date   : 03/23/2026
+    note   : Migrated to R from SAS
+Qualification:
+  LastQualDate: MM/DD/YYYY
+  LastQualBy: FirstName LastName
+  Stage: D
+  Document: https://github.com/phuse-org/phuse-scripts/blob/master/tested/R/MedDRA/ae_meddra_w_flag_generation_v1.R
+  Note: C - Contributed; D - Development; T - Testing; Q - Qualified
+Stages:
+  - Date: 02/02/2016
+    Name: Austin Taylor <Austin.Taylor@fda.hhs.gov>
+    Stage: C
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/SpecDocs/MedDRA%20at%20a%20Glance%20Analysis%20Specifications%20(12-8-2015).doc
+  - Date: 03/08/2016
+    Name: Yanmei Li
+    Stage: T
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/MedDRA/ae_meddra_w_flag_generation_v1.docx
+  - Date: 2026-03-23
+    Name: Blitzy Platform
+    Stage: D
+    Docs: R migration from SAS - ae_meddra_w_flag_generation_v1.sas
+Rating:
+  - User: Yanmei Li
+    Date: 03/08/2016
+    Association: Lilly
+    Stars: 4.5
+  - User: htu
+    Date: 03/10/2016
+    Association: Accenture
+    Stars: 5
+Migration:
+  source_file: tested/SAS/MedDRA/ae_meddra_w_flag_generation_v1.sas
+  target_file: tested/R/MedDRA/ae_meddra_w_flag_generation_v1.R
+  migration_type: SAS to R
+  migration_date: 2026-03-23
+  validation_gates:
+    - Gate 1: Functional Output Parity
+    - Gate 2: Rounding and Precision Audit
+    - Gate 3: Missing Value Audit
+    - Gate 5: TLF Layout Verification
+    - Gate 7: Scope Matching
