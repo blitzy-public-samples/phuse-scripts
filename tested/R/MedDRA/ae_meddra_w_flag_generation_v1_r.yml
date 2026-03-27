@@ -1,0 +1,131 @@
+KeyWords: MedDRA, MedDRA at a Glance
+Script:
+  Desc   : >
+    R migration of the MedDRA at a Glance Analysis Panel. Shows adverse
+    events according to their place in the MedDRA hierarchy (SOC, HLGT,
+    HLT, PT) and compares any two arms using risk differences, relative
+    risks, odds ratios, Fisher's exact tests, and signal-of-interest flags.
+  Name   : ae_meddra_w_flag_generation_v1.R
+  GCR    : r135
+  SRV    : 12345
+  Source : PhUSE WG5 SAS-to-R Migration
+  Target : https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/SpecDocs/Analysis%20Panel%20Instructions.doc
+  Title  : MedDRA at a Glance Analysis Panel (R Migration)
+  Topic  : MedDRA
+  Type   : analysis
+  Subtype: TFL
+Package:
+  name : R Analysis Panels
+  title: PhUSE WG5 R migration package
+Language:
+  name   : R
+  version: ">= 4.3.0"
+Comments: >
+  R migration of the PhUSE WG5 MedDRA at a Glance Analysis Panel,
+  originally implemented in SAS (ae_meddra_w_flag_generation_v1.sas).
+  Migrated to idiomatic R using tidyverse and pharmaverse packages.
+
+  Shows adverse events by MedDRA hierarchy: system organ class (SOC),
+  high-level group term (HLGT), high-level term (HLT), and preferred
+  term (PT). Allows comparison of two treatment arms with configurable
+  thresholds for risk difference, relative risk, and negative log p-value
+  signals of interest.
+
+  Dataset Requirements:
+     Demographics          (DM)  - loaded via haven::read_xpt()
+     Adverse Event         (AE)  - loaded via haven::read_xpt()
+     Exposure              (EX)  - loaded via haven::read_xpt()
+     MedDRA hierarchy file
+     Designated Medical Events file
+
+  Variable Requirements:
+     DM  - ACTARM, ARM, USUBJID, ARMCD, RFSTDTC, RFENDTC
+     AE  - USUBJID, AEBODSYS, AEDECOD, AETOXGR, AESTDTC
+     EX  - USUBJID, EXSTDTC, EXENDTC
+
+  Key R Packages:
+     haven    - SAS transport (XPT) data I/O
+     dplyr    - Data manipulation replacing SAS DATA steps and PROC SQL
+     tidyr    - Data reshaping and pivoting
+     stringr  - String manipulation replacing SAS character functions
+     openxlsx - Excel workbook output replacing SAS SpreadsheetML
+     janitor  - SAS-compatible round-half-up rounding behavior
+     cli      - User-facing diagnostic messages
+Inputs:
+  datasets: DM, AE, EX, MedDRA hierarchy, Designated Medical Events
+  P1: ae/dm/ex - data frames or file paths to XPT files
+  P2: outpath - output directory for generated Excel workbooks
+  P3: study_lag - days after last exposure for AE window
+  P4: cc - continuity correction value (default 0.5)
+  P5: meddra_path - path to MedDRA hierarchy file
+  P6: dme_path - path to Designated Medical Events file
+Outputs:
+  datasets: Excel workbooks via openxlsx
+  O1: MedDRA at a Glance workbook with hierarchy sheets (.xlsx)
+Authors:
+  - name   : David Kretch
+    email  : david.kretch@us.ibm.com
+    company: FDA/IBM
+    date   : 02/12/2011
+  - name   : PhUSE WG5 SAS-to-R Migration
+    email  :
+    company: PhUSE
+    date   : 2026
+Qualification:
+  LastQualDate: MM/DD/YYYY
+  LastQualBy: FirstName LastName
+  Stage: T
+  Document: a link to latest documentation
+  Note: C - Contributed; D - Development; T - Testing; Q - Qualified
+Stages:
+  - Date: 02/02/2016
+    Name: Austin Taylor <Austin.Taylor@fda.hhs.gov>
+    Stage: C
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/SpecDocs/MedDRA%20at%20a%20Glance%20Analysis%20Specifications%20(12-8-2015).doc
+  - Date: 03/08/2016
+    Name: Yanmei Li
+    Stage: T
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/SAS/MedDRA/ae_meddra_w_flag_generation_v1.docx
+  - Date: 2026
+    Name: PhUSE WG5 SAS-to-R Migration
+    Stage: T
+    Docs: https://github.com/phuse-org/phuse-scripts/blob/master/tested/R/MedDRA/
+R_Dependencies:
+  - package: haven
+    version: ">= 2.5.5"
+    purpose: "SAS/XPT data I/O"
+  - package: dplyr
+    version: ">= 1.1.0"
+    purpose: "Data manipulation"
+  - package: tidyr
+    version: ">= 1.3.0"
+    purpose: "Data reshaping"
+  - package: stringr
+    version: ">= 1.5.0"
+    purpose: "String manipulation"
+  - package: openxlsx
+    version: ">= 4.2.5"
+    purpose: "Excel workbook output"
+  - package: janitor
+    version: ">= 2.2.0"
+    purpose: "SAS-compatible rounding"
+  - package: cli
+    version: ">= 3.6.0"
+    purpose: "Diagnostic messages"
+Migration:
+  source_files:
+    - tested/SAS/MedDRA/ae_meddra_w_flag_generation_v1.sas
+  source_manifests:
+    - tested/SAS/MedDRA/ae_meddra_w_flag_generation_v1_sas.yml
+  migration_type: SAS-to-R tech stack migration
+  functional_parity: Required - MedDRA hierarchy analysis preserved
+  validation_gates: Gate 1-8 per AAP validation framework
+Rating:
+  - User: Yanmei Li
+    Date: 03/08/2016
+    Association: Lilly
+    Stars: 4.5
+  - User: htu
+    Date: 03/10/2016
+    Association: Accenture
+    Stars: 5
