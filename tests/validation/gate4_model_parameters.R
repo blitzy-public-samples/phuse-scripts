@@ -156,8 +156,11 @@ scan_mmrm_specifications <- function(r_file_path) {
   }
 
   # Identify lines containing mmrm() calls (with or without namespace prefix)
+  # Exclude lines that are comments (start with #) to avoid false positives
+  # from documentation references or variable naming like "mmrm (repeated...)"
   mmrm_pattern <- "(?:mmrm::)?mmrm\\s*\\("
-  hit_indices <- which(stringr::str_detect(lines, mmrm_pattern))
+  is_comment <- stringr::str_detect(stringr::str_trim(lines), "^#")
+  hit_indices <- which(stringr::str_detect(lines, mmrm_pattern) & !is_comment)
 
   if (length(hit_indices) == 0L) {
     return(dplyr::tibble(
@@ -172,9 +175,11 @@ scan_mmrm_specifications <- function(r_file_path) {
 
   # For each hit, gather a context window to capture multi-line calls
   results <- purrr::map_dfr(hit_indices, function(idx) {
-    # Look at surrounding lines (up to 20 lines forward) to capture full call
+    # Look at surrounding lines (20 lines backward + 20 forward) to capture
+    # formula definitions that occur before the mmrm() call and the full call
+    start_idx <- max(1L, idx - 20L)
     end_idx <- min(idx + 20L, length(lines))
-    context_block <- paste(lines[idx:end_idx], collapse = " ")
+    context_block <- paste(lines[start_idx:end_idx], collapse = " ")
 
     # Extract covariance structure from the formula or explicit argument
     # mmrm uses covariance structures like us(), ar1(), toep(), cs(), ante()
@@ -360,8 +365,12 @@ scan_ancova_specifications <- function(r_file_path) {
     list(pattern = "(?:emmeans::)?emmeans\\s*\\(", name = "emmeans::emmeans")
   )
 
+  # Exclude lines that are comments (start with #) to avoid false positives
+  # from documentation references
+  is_comment <- stringr::str_detect(stringr::str_trim(lines), "^#")
+
   results <- purrr::map_dfr(ancova_functions, function(func_def) {
-    hit_indices <- which(stringr::str_detect(lines, func_def$pattern))
+    hit_indices <- which(stringr::str_detect(lines, func_def$pattern) & !is_comment)
 
     if (length(hit_indices) == 0L) {
       return(dplyr::tibble(

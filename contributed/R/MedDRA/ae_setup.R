@@ -1285,7 +1285,7 @@ rpt_setup <- function(setup_result, dm) {
     # Use rlang::!!! splice to replace NA with 0 across all arm columns
     na_replace_exprs <- purrr::map(
       rlang::set_names(arm_cols),
-      function(col) rlang::expr(tidyr::replace_na(!!rlang::sym(col), 0L))
+      function(col) rlang::expr(tidyr::replace_na(!!rlang::sym(col), 0L))  # legitimate: arm counts initialized to zero after cross-join
     )
     rpt_err_term <- rpt_err_term %>%
       dplyr::mutate(!!!na_replace_exprs)

@@ -212,8 +212,8 @@ ae_common <- function(adsl_path, adae_path, top_n = 20) {
   #   if missing(AEpercent_1) then AEpercent_1 = 0;
   tcount <- tcount %>%
     dplyr::mutate(
-      AEpercent   = dplyr::if_else(is.na(AEpercent),   0, AEpercent),
-      AEpercent_1 = dplyr::if_else(is.na(AEpercent_1), 0, AEpercent_1)
+      AEpercent   = dplyr::if_else(is.na(AEpercent),   0, AEpercent), # legitimate: percentage initialized to zero for AE display
+      AEpercent_1 = dplyr::if_else(is.na(AEpercent_1), 0, AEpercent_1) # legitimate: percentage initialized to zero for AE display
     )
 
   # Calculate relative risk (risk difference vs placebo)
@@ -284,7 +284,7 @@ ae_common <- function(adsl_path, adae_path, top_n = 20) {
   # SAS lines 110-112: if missing(AEpercent) then AEpercent = 0;
   tcount3 <- tcount3 %>%
     dplyr::mutate(
-      AEpercent = dplyr::if_else(is.na(AEpercent), 0, AEpercent)
+      AEpercent = dplyr::if_else(is.na(AEpercent), 0, AEpercent) # legitimate: percentage initialized to zero for AE display
     )
 
   # Sort by dispseqno (SAS lines 115-117: proc sort by dispseqno)

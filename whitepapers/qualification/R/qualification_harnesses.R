@@ -818,7 +818,7 @@ test_that("Phase 9 — assert_var_nonmissing: non-missing values (2.a, 2.b)", {
     mutate(
       desc    = "non-missing",
       num_val = 1 + runif(n()),
-      chr_val = paste("char of", round(num_val, 1))
+      chr_val = paste("char of", round(num_val, 1))  # base R round() intentional — test data label, not statistical output
     )
 
   # 2.a.1: non-missing NUM var => PASS
@@ -833,7 +833,7 @@ test_that("Phase 9 — assert_var_nonmissing: standard NA missing (2.c.1, 2.d.1)
     mutate(
       desc    = "non-missing",
       num_val = 1 + runif(n()),
-      chr_val = paste("char of", round(num_val, 1))
+      chr_val = paste("char of", round(num_val, 1))  # base R round() intentional — test data label, not statistical output
     )
 
   # Add one missing numeric value (SAS: .)
@@ -857,7 +857,7 @@ test_that("Phase 9 — assert_var_nonmissing: tagged NA special missings (2.c.2-
     mutate(
       desc    = "non-missing",
       num_val = 1 + runif(n()),
-      chr_val = paste("char of", round(num_val, 1))
+      chr_val = paste("char of", round(num_val, 1))  # base R round() intentional — test data label, not statistical output
     )
 
   # 2.c.2: NUM var with 1 tagged NA ._ => FAIL
@@ -891,7 +891,7 @@ test_that("Phase 9 — assert_var_nonmissing: WHERE subsetting (2.e, 2.f)", {
     mutate(
       desc    = "non-missing",
       num_val = 1 + runif(n()),
-      chr_val = paste("char of", round(num_val, 1))
+      chr_val = paste("char of", round(num_val, 1))  # base R round() intentional — test data label, not statistical output
     )
 
   # Make one row have missing num_val at key1=2, key2="a"

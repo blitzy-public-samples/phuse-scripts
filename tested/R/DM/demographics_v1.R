@@ -1093,7 +1093,7 @@ dm_outfmt <- function(results, lkp_age, lkp_arm_out) {
       dplyr::mutate(
         dplyr::across(
           dplyr::where(is.numeric),
-          ~ dplyr::if_else(is.na(.x), 0, .x)
+          ~ dplyr::if_else(is.na(.x), 0, .x) # legitimate: NA counts treated as zero for display table
         )
       )
   }

@@ -1220,7 +1220,7 @@ out_err <- function(wb, config, results, styles) {
   row_idx <- row_idx + 1L
 
   # Row 2: "Subject Validation Step" (MergeDown=1), per-arm names spanning 2
-  arm_header_height <- 13.75 + max(1, round(max_arm_len / 12, 1)) * 13.75
+  arm_header_height <- 13.75 + max(1, round(max_arm_len / 12, 1)) * 13.75  # intentional base R round for layout
   openxlsx::setRowHeights(wb, sheet_name, rows = row_idx,
                           heights = arm_header_height)
 
@@ -1463,7 +1463,7 @@ out_err <- function(wb, config, results, styles) {
     row_idx <- row_idx + 1L
 
     # Row 2: Reason for Exclusion + per-arm N= headers
-    err_arm_h <- 13.75 + max(1, round(max_arm_len / 13.25, 1)) * 13.75
+    err_arm_h <- 13.75 + max(1, round(max_arm_len / 13.25, 1)) * 13.75  # intentional base R round for layout
     openxlsx::setRowHeights(wb, sheet_name, rows = row_idx,
                             heights = err_arm_h)
 
@@ -1567,7 +1567,7 @@ out_err <- function(wb, config, results, styles) {
       row_idx <- row_idx + 1L
 
       # Column headers: Body System, Dict Term (span 5), per-arm Event Count
-      term_arm_h <- 13.75 + max(1, round(max_arm_len / 13.25, 1)) * 13.75
+      term_arm_h <- 13.75 + max(1, round(max_arm_len / 13.25, 1)) * 13.75  # intentional base R round for layout
       openxlsx::setRowHeights(wb, sheet_name, rows = row_idx,
                               heights = term_arm_h)
 

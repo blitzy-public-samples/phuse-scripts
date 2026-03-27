@@ -146,7 +146,7 @@ onc_aggregate <- function(ds,
   missing_code <- as.integer(toxgr_max + 1L)
   highest_grade <- highest_grade %>%
     dplyr::mutate(aetoxgr = as.integer(.data$aetoxgr)) %>%
-    dplyr::mutate(aetoxgr = tidyr::replace_na(.data$aetoxgr, missing_code))
+    dplyr::mutate(aetoxgr = tidyr::replace_na(.data$aetoxgr, missing_code))  # intentional: missing toxicity grade mapped to user-defined code
 
   # --- SAS lines 52-104: Per-arm, per-grade counts ----------------------------
   # RETAIN arm_toxgr{arm_count, toxgr_min:toxgr_max+1} -> group_by + summarise

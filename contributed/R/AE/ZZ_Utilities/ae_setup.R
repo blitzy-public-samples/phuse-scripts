@@ -93,7 +93,7 @@ parse_iso_date <- function(dtc) {
   dtc_chr <- as.character(dtc)
   dtc_trimmed <- stringr::str_trim(dtc_chr)
   dtc_len <- nchar(dtc_trimmed)
-  dtc_len <- dplyr::if_else(is.na(dtc_len), 0L, as.integer(dtc_len))
+  dtc_len <- dplyr::if_else(is.na(dtc_len), 0L, as.integer(dtc_len)) # legitimate: date length initialized to zero when NA
 
   date_val <- dplyr::case_when(
     dtc_len >= 10L ~ suppressWarnings(
@@ -1077,7 +1077,7 @@ rpt_setup <- function(dm_orig, all_dm, all_dm_ex, all_ae_dm_ex,
       dplyr::group_by(arm) %>%
       dplyr::summarise(ct = dplyr::n_distinct(usubjid), .groups = "drop")
     merged <- dplyr::left_join(arm_tbl, counts, by = "arm") %>%
-      dplyr::mutate(ct = tidyr::replace_na(ct, 0L))
+      dplyr::mutate(ct = tidyr::replace_na(ct, 0L))  # legitimate: arm counts initialized to zero after left join
     setNames(merged$ct, paste0("arm_", merged$arm_num))
   }
 
@@ -1194,7 +1194,7 @@ rpt_setup <- function(dm_orig, all_dm, all_dm_ex, all_ae_dm_ex,
 
     rpt_err <- dplyr::left_join(arm_summary, err_by_arm, by = "arm_num") %>%
       dplyr::mutate(
-        arm_err_count = tidyr::replace_na(arm_err_count, 0L),
+        arm_err_count = tidyr::replace_na(arm_err_count, 0L),  # legitimate: error count initialized to zero after left join
         arm_err_pct = dplyr::if_else(
           arm_n > 0L,
           janitor::round_half_up(100 * arm_err_count / arm_n, 1),

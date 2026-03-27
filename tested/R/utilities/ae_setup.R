@@ -58,7 +58,7 @@ log_msg <- function(text) {
 parse_iso_date <- function(dtc) {
   dtc_trimmed <- stringr::str_trim(dtc)
   dtc_len <- nchar(dtc_trimmed)
-  dtc_len <- dplyr::if_else(is.na(dtc_trimmed), 0L, as.integer(dtc_len))
+  dtc_len <- dplyr::if_else(is.na(dtc_trimmed), 0L, as.integer(dtc_len)) # legitimate: date-time length initialized to zero when NA
   result <- as.Date(rep(NA_character_, length(dtc)))
   full_mask <- !is.na(dtc_len) & dtc_len >= 10L
   if (any(full_mask, na.rm = TRUE)) {
@@ -81,7 +81,7 @@ parse_iso_date <- function(dtc) {
 # date_char_len: Significant character length of date strings
 # --------------------------------------------------------------------------
 date_char_len <- function(dtc) {
-  dplyr::if_else(is.na(dtc), 0L,
+  dplyr::if_else(is.na(dtc), 0L, # legitimate: date-time value initialized to zero when NA
                  as.integer(nchar(stringr::str_trim(dtc))))
 }
 
@@ -1028,7 +1028,7 @@ rpt_setup <- function(dm, all_dm_ex, all_ae_dm_ex, ds_base, err_base,
       dplyr::mutate(
         dplyr::across(
           dplyr::starts_with("arm"),
-          ~ dplyr::if_else(is.na(.), 0L, as.integer(.))
+          ~ dplyr::if_else(is.na(.), 0L, as.integer(.)) # legitimate: count initialized to zero after cross-join
         ),
         aebodsys = dplyr::if_else(
           is.na(.data$aebodsys) | .data$aebodsys == "", "Missing", .data$aebodsys

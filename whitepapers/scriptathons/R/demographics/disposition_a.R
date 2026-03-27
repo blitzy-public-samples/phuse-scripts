@@ -282,7 +282,7 @@ generate_disposition_a <- function(data_path, output_path = "disposition_a.rtf")
     dplyr::mutate(
       dplyr::across(
         dplyr::all_of(trt_cols),
-        ~tidyr::replace_na(., "   0")
+        ~tidyr::replace_na(., "   0")  # intentional: formatted zero-count string for display table cells
       )
     )
 

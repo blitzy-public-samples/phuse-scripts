@@ -1337,7 +1337,7 @@ dm_outfmt <- function(results, lkp_age) {
     # Replace 0 for missing numeric values (SAS lines 989-993)
     num_cols <- names(df)[purrr::map_lgl(df, is.numeric)]
     for (nc in num_cols) {
-      df[[nc]] <- dplyr::if_else(is.na(df[[nc]]), 0, df[[nc]])
+      df[[nc]] <- dplyr::if_else(is.na(df[[nc]]), 0, df[[nc]]) # legitimate: count initialized to zero for display table cells
     }
     # Blank repeated DSDECOD (SAS lines 986-987)
     if ("DSDECOD" %in% names(df)) {

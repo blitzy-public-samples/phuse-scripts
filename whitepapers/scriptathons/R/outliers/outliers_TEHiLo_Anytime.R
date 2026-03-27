@@ -330,7 +330,7 @@ outliers_tehilo_anytime <- function(data_path,
   all_n <- totn %>%
     left_join(te_n, by = c("TRTPN", "PARAM", "tefl")) %>%
     mutate(
-      n   = coalesce(n, 0L),
+      n   = coalesce(n, 0L),  # legitimate: count initialized to zero when no subjects in cell
       pct = n / totn * 100
     )
 

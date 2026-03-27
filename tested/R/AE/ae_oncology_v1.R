@@ -352,7 +352,7 @@ ae_oncology_v1 <- function(
     )
 
     elapsed <- (proc.time() - start_time)[["elapsed"]]
-    cli::cli_inform("Oncology AE panel completed (error path) in {round(elapsed, 1)}s.")
+    cli::cli_inform("Oncology AE panel completed (error path) in {round(elapsed, 1)}s.")  # base R round() intentional — display only
 
     return(invisible(list(
       success       = FALSE,
@@ -375,12 +375,12 @@ ae_oncology_v1 <- function(
   if (meddra_active) {
     if (is.na(meddra_pct) || meddra_pct < 80) {
       cli::cli_warn(c(
-        "!" = "MedDRA match percentage ({if (is.na(meddra_pct)) 'NA' else paste0(round(meddra_pct, 1), '%')}) below 80% threshold.",
+        "!" = "MedDRA match percentage ({if (is.na(meddra_pct)) 'NA' else paste0(round(meddra_pct, 1), '%')}) below 80% threshold.",  # base R round() intentional — display only
         "i" = "Disabling MedDRA; falling back to AEBODSYS/AEDECOD."
       ))
       meddra_active <- FALSE
     } else {
-      cli::cli_inform("MedDRA match: {round(meddra_pct, 1)}% (threshold: 80%).")
+      cli::cli_inform("MedDRA match: {round(meddra_pct, 1)}% (threshold: 80%).")  # base R round() intentional — display only
     }
   }
 
@@ -644,7 +644,7 @@ ae_oncology_v1 <- function(
   elapsed_fmt <- sprintf("%02d:%02d",
                          as.integer(elapsed) %/% 60L,
                          as.integer(elapsed) %% 60L)
-  cli::cli_inform("Oncology AE panel completed in {elapsed_fmt} ({round(elapsed, 1)}s).")
+  cli::cli_inform("Oncology AE panel completed in {elapsed_fmt} ({round(elapsed, 1)}s).")  # base R round() intentional — display only
 
   invisible(list(
     success       = TRUE,

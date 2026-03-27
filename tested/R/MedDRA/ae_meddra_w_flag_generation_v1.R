@@ -245,7 +245,7 @@ derive_arm_subjcnt <- function(all_dm_ex, arm_count) {
   # Ensure all arm numbers 1..arm_count are represented
   all_arms <- tibble::tibble(arm_num = seq_len(arm_count))
   counts <- dplyr::left_join(all_arms, counts, by = "arm_num") %>%
-    dplyr::mutate(n = dplyr::if_else(is.na(.data$n), 0L, as.integer(.data$n)))
+    dplyr::mutate(n = dplyr::if_else(is.na(.data$n), 0L, as.integer(.data$n))) # legitimate: subject count initialized to zero after left join
 
   result <- counts$n
   names(result) <- paste0("arm", seq_len(arm_count))
@@ -622,7 +622,7 @@ run_meddra_panel <- function(ae,
   # ---------------------------------------------------------------------------
   elapsed <- (proc.time() - start_time)["elapsed"]
   cli::cli_inform(c(
-    "i" = "Running time: {round(elapsed, 1)} seconds"
+    "i" = "Running time: {round(elapsed, 1)} seconds"  # base R round() intentional — display only, not statistical output
   ))
 
   # ---------------------------------------------------------------------------

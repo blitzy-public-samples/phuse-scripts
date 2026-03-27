@@ -803,7 +803,8 @@ summary_report <- function(
                 model_data[[col_actual]]  <- as.factor(model_data[[col_actual]])
                 model_data[[time_actual]] <- as.factor(model_data[[time_actual]])
                 fit <- tryCatch(
-                  mmrm::mmrm(fml, data = model_data),
+                  mmrm::mmrm(fml, data = model_data,
+                             method = "Satterthwaite"),
                   error = function(e) {
                     cli::cli_warn("MMRM failed for {vname}: {e$message}. Falling back to lm().")
                     NULL

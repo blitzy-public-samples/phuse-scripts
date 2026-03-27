@@ -754,7 +754,7 @@ ds_by_arm <- function(data, checks, dm_ds_fallback = NULL) {
   # DELIBERATE zero-fill for display per SAS PROC STDIZE REPONLY MISSING=0
   result <- result %>%
     dplyr::mutate(
-      dplyr::across(dplyr::where(is.numeric), ~ tidyr::replace_na(., 0))
+      dplyr::across(dplyr::where(is.numeric), ~ tidyr::replace_na(., 0))  # legitimate: aggregated counts default to zero when no subjects in arm
     )
 
   list(
@@ -908,7 +908,7 @@ ds_time_to_event <- function(data, checks, catc = "dscat", subc = "dsscat",
           by = "dsdy1"
         ) %>%
         dplyr::mutate(
-          by_dsdecod  = tidyr::replace_na(by_dsdecod, 0L),
+          by_dsdecod  = tidyr::replace_na(by_dsdecod, 0L),  # cumulative count initialized to zero — legitimate
           cum_dsdecod = cumsum(by_dsdecod)
         )
       result

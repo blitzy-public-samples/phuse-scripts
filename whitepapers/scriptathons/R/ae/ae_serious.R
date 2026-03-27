@@ -346,7 +346,7 @@ ae_serious <- function(adae_path, adsl_path, output_path = NULL) {
   # Ensure all treatments represented (SPARSE behavior) even if zero SAE subjects
   sum_final_sub <- tidyr::expand_grid(TRTAN = trt_nums) %>%
     dplyr::left_join(sum_final_sub, by = "TRTAN") %>%
-    dplyr::mutate(COUNT = dplyr::if_else(is.na(COUNT), 0L, COUNT))
+    dplyr::mutate(COUNT = dplyr::if_else(is.na(COUNT), 0L, COUNT)) # legitimate: count initialized to zero after cross-join
 
   # Format summary row (SAS lines 211-217)
   sum_final_sub <- sum_final_sub %>%

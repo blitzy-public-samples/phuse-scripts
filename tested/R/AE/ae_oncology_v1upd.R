@@ -557,7 +557,7 @@ ae_oncology_v1upd <- function(
   # ===========================================================================
   if (meddra_active && setup_result$setup_success) {
     meddra_pct_val <- setup_result$meddra_pct
-    if (is.na(meddra_pct_val)) meddra_pct_val <- 0
+    if (is.na(meddra_pct_val)) meddra_pct_val <- 0  # intentional: NA percentage treated as 0% for threshold comparison
     meddra_pct <- meddra_pct_val
 
     if (meddra_pct < 80) {
@@ -606,7 +606,7 @@ ae_oncology_v1upd <- function(
 
     elapsed <- (proc.time() - start_time)[["elapsed"]]
     if (verbose) {
-      cli::cli_alert_info("Running time: {round(elapsed, 1)} seconds")
+      cli::cli_alert_info("Running time: {round(elapsed, 1)} seconds")  # base R round() intentional — display only
     }
 
     return(invisible(list(
@@ -1002,7 +1002,7 @@ ae_oncology_v1upd <- function(
   elapsed <- (proc.time() - start_time)[["elapsed"]]
   if (verbose) {
     cli::cli_h1("Complete")
-    cli::cli_alert_info("Running time: {round(elapsed, 1)} seconds")
+    cli::cli_alert_info("Running time: {round(elapsed, 1)} seconds")  # base R round() intentional — display only
   }
 
   invisible(list(

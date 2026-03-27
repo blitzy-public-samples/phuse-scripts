@@ -518,6 +518,15 @@ discover_r_source_files <- function(r_source_paths) {
 safe_read_xpt <- function(xpt_path, normalize_names = FALSE) {
   tryCatch({
     ds <- haven::read_xpt(xpt_path)
+    # Per AAP §0.7.3: SAS character missing (' ') maps to NA_character_.
+    # haven::read_xpt reads SAS blank characters as "" (empty string).
+    # Convert all empty strings to NA_character_ to match the SAS-to-R
+    # migration convention. This mirrors the conversion applied in all
+    # migrated R scripts at data-loading time.
+    chr_cols <- names(ds)[vapply(ds, is.character, logical(1L))]
+    for (col in chr_cols) {
+      ds[[col]][ds[[col]] == ""] <- NA_character_
+    }
     if (normalize_names) {
       ds <- janitor::clean_names(ds)
     }

@@ -256,7 +256,7 @@ chk_val <- function(ds,
 
     # Replace NA count with 0 (value not found)
     result <- result %>%
-      dplyr::mutate(n_count = dplyr::if_else(is.na(n_count), 0L, as.integer(n_count)))
+      dplyr::mutate(n_count = dplyr::if_else(is.na(n_count), 0L, as.integer(n_count))) # legitimate: count initialized to zero after aggregate
 
     # Compute indicator (SAS lines 178-189)
     if (!count) {

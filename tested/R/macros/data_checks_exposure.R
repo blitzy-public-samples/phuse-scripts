@@ -262,7 +262,7 @@ exposure_err_a <- function(ex_dm, dm) {
     dplyr::left_join(err_a_arm_counts, by = "arm") %>%
     dplyr::mutate(
       # SAS: case when b.count is missing then 0 else b.count end
-      count = dplyr::if_else(is.na(count), 0L, as.integer(count)),
+      count = dplyr::if_else(is.na(count), 0L, as.integer(count)), # legitimate: count initialized to zero after aggregate join
       # SAS: case when b.count is missing then 0 else b.count/a.total end
       pct   = dplyr::if_else(
         count == 0L,
@@ -407,14 +407,14 @@ exposure_err_b <- function(ex_dm, dm) {
   ex_err_b_summary <- arm_totals %>%
     dplyr::left_join(err_b_stats, by = "arm") %>%
     dplyr::mutate(
-      subject_count = dplyr::if_else(is.na(subject_count), 0L,
+      subject_count = dplyr::if_else(is.na(subject_count), 0L, # legitimate: subject count initialized to zero after aggregate join
                                      as.integer(subject_count)),
       subject_pct   = dplyr::if_else(
         subject_count == 0L,
         0,
         janitor::round_half_up(subject_count / arm_tot, digits = 4)
       ),
-      event_count   = dplyr::if_else(is.na(event_count), 0L,
+      event_count   = dplyr::if_else(is.na(event_count), 0L, # legitimate: event count initialized to zero after aggregate join
                                      as.integer(event_count)),
       event_pct     = dplyr::if_else(
         event_count == 0L,

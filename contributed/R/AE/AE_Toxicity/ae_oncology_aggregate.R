@@ -32,15 +32,15 @@ number_to_word <- function(n) {
 #' Returns c(lower, upper); handles n == 0 gracefully.
 safe_binom_ci <- function(x, n) {
   if (is.na(x) || is.na(n) || n == 0) return(c(NA_real_, NA_real_))
-  x <- max(0L, min(as.integer(round(x)), as.integer(round(n))))
-  stats::binom.test(x, as.integer(round(n)))$conf.int[1:2]
+  x <- max(0L, min(as.integer(janitor::round_half_up(x, 0)), as.integer(janitor::round_half_up(n, 0))))
+  stats::binom.test(x, as.integer(janitor::round_half_up(n, 0)))$conf.int[1:2]
 }
 
 #' Safe wrapper around fisher.test
 #' Returns list with p.value and conf.int; tolerates degenerate tables.
 safe_fisher <- function(a, c_val, b, d) {
-  mat <- matrix(c(as.integer(round(a)), as.integer(round(c_val)),
-                   as.integer(round(b)), as.integer(round(d))), nrow = 2)
+  mat <- matrix(c(as.integer(janitor::round_half_up(a, 0)), as.integer(janitor::round_half_up(c_val, 0)),
+                   as.integer(janitor::round_half_up(b, 0)), as.integer(janitor::round_half_up(d, 0))), nrow = 2)
   tryCatch(
     stats::fisher.test(mat),
     error = function(e) list(p.value = NA_real_,

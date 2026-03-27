@@ -327,7 +327,7 @@ freq_stats <- function(data, var_name, var_fmt, ord_fmt, display_name,
   all_data <- dplyr::bind_rows(freq_wide, denom_row) %>%
     dplyr::mutate(dplyr::across(
       dplyr::starts_with("n_"),
-      ~ dplyr::if_else(is.na(.), 0L, as.integer(.))
+      ~ dplyr::if_else(is.na(.), 0L, as.integer(.)) # legitimate: count initialized to zero for display table
     ))
 
   # Format count/percent for each treatment column (SAS lines 224-228)

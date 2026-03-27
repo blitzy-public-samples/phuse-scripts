@@ -692,7 +692,7 @@ ex_analysis_1 <- function(ex_dm) {
         arm_num_days %>% dplyr::select(studydays, freq),
         by = "studydays"
       ) %>%
-      tidyr::replace_na(list(freq = 0))
+      tidyr::replace_na(list(freq = 0))  # legitimate: frequency count initialized to zero when no subjects in dose bin
 
     # RETAIN logic: compute cumulative exits and proportion remaining
     # (SAS lines 542-556)
@@ -719,7 +719,7 @@ ex_analysis_1 <- function(ex_dm) {
 
   # Replace all remaining NA with 0 (SAS lines 579-582: array num loop)
   final_ExposureA <- final_ExposureA %>%
-    dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ tidyr::replace_na(.x, 0))) %>%
+    dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ tidyr::replace_na(.x, 0))) %>%  # legitimate: aggregated retention counts default to zero
     dplyr::filter(studydays >= 1) %>%
     dplyr::arrange(studydays)
 

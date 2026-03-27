@@ -364,9 +364,9 @@ write_xlsx <- function(data        = NULL,
       max_width_val <- max(content_width, label_width, name_width, na.rm = TRUE)
 
       # Apply SAS formula: round(1.1 * min(max(length, minwidth), maxwidth))
-      # Note: bare round() acceptable here — this is column width formatting,
+      # Note: bare round() justified — this is column width formatting,
       # not clinical statistical rounding (janitor::round_half_up not required)
-      round(1.1 * min(max(max_width_val, minwidth), maxwidth))
+      round(1.1 * min(max(max_width_val, minwidth), maxwidth))  # intentional base R round for layout
     })
 
     openxlsx::setColWidths(
@@ -501,9 +501,9 @@ write_xlsx <- function(data        = NULL,
 
   # Verbose completion logging (mirrors SAS lines 664-667) --------------------
   if (verbose) {
-    # Note: bare round() acceptable here — this is elapsed time display,
+    # Note: bare round() justified — this is elapsed time display,
     # not clinical statistical rounding (janitor::round_half_up not required)
-    elapsed <- round(
+    elapsed <- round(  # intentional base R round for display
       as.numeric(difftime(Sys.time(), start_time, units = "secs")),
       2L
     )

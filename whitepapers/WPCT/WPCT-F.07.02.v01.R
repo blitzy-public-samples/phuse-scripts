@@ -130,13 +130,13 @@ buildtable <- function(avalue, dfname, by1, by2, dignum){
   byvarslist <- c(by1,by2)
   summary <- eval(dfname)[,list(
     n = .N,
-    mean = round(mean(eval(avalue), na.rm = TRUE), digits=dignum),
-    sd = round(sd(eval(avalue), na.rm = TRUE), digits=dignum+1),
-    min = round(min(eval(avalue), na.rm = TRUE), digits=dignum),
-    q1 = round(quantile(eval(avalue), .25, na.rm = TRUE), digits=dignum),
-    mediam = round(median(eval(avalue), na.rm = TRUE), digits=dignum),
-    q3 = round(quantile(eval(avalue), .75, na.rm = TRUE), digits = dignum),
-    max = round(max(eval(avalue), na.rm = TRUE), digits = dignum)
+    mean = janitor::round_half_up(mean(eval(avalue), na.rm = TRUE), digits=dignum),
+    sd = janitor::round_half_up(sd(eval(avalue), na.rm = TRUE), digits=dignum+1),
+    min = janitor::round_half_up(min(eval(avalue), na.rm = TRUE), digits=dignum),
+    q1 = janitor::round_half_up(quantile(eval(avalue), .25, na.rm = TRUE), digits=dignum),
+    mediam = janitor::round_half_up(median(eval(avalue), na.rm = TRUE), digits=dignum),
+    q3 = janitor::round_half_up(quantile(eval(avalue), .75, na.rm = TRUE), digits = dignum),
+    max = janitor::round_half_up(max(eval(avalue), na.rm = TRUE), digits = dignum)
   ), 
   by = byvarslist]
   

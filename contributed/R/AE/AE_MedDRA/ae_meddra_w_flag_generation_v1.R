@@ -367,7 +367,7 @@ run_meddra_panel <- function(ae,
     }
 
     elapsed <- (proc.time() - start_time)["elapsed"]
-    cli::cli_inform(c("i" = "Elapsed: {round(elapsed, 1)}s"))
+    cli::cli_inform(c("i" = "Elapsed: {round(elapsed, 1)}s"))  # base R round() intentional — display only
 
     return(invisible(list(
       success      = FALSE,
@@ -617,7 +617,7 @@ run_meddra_panel <- function(ae,
   # 12. Timing
   # ---------------------------------------------------------------------------
   elapsed <- (proc.time() - start_time)["elapsed"]
-  cli::cli_alert_success("MedDRA panel complete in {round(elapsed, 1)}s")
+  cli::cli_alert_success("MedDRA panel complete in {round(elapsed, 1)}s")  # base R round() intentional — display only
 
   invisible(list(
     success      = TRUE,

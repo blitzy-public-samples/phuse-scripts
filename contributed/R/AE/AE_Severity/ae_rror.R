@@ -51,7 +51,7 @@ library(cli)
 # ==============================================================================
 sas_sum <- function(...) {
   vals <- c(...)
-  vals[is.na(vals)] <- 0
+  vals[is.na(vals)] <- 0  # intentional: NA counts treated as zero for 2x2 table accumulation
   sum(vals)
 }
 
@@ -200,7 +200,7 @@ rror <- function(ds_base_bysubjpt, config) {
 
   # Replace any remaining NA in cd columns with 0
   rror_count <- rror_count %>%
-    dplyr::mutate(dplyr::across(dplyr::starts_with("cd"), ~tidyr::replace_na(.x, 0L)))
+    dplyr::mutate(dplyr::across(dplyr::starts_with("cd"), ~tidyr::replace_na(.x, 0L)))  # legitimate: cell counts initialized to zero for 2x2 contingency tables
 
   # Calculate probabilities and store arm names (SAS lines 143-148)
   for (arm_i in seq_len(arm_count)) {
@@ -294,7 +294,7 @@ rror <- function(ds_base_bysubjpt, config) {
     # Join cc_ind to all terms
     ct_ij <- ct_ij %>%
       dplyr::left_join(cc_ind_df, by = "term_num") %>%
-      dplyr::mutate(cc_ind = dplyr::if_else(is.na(cc_ind), 0L, cc_ind))
+      dplyr::mutate(cc_ind = dplyr::if_else(is.na(cc_ind), 0L, cc_ind)) # legitimate: continuity correction indicator initialized to zero
 
     # Apply continuity correction (SAS lines 186-201)
     if (cc_sw == 1L) {
@@ -318,7 +318,7 @@ rror <- function(ds_base_bysubjpt, config) {
     rror_cc_ind[[pair_key]] <- ds_base_term %>%
       dplyr::select(term_num) %>%
       dplyr::left_join(cc_ind_df, by = "term_num") %>%
-      dplyr::mutate(cc_ind = dplyr::if_else(is.na(cc_ind), 0L, cc_ind))
+      dplyr::mutate(cc_ind = dplyr::if_else(is.na(cc_ind), 0L, cc_ind)) # legitimate: continuity correction indicator initialized to zero
 
     # Sort to match SAS by-group order
     ct_ij <- ct_ij %>%
