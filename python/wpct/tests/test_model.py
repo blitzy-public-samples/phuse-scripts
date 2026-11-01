@@ -21,7 +21,6 @@ import pytest
 from scipy import stats
 
 from wpct import compare, model
-from wpct.sas_semantics import format_level
 from wpct.schemas import PARAMETER_ESTIMATE_COLUMNS
 
 RESPONSE = "CHG"
@@ -187,6 +186,7 @@ def test_s02_mod_02_matches_full_rank_ols(tolerances: compare.Tolerances) -> Non
     estimate, stderr, tvalue, probt = _full_rank_ols(frame)
 
     assert isinstance(fit, model.GlmFitRecord)
+    assert model.STATUS_FITTED == "fitted"
     assert fit == model.GlmFitRecord(
         NOBS=N_RECORDS, DFE=N_RECORDS - 4, RANK=4, STATUS=model.STATUS_FITTED
     )
@@ -202,46 +202,113 @@ def test_s02_mod_02_matches_full_rank_ols(tolerances: compare.Tolerances) -> Non
 
 
 @pytest.mark.parametrize(
-    ("ref_level", "level_order", "trtpn_parameters"),
+    ("terms", "ref_level", "expected_rows", "aliased_position"),
     [
-        (0, (54, 81, 0), ("TRTPN 54", "TRTPN 81", "TRTPN 0")),
-        (54, (0, 81, 54), ("TRTPN 0", "TRTPN 81", "TRTPN 54")),
+        (
+            ("BASE", "TRTPN"),
+            0,
+            [
+                ("INTERCEPT", "", "Intercept"),
+                ("BASE", "", "BASE"),
+                ("TRTPN", "54", "TRTPN 54"),
+                ("TRTPN", "81", "TRTPN 81"),
+                ("TRTPN", "0", "TRTPN 0"),
+            ],
+            4,
+        ),
+        (
+            ("BASE", "TRTPN"),
+            54,
+            [
+                ("INTERCEPT", "", "Intercept"),
+                ("BASE", "", "BASE"),
+                ("TRTPN", "0", "TRTPN 0"),
+                ("TRTPN", "81", "TRTPN 81"),
+                ("TRTPN", "54", "TRTPN 54"),
+            ],
+            4,
+        ),
+        (
+            ("TRTPN", "BASE"),
+            0,
+            [
+                ("INTERCEPT", "", "Intercept"),
+                ("TRTPN", "54", "TRTPN 54"),
+                ("TRTPN", "81", "TRTPN 81"),
+                ("TRTPN", "0", "TRTPN 0"),
+                ("BASE", "", "BASE"),
+            ],
+            3,
+        ),
+        (
+            ("TRTPN", "BASE"),
+            54,
+            [
+                ("INTERCEPT", "", "Intercept"),
+                ("TRTPN", "0", "TRTPN 0"),
+                ("TRTPN", "81", "TRTPN 81"),
+                ("TRTPN", "54", "TRTPN 54"),
+                ("BASE", "", "BASE"),
+            ],
+            3,
+        ),
     ],
-    ids=["ref-0", "ref-54"],
+    ids=["base-first-ref-0", "base-first-ref-54", "trtpn-first-ref-0", "trtpn-first-ref-54"],
 )
 def test_d05_07_column_order_model_order_reference_last(
+    terms: tuple[str, ...],
     ref_level: int,
-    level_order: tuple[int, ...],
-    trtpn_parameters: tuple[str, ...],
+    expected_rows: list[tuple[str, str, str]],
+    aliased_position: int,
     tolerances: compare.Tolerances,
 ) -> None:
     """D-05, D-07: rows follow MODEL order, CLASS levels ascend and the ``REF=`` level comes last.
 
-    The records carry TRTPN as 81, 0, 54, so the order is the port's, not the input's. The reference
-    indicator depends on the Intercept and its siblings and is reported aliased (D-06). The BASE
-    slope does not depend on which level is the reference.
+    The Intercept comes first, then each term in the order passed: BASE precedes the TRTPN
+    indicators for ``chg = base trtpn`` and follows them for ``chg = trtpn base``. The records carry
+    TRTPN as 81, 0, 54, so the level order is the port's, not the input's. The reference indicator
+    depends on the Intercept and its preceding siblings and is reported aliased wherever MODEL order
+    puts it (D-06), while a BASE column after it is retained. Neither the MODEL order nor the
+    reference level changes the fit: its record and the BASE slope equal those of
+    ``chg = base trtpn`` with ``REF=0``. With ``REF=0`` the retained rows, keyed by parameter,
+    reproduce the independent full-rank least-squares fit in either MODEL order.
     """
-    rows, fit = _fit(_analysis_frame(), ref_level=ref_level)
+    frame = _analysis_frame()
+    rows, fit = _fit(frame, terms, ref_level)
 
-    expected = [("INTERCEPT", "", "Intercept"), ("BASE", "", "BASE")] + [
-        ("TRTPN", format_level(level), parameter)
-        for level, parameter in zip(level_order, trtpn_parameters)
-    ]
     assert list(rows[["EFFECT", "LEVEL", "PARAMETER"]].itertuples(index=False, name=None)) == (
-        expected
+        expected_rows
     )
-    assert rows["ALIASED"].tolist() == [False, False, False, False, True]
-    _assert_aliased(rows.iloc[-1])
-    retained_values = rows.iloc[:-1][["ESTIMATE", *INFERENCE_COLUMNS]].to_numpy(dtype="float64")
-    assert np.isfinite(retained_values).all()
-    assert (fit.RANK, fit.DFE) == (4, N_RECORDS - 4)
+    assert rows["ALIASED"].tolist() == [
+        position == aliased_position for position in range(len(expected_rows))
+    ]
+    _assert_aliased(rows.iloc[aliased_position])
+    retained = rows.drop(index=rows.index[aliased_position])
+    assert np.isfinite(retained[["ESTIMATE", *INFERENCE_COLUMNS]].to_numpy(dtype="float64")).all()
 
-    reference_rows, _ = _fit(_analysis_frame(), ref_level=REF_LEVEL)
-    base = rows["EFFECT"] == "BASE"
+    reference_rows, reference_fit = _fit(frame)
+    assert fit == reference_fit
+    assert (fit.NOBS, fit.DFE, fit.RANK) == (N_RECORDS, N_RECORDS - 4, 4)
     for column in ("ESTIMATE", "STDERR"):
         _assert_finite_close(
-            rows.loc[base, column], reference_rows.loc[base, column], column, tolerances
+            rows.loc[rows["PARAMETER"] == "BASE", column],
+            reference_rows.loc[reference_rows["PARAMETER"] == "BASE", column],
+            column,
+            tolerances,
         )
+
+    if ref_level == REF_LEVEL:
+        # The independent fit omits the TRTPN 0 indicator, so it describes the REF=0 fits only.
+        keyed = rows.set_index("PARAMETER")
+        for column, independent in zip(
+            ("ESTIMATE", "STDERR", "TVALUE", "PROBT"), _full_rank_ols(frame), strict=True
+        ):
+            _assert_finite_close(
+                keyed.loc[["Intercept", "BASE", "TRTPN 54", "TRTPN 81"], column],
+                independent,
+                column,
+                tolerances,
+            )
 
 
 def test_s07_mod_03_constant_column_aliased(tolerances: compare.Tolerances) -> None:
@@ -287,15 +354,34 @@ def test_s07_mod_03_constant_column_aliased(tolerances: compare.Tolerances) -> N
 
 
 def _assert_incomplete_record_dropped(column: str, tolerances: compare.Tolerances) -> None:
-    """Assert a record missing ``column`` is excluded: the fit equals the fit without it (D-08)."""
-    frame = _analysis_frame()
-    frame.loc[7, column] = np.nan
-    rows, fit = _fit(frame)
-    expected_rows, expected_fit = _fit(frame.drop(index=7))
+    """Assert a record missing only ``column`` among the MODEL variables is excluded (D-08).
 
-    assert fit.NOBS == N_RECORDS - 1
+    Record 7, a ``TRTPN 0`` record, is made missing in ``column`` alone, so ``NOBS`` and ``DFE``
+    each drop by one. The fit equals the fit on the frame without that record, and its retained
+    rows reproduce the independent full-rank least-squares fit of that frame, with ``TRTPN 0``
+    aliased.
+    """
+    frame = _analysis_frame()
+    assert frame.at[7, CLASS_VAR] == REF_LEVEL
+    frame.loc[7, column] = np.nan
+    others = [name for name in (RESPONSE, *TERMS) if name != column]
+    assert np.isfinite(frame.loc[7, others].to_numpy(dtype="float64")).all(), frame.loc[7]
+    complete = frame.drop(index=7)
+    rows, fit = _fit(frame)
+    expected_rows, expected_fit = _fit(complete)
+
+    assert (fit.NOBS, fit.DFE, fit.RANK) == (N_RECORDS - 1, N_RECORDS - 1 - 4, 4)
     assert fit == expected_fit
     _assert_same_solution(rows, expected_rows, tolerances)
+
+    assert rows["PARAMETER"].tolist() == ["Intercept", "BASE", "TRTPN 54", "TRTPN 81", "TRTPN 0"]
+    retained = rows.iloc[:4]
+    assert not retained["ALIASED"].any()
+    for name, independent in zip(
+        ("ESTIMATE", "STDERR", "TVALUE", "PROBT"), _full_rank_ols(complete), strict=True
+    ):
+        _assert_finite_close(retained[name], independent, name, tolerances)
+    _assert_aliased(rows.iloc[4])
 
 
 def test_missing_base_dropped(tolerances: compare.Tolerances) -> None:
@@ -306,6 +392,12 @@ def test_missing_base_dropped(tolerances: compare.Tolerances) -> None:
 def test_missing_chg_dropped(tolerances: compare.Tolerances) -> None:
     """D-08: a record with a missing response CHG is left out of the fit."""
     _assert_incomplete_record_dropped("CHG", tolerances)
+
+
+def test_missing_trtpn_dropped(tolerances: compare.Tolerances) -> None:
+    """D-08: a record missing the CLASS variable TRTPN, with BASE and CHG present, is left out of
+    S02-MOD-02 / S07-MOD-02 fits rather than entering with every TRTPN indicator 0."""
+    _assert_incomplete_record_dropped(CLASS_VAR, tolerances)
 
 
 def test_fit_without_studynum_column(tolerances: compare.Tolerances) -> None:
@@ -340,9 +432,7 @@ def test_absent_level(make_absent: Callable[[pd.DataFrame, pd.Series], pd.DataFr
     assert rows["ALIASED"].tolist() == [False, False, False, True]
     _assert_aliased(rows.iloc[-1])
     remaining = 2 * N_PER_LEVEL
-    assert fit == model.GlmFitRecord(
-        NOBS=remaining, DFE=remaining - 3, RANK=3, STATUS=model.STATUS_FITTED
-    )
+    assert fit == model.GlmFitRecord(NOBS=remaining, DFE=remaining - 3, RANK=3, STATUS="fitted")
 
 
 # model.py suppresses the RuntimeWarning statsmodels raises for the 0/0 residual variance, so any
@@ -358,7 +448,7 @@ def test_zero_dfe(tolerances: compare.Tolerances) -> None:
     )
     rows, fit = _fit(frame)
 
-    assert fit == model.GlmFitRecord(NOBS=3, DFE=0, RANK=3, STATUS=model.STATUS_FITTED)
+    assert fit == model.GlmFitRecord(NOBS=3, DFE=0, RANK=3, STATUS="fitted")
     assert rows["PARAMETER"].tolist() == ["Intercept", "BASE", "TRTPN 54", "TRTPN 0"]
     assert rows["ALIASED"].tolist() == [False, False, False, True]
     _assert_finite_close(rows["ESTIMATE"], [-1.0, 2.0, 1.0, 0.0], "ESTIMATE", tolerances)

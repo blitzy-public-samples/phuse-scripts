@@ -12,7 +12,9 @@ stated reason, only when git cannot query the checkout or the upstream commit is
 The git boundary cases put a fake ``git`` shell script, alone, on ``PATH``: one that answers with
 something other than an object id, hangs or answers slowly. They write only those scripts and the
 files the scripts read or write, under pytest's ``tmp_path``. They show that provenance then never
-reports integrity as verified, gives git up within its time budget and ends a timed-out git.
+reports integrity as verified, gives git up within its time budget and ends a timed-out git. The
+cases whose fake git passes commands to the real git need git and the upstream commit, and skip
+with the integrity cases' reasons without them.
 """
 
 from __future__ import annotations
@@ -285,13 +287,19 @@ def test_hanging_git_is_given_up_after_one_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     repo_paths: RepoPaths,
+    request: pytest.FixtureRequest,
 ) -> None:
     """A git command that hangs costs one timeout; git is then not started again.
 
     Every other command of the hash-object case goes to the real git, so HEAD and the first
-    input's upstream blob are known, while every row stays unverified.
+    input's upstream blob are known, while every row stays unverified. That case needs git and the
+    upstream commit, and skips with the integrity cases' reasons without them.
     """
     passes_through = hang_on != "*"
+    if passes_through:
+        # Resolved while PATH still finds the real git, so it skips when git cannot verify the
+        # checkout rather than when the fake git answers.
+        request.getfixturevalue("upstream_root")
     otherwise = f'exec {shlex.quote(_real_git())} "$@"' if passes_through else ""
     sleep = shlex.quote(_tool("sleep"))
     calls = _install_fake_git(
@@ -318,11 +326,13 @@ def test_hanging_git_is_given_up_after_one_timeout(
 
 @_posix_only
 def test_slow_git_is_bounded_by_the_time_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_paths: RepoPaths
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_paths: RepoPaths, upstream_root: Path
 ) -> None:
     """A git that answers every command, but slowly, is given up once the budget is spent.
 
-    Rows compared before that keep their result; every later row is unverified.
+    Rows compared before that keep their result; every later row is unverified. The real git runs
+    enough commands to spend the budget only in a checkout holding the upstream commit, so the case
+    needs git and that commit, and skips with the integrity cases' reasons without them.
     """
     real_git = shlex.quote(_real_git())
     sleep = shlex.quote(_tool("sleep"))
