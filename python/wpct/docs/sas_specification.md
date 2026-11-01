@@ -387,6 +387,13 @@ another macro. 07.02 reaches 19 macros. It does not reach `derive_lastminmax_mea
   `InputDataError("WPCT-F.07.02: input dataset not found: <absolute path>")`. A file the reader cannot
   read, or that yields no columns, raises
   `InputDataError("WPCT-F.07.02: cannot read SAS transport file <absolute path>: <reader message>")`.
+  A file the reader reads only in part, because it is not a whole number of 80-byte records or ends
+  inside an observation, raises
+  `InputDataError("WPCT-F.07.02: cannot read SAS transport file <absolute path>: truncated transport file: <detail>")`,
+  and one with bytes after the last observation's blank padding that do not begin another member raises
+  `InputDataError("WPCT-F.07.02: cannot read SAS transport file <absolute path>: damaged transport file: <detail>")`.
+  A cut exactly where both an observation and a record end cannot be detected, because a version 5
+  transport file records no observation count.
 
 #### S02-DEP-assert_depend — Dependency assertion
 
@@ -1108,6 +1115,13 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
   `InputDataError("WPCT-F.07.07: input dataset not found: <absolute path>")`. A file the reader cannot
   read, or that yields no columns, raises
   `InputDataError("WPCT-F.07.07: cannot read SAS transport file <absolute path>: <reader message>")`.
+  A file the reader reads only in part, because it is not a whole number of 80-byte records or ends
+  inside an observation, raises
+  `InputDataError("WPCT-F.07.07: cannot read SAS transport file <absolute path>: truncated transport file: <detail>")`,
+  and one with bytes after the last observation's blank padding that do not begin another member raises
+  `InputDataError("WPCT-F.07.07: cannot read SAS transport file <absolute path>: damaged transport file: <detail>")`.
+  A cut exactly where both an observation and a record end cannot be detected, because a version 5
+  transport file records no observation count.
 
 #### S07-DEP-derive_lastminmax_measure — Last/minimum/maximum derivation
 

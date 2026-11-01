@@ -12,7 +12,9 @@ Spec items realised here (``python/wpct/docs/sas_specification.md``):
   [whitepapers/utilities/util_access_test_data.sas:58-60] is not ported: the port opens no network
   connection and has no fallback to the GitHub URL (ENV-02, ENV-04). The SAS failure ``ERROR:
   (UTIL_ACCESS_TEST_DATA) Please confirm that data set ADVS exists in transport file ADVS.``
-  [whitepapers/utilities/util_access_test_data.sas:68-71] becomes an :class:`InputDataError`.
+  [whitepapers/utilities/util_access_test_data.sas:68-71] becomes an :class:`InputDataError`. So
+  does a truncated or damaged file, which ``pyreadstat`` reads in part without complaint:
+  :func:`read_xpt` checks that the observations returned account for the file's bytes.
 - S02-DEP-assert_dset_exist, S07-DEP-assert_dset_exist: the file-existence check of
   :func:`read_xpt`.
 - S02-DEP-assert_depend, S07-DEP-assert_depend, S02-DEP-assert_var_exist,
@@ -39,6 +41,21 @@ import pyreadstat
 from wpct.errors import InputDataError
 
 __all__ = ["XptMetadata", "read_xpt", "require_variables"]
+
+#: Layout of a SAS transport file, after SAS Institute TS-140, "The Record Layout of a Data Set in
+#: SAS Transport (XPORT) Format": whole 80-byte records. A member's observations start in the record
+#: after its observation header record, follow one another without gaps, and are padded with blanks
+#: to the end of their last record; the next member, if any, starts with its member header record.
+#: Version 8 files use the ``OBSV8`` and ``MEMBV8`` spellings of the two header records.
+_XPT_RECORD_LENGTH = 80
+_XPT_OBS_HEADER_TAGS = (
+    b"HEADER RECORD*******OBS     HEADER RECORD!!!!!!!",
+    b"HEADER RECORD*******OBSV8   HEADER RECORD!!!!!!!",
+)
+_XPT_MEMBER_HEADER_TAGS = (
+    b"HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!",
+    b"HEADER RECORD*******MEMBV8  HEADER RECORD!!!!!!!",
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +92,62 @@ def _cannot_read(program: str, abs_path: Path, reason: object) -> InputDataError
     return InputDataError(f"{program}: cannot read SAS transport file {abs_path}: {reason}")
 
 
+def _layout_problem(abs_path: Path, n_rows: int, row_length: int) -> str | None:
+    """Why the first member's observations do not account for the file's bytes, or ``None``.
+
+    ``pyreadstat`` reads every whole observation up to the end of the file and drops a partial one
+    without complaint, so a truncated file reads in part (S02/S07-DEP-util_access_test_data). The
+    check compares the ``n_rows`` observations of ``row_length`` bytes it returned with the layout
+    of ``_XPT_*``: the file is whole records, the observations start after the first observation
+    header record, only blank padding completes their last record, and any bytes after that begin
+    another member. It reads the header records and the bytes after the last observation, never
+    the observations themselves. Trailing all-blank observations, which the reader drops as
+    padding, pass when they end within the last record and are reported as damage otherwise.
+
+    Raises:
+        OSError: The file cannot be opened or read.
+    """
+    rows_read = f"observations read: {n_rows} of {row_length} bytes each"
+    with abs_path.open("rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        if size % _XPT_RECORD_LENGTH:
+            return (
+                f"truncated transport file: {size} bytes is not a whole number of "
+                f"{_XPT_RECORD_LENGTH}-byte records ({rows_read})"
+            )
+
+        data_start = None
+        while data_start is None:
+            record = stream.read(_XPT_RECORD_LENGTH)
+            if len(record) < _XPT_RECORD_LENGTH:
+                return f"no observation header record in {size} bytes"
+            if record.startswith(_XPT_OBS_HEADER_TAGS):
+                data_start = stream.tell()
+
+        data_end = data_start + n_rows * row_length
+        padded_end = -(-data_end // _XPT_RECORD_LENGTH) * _XPT_RECORD_LENGTH
+        if padded_end > size:
+            return (
+                f"truncated transport file: {size} bytes cannot hold the observations read "
+                f"({rows_read})"
+            )
+        stream.seek(data_end)
+        padding = stream.read(padded_end - data_end)
+        if padding != b" " * (padded_end - data_end):
+            return (
+                f"truncated transport file: {size} bytes end inside an observation "
+                f"({rows_read})"
+            )
+        if padded_end < size and not stream.read(_XPT_RECORD_LENGTH).startswith(
+            _XPT_MEMBER_HEADER_TAGS
+        ):
+            return (
+                f"damaged transport file: the {size - padded_end} bytes after the observations "
+                f"read and their padding do not begin a member header record ({rows_read})"
+            )
+    return None
+
+
 def read_xpt(path: str | os.PathLike[str], program: str) -> tuple[pd.DataFrame, XptMetadata]:
     """Read a SAS transport file into a frame and its metadata (S02/S07-DEP-util_access_test_data).
 
@@ -94,7 +167,13 @@ def read_xpt(path: str | os.PathLike[str], program: str) -> tuple[pd.DataFrame, 
         InputDataError: ``"<program>: input dataset not found: <absolute path>"`` when the path does
             not exist or is not a regular file (S02/S07-DEP-assert_dset_exist), or ``"<program>:
             cannot read SAS transport file <absolute path>: <reader message>"`` when the file cannot
-            be read or holds no variables.
+            be read or holds no variables. The same message ends with ``truncated transport file:
+            <detail>`` when the file is not a whole number of 80-byte records or ends inside an
+            observation, and with ``damaged transport file: <detail>`` when bytes after the last
+            observation's padding do not begin another member; the reader alone would return the
+            whole observations before the cut (S02/S07-DEP-util_access_test_data). A cut that
+            falls exactly where both an observation and a record end cannot be detected, because
+            a version 5 transport file records no observation count.
     """
     abs_path = Path(path).absolute()
     try:
@@ -127,6 +206,12 @@ def read_xpt(path: str | os.PathLike[str], program: str) -> tuple[pd.DataFrame, 
         n_rows=int(df.shape[0]),
         n_columns=int(df.shape[1]),
     )
+    try:
+        problem = _layout_problem(abs_path, metadata.n_rows, sum(metadata.storage_widths.values()))
+    except OSError as exc:
+        raise _cannot_read(program, abs_path, exc) from exc
+    if problem is not None:
+        raise _cannot_read(program, abs_path, problem)
     return df, metadata
 
 

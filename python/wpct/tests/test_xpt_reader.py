@@ -4,19 +4,22 @@ Spec items verified (``python/wpct/docs/sas_specification.md``):
 
 - S02-DEP-util_access_test_data, S07-DEP-util_access_test_data: the local read of ``ADVS``, the
   variable labels and storage widths it reports, checked against the raw transport header, and its
-  failure messages for a missing or unreadable input (AAP 0.6.4).
+  failure messages for a missing, unreadable, truncated or damaged input (AAP 0.6.4).
 - S02-DEP-assert_dset_exist, S07-DEP-assert_dset_exist: the file-existence check.
 - S02-DEP-assert_depend, S07-DEP-assert_depend, S02-DEP-assert_var_exist,
   S07-DEP-assert_var_exist: the ``vars=`` check of :func:`require_variables`.
-- D-10: dates stay SAS day numbers. D-11: a blank character value reads back as ``''`` and is
-  missing.
+- D-10: dates stay SAS day numbers, matching the dates the 07.07 log prints for the LMM-FLT-02
+  omitted baseline records. D-11: a blank character value reads back as ``''`` and is missing.
 
-The repository transport files are only read. The tests write only under ``tmp_path``.
+The repository transport files are only read, and the SAS logs are parsed only through
+``wpct.sas_reference``. The tests write only under ``tmp_path``.
 """
 
 from __future__ import annotations
 
 import datetime
+import errno
+import re
 import struct
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -29,6 +32,12 @@ import pytest
 
 from wpct.errors import InputDataError
 from wpct.paths import RepoPaths
+from wpct.sas_reference import (
+    KIND_WARNING_COUNT,
+    LOG_CHECKPOINT_MAP,
+    SasCheckpoint,
+    parse_log_warning_records,
+)
 from wpct.sas_semantics import char_missing_mask, is_char_missing
 from wpct.schemas import (
     PROGRAM_07_02,
@@ -38,25 +47,40 @@ from wpct.schemas import (
 )
 from wpct.xpt_reader import XptMetadata, read_xpt, require_variables
 
-#: Both ADVS files hold 32139 observations and 44 variables
-#: [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.log:32;
-#: whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:32].
-ADVS_SHAPE = (32139, 44)
-
-#: Per program: the repository copy of its ADVS input and the ``STUDYID`` counts it holds.
-EXPECTED_INPUTS: Mapping[str, tuple[str, dict[str, int]]] = {
-    PROGRAM_07_02: ("data/adam/cdisc/advs.xpt", {"CDISCPILOT01": 32139}),
-    PROGRAM_07_07: (
-        "data/adam/cdisc-split/advs.xpt",
-        {"CDISCPILOT01": 16034, "CDISCPILOT02": 16105},
-    ),
+#: Per program, the repository copy of its ADVS input. Its observation and variable counts are
+#: those of the ``WORK.ADVS`` NOTE, parsed from the program's log at run time.
+EXPECTED_INPUTS: Mapping[str, str] = {
+    PROGRAM_07_02: "data/adam/cdisc/advs.xpt",
+    PROGRAM_07_07: "data/adam/cdisc-split/advs.xpt",
 }
+
+#: The study of every 07.02 ADVS row [data/adam/cdisc/advs.xpt:STUDYID], so that study's row count
+#: is the SAS ADVS count.
+CDISC_STUDY = "CDISCPILOT01"
+
+#: Rows per study of the 07.07 ADVS. This split is a fact of the data file, not a SAS reference
+#: value: no SAS log or listing reports it [data/adam/cdisc-split/advs.xpt:STUDYID]. Only its sum is
+#: a SAS count, and that is parsed from the log.
+CDISC_SPLIT_STUDY_ROWS: Mapping[str, int] = {"CDISCPILOT01": 16034, "CDISCPILOT02": 16105}
 
 #: The ``DATE9.``-formatted variables of ADVS (D-10).
 DATE_VARIABLES = ("ADT", "TRTSDT", "TRTEDT")
 
 #: Day 0 of the SAS date scale.
 SAS_EPOCH = datetime.date(1960, 1, 1)
+
+#: The month abbreviations ``DATE9.`` prints, in English whatever the session locale (D-10). Dates
+#: are converted through this table, not ``strptime``'s ``%b``, which follows the locale.
+DATE9_MONTHS = (
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
+)
+_DATE9 = re.compile(r"(?P<day>\d{2})(?P<month>[A-Z]{3})(?P<year>\d{4})", re.ASCII)
+
+#: A missing numeric as SAS ``put`` shows it: ``.``, or a special missing ``.A``-``.Z`` or ``._``.
+_SAS_MISSING = re.compile(r"\.[A-Z_]?", re.ASCII)
+
+#: The variables of an omitted-baseline WARNING record that identify and check its ADVS row.
+WARNING_RECORD_NAMES = ("USUBJID", "PARAMCD", "ATPTN", "AVISITN", "ADT", "AVAL", "STUDYID", "TRTPN")
 
 #: Layout of a version 5 transport file, after SAS Institute TS-140, "The Record Layout of a Data
 #: Set in SAS Transport (XPORT) Format": 80-byte header records, the first member's header at
@@ -132,6 +156,44 @@ def _namestr_records(path: Path) -> dict[str, _Namestr]:
             raise ValueError(f"{path}: NAMESTR records repeat variable {variable!r}")
         records[variable] = _Namestr(ntype, label.decode("ascii").rstrip(" "), width)
     return records
+
+
+def _advs_checkpoint(
+    sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]], program_id: str
+) -> SasCheckpoint:
+    """The program's ``WORK.ADVS`` NOTE as parsed from its log, checked to carry both counts."""
+    (checkpoint,) = [
+        checkpoint
+        for checkpoint in sas_checkpoints[program_id]
+        if checkpoint.spec.SAS_DATASET == "ADVS" and checkpoint.spec.OCCURRENCE == 1
+    ]
+    assert checkpoint.ok, checkpoint.problem
+    assert checkpoint.spec.has_nvars
+    return checkpoint
+
+
+def _date9_day_number(text: str) -> int:
+    """The SAS day number of ``DATE9.`` text such as ``29FEB1960``: days since 1960-01-01 (D-10).
+
+    Raises:
+        ValueError: ``text`` is not ``ddMONyyyy`` with an upper-case English month, or names no
+            calendar date.
+    """
+    match = _DATE9.fullmatch(text)
+    if match is None or match["month"] not in DATE9_MONTHS:
+        raise ValueError(f"not a DATE9. value: {text!r}")
+    month = DATE9_MONTHS.index(match["month"]) + 1
+    return (datetime.date(int(match["year"]), month, int(match["day"])) - SAS_EPOCH).days
+
+
+def _equals_displayed(values: pd.Series, text: str) -> pd.Series:
+    """Where ``values`` equal the numeric value SAS ``put`` displayed as ``text``.
+
+    A displayed missing value matches the missing values, which :func:`read_xpt` returns as NaN.
+    """
+    if _SAS_MISSING.fullmatch(text):
+        return values.isna()
+    return values == float(text)
 
 
 @pytest.fixture(scope="module")
@@ -228,6 +290,192 @@ def test_unreadable_file(write_input: Callable[[Path], None], tmp_path: Path) ->
     assert message[len(prefix) :].strip()
 
 
+#: The version 5 observation header record; the first member's observations start in the record
+#: after it, and blank padding completes their last record (TS-140, as ``XPT_*`` above).
+XPT_OBS_TAG = b"HEADER RECORD*******OBS     HEADER RECORD!!!!!!!"
+
+
+class _Layout(NamedTuple):
+    """Where the observations of one repository ADVS file lie, taken from the file itself."""
+
+    data: bytes
+    data_start: int
+    row_length: int
+    n_rows: int
+
+
+def _half(layout: _Layout) -> bytes:
+    """The first half of the file, which is not a whole number of records."""
+    return layout.data[: len(layout.data) // 2]
+
+
+def _half_record_aligned(layout: _Layout) -> bytes:
+    """The first half cut back to a record boundary that falls inside an observation."""
+    cut = len(layout.data) // 2 // XPT_RECORD_LENGTH * XPT_RECORD_LENGTH
+    while (cut - layout.data_start) % layout.row_length == 0:
+        cut -= XPT_RECORD_LENGTH
+    return layout.data[:cut]
+
+
+def _tail_cut(layout: _Layout) -> bytes:
+    """The file without its last 1000 bytes."""
+    return layout.data[:-1000]
+
+
+def _padding_cut(layout: _Layout) -> bytes:
+    """The file without the blank padding after its last observation, and nothing more."""
+    data_end = layout.data_start + layout.n_rows * layout.row_length
+    assert layout.data[data_end:], "the file holds no padding to cut"
+    assert not layout.data[data_end:].strip(b" "), "bytes after the last observation not blank"
+    return layout.data[:data_end]
+
+
+def _extra_record(layout: _Layout) -> bytes:
+    """The whole file followed by one non-blank record that begins no member."""
+    return layout.data + b"0" * XPT_RECORD_LENGTH
+
+
+@pytest.mark.parametrize("program_id", PROGRAMS)
+@pytest.mark.parametrize(
+    ("cut", "reason"),
+    [
+        pytest.param(_half, "truncated", id="half"),
+        pytest.param(_half_record_aligned, "truncated", id="half-record-aligned"),
+        pytest.param(_tail_cut, "truncated", id="tail-cut"),
+        pytest.param(_padding_cut, "truncated", id="padding-cut"),
+        pytest.param(_extra_record, "damaged", id="extra-record"),
+    ],
+)
+def test_s02_and_s07_dep_util_access_test_data_rejects_partial_file(
+    cut: Callable[[_Layout], bytes],
+    reason: str,
+    program_id: str,
+    advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
+    repo_paths: RepoPaths,
+    tmp_path: Path,
+) -> None:
+    """A truncated or damaged copy of a program's ADVS is unreadable, never read in part.
+
+    Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data: SAS copies the whole
+    member to ``WORK.ADVS`` or fails with the ``UTIL_ACCESS_TEST_DATA`` error
+    [whitepapers/utilities/util_access_test_data.sas:62-71]. ``pyreadstat`` reads each cut copy
+    without complaint, dropping what follows the last whole observation, so the port raises
+    ``InputDataError`` naming the absolute path and the observations the reader returned. The cuts
+    come from the repository file's own size, observation header record and row length.
+    """
+    path = repo_paths.input_xpt(program_id)
+    data = path.read_bytes()
+    data_start = data.index(XPT_OBS_TAG) + XPT_RECORD_LENGTH
+    assert data_start % XPT_RECORD_LENGTH == 0
+    row_length = sum(record.width for record in _namestr_records(path).values())
+    layout = _Layout(data, data_start, row_length, advs[program_id][1].n_rows)
+    damaged = tmp_path / "advs.xpt"
+    damaged.write_bytes(cut(layout))
+    partial, _ = pyreadstat.read_xport(str(damaged), disable_datetime_conversion=True)
+    prefix = f"{program_id}: cannot read SAS transport file {damaged}: {reason} transport file: "
+
+    with pytest.raises(InputDataError) as excinfo:
+        read_xpt(damaged, program_id)
+
+    message = str(excinfo.value)
+    assert message.startswith(prefix)
+    assert f"(observations read: {len(partial)} of {row_length} bytes each)" in message
+
+
+def _header_only_advs(path: Path, repo_paths: RepoPaths) -> int:
+    data = repo_paths.input_xpt(PROGRAM_07_02).read_bytes()
+    path.write_bytes(data[: data.index(XPT_OBS_TAG) + XPT_RECORD_LENGTH])
+    return 0
+
+
+def _written(frame: pd.DataFrame, version: int) -> Callable[[Path, RepoPaths], int]:
+    def write(path: Path, repo_paths: RepoPaths) -> int:
+        pyreadstat.write_xport(frame, str(path), table_name="ADVS", file_format_version=version)
+        return len(frame)
+
+    return write
+
+
+_PADDED = pd.DataFrame(
+    {"USUBJID": ["01-701-1015", "01-701-1023", "x"], "AVAL": [64.0, np.nan, 1.0]}
+)
+
+
+@pytest.mark.parametrize(
+    "write_input",
+    [
+        pytest.param(_header_only_advs, id="advs-header-only"),
+        pytest.param(_written(_PADDED, 5), id="padded"),
+        pytest.param(_written(_PADDED, 8), id="padded-version-8"),
+        pytest.param(
+            _written(
+                pd.DataFrame({"AVAL": np.arange(float(XPT_RECORD_LENGTH // XPT_NUMERIC_WIDTH))}),
+                5,
+            ),
+            id="record-aligned",
+        ),
+        pytest.param(
+            _written(pd.DataFrame({"AVAL": [64.0, 70.0], "ANL01FL": ["Y", ""]}), 5),
+            id="blank-last-value",
+        ),
+        pytest.param(
+            _written(
+                pd.DataFrame(
+                    {"USUBJID": pd.Series([], dtype=object), "AVAL": pd.Series([], dtype=float)}
+                ),
+                5,
+            ),
+            id="no-observations",
+        ),
+    ],
+)
+def test_s02_and_s07_dep_util_access_test_data_reads_whole_file(
+    write_input: Callable[[Path, RepoPaths], int], repo_paths: RepoPaths, tmp_path: Path
+) -> None:
+    """A whole transport file reads as the reader returns it, whatever its padding.
+
+    Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data: the layout check
+    accepts a file whose observations end with or without blank padding, a version 8 file, a last
+    observation ending in a blank value, and a member with no observations, including the
+    repository ADVS header up to its observation header record.
+    """
+    path = tmp_path / "whole.xpt"
+    expected_rows = write_input(path, repo_paths)
+    direct, _ = pyreadstat.read_xport(str(path), disable_datetime_conversion=True)
+
+    frame, metadata = read_xpt(path, PROGRAM_07_07)
+
+    assert metadata.n_rows == len(frame) == expected_rows
+    pd.testing.assert_frame_equal(frame, direct, check_exact=True)
+
+
+def test_s02_and_s07_dep_util_access_test_data_layout_read_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file the layout check cannot open is unreadable, and the message ends with the OS error.
+
+    Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data: an input error, not a
+    traceback, when the file the reader has just read cannot be opened again.
+    """
+    path = tmp_path / "advs.xpt"
+    pyreadstat.write_xport(pd.DataFrame({"AVAL": [64.0]}), str(path), table_name="ADVS")
+    error = PermissionError(errno.EACCES, "Permission denied", str(path))
+    original_open = Path.open
+
+    def refuse_open(self: Path, *args: object, **kwargs: object) -> object:
+        if self == path:
+            raise error
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", refuse_open)
+
+    with pytest.raises(InputDataError) as excinfo:
+        read_xpt(path, PROGRAM_07_02)
+
+    assert str(excinfo.value) == f"WPCT-F.07.02: cannot read SAS transport file {path}: {error}"
+    assert excinfo.value.__cause__ is error
+
+
 def test_missing_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every absent required variable is named, in the order given; present names pass.
 
@@ -284,8 +532,13 @@ def test_require_variables_rejects_invalid_names(
 ) -> None:
     """``names`` must list each variable once, as strings; a lone string is not split.
 
-    Iterating a lone string would check each of its characters as a variable name, and a variable
-    listed twice in different cases leaves no single spelling for its column.
+    Verifies S02-DEP-assert_depend and S07-DEP-assert_depend: the ``vars=`` check takes a list of
+    variable names and checks each entry once [whitepapers/utilities/assert_depend.sas:102-128],
+    and the port receives that list as data. Iterating a lone string would check each of its
+    characters as a variable name, and a variable listed twice in different cases leaves no single
+    spelling for its column, because names match case-insensitively: S02-DEP-assert_var_exist and
+    S07-DEP-assert_var_exist look them up upper-cased
+    [whitepapers/utilities/assert_var_exist.sas:23].
     """
     frame = pd.DataFrame({"SAFFL": ["Y"], "USUBJID": ["a"]})
 
@@ -334,8 +587,12 @@ def test_require_variables_rejects_case_duplicates(
 ) -> None:
     """A required variable matching two columns that differ only in case is an input error.
 
-    SAS variable names are case-insensitive, so such a frame holds no single variable to address.
-    Only the required names are checked, and a missing variable is reported first.
+    Verifies S02-DEP-assert_var_exist and S07-DEP-assert_var_exist: ``varnum()`` looks up the
+    upper-cased name [whitepapers/utilities/assert_var_exist.sas:23], so SAS variable names are
+    case-insensitive and such a frame holds no single variable to address. Verifies
+    S02-DEP-assert_depend and S07-DEP-assert_depend: only the required names are checked, and the
+    missing-variable error of the ``vars=`` check [whitepapers/utilities/assert_depend.sas:114-116]
+    is reported first; the case clash raises the ``InputDataError`` their port notes document.
     """
     monkeypatch.chdir(tmp_path)
     frame = pd.DataFrame(
@@ -363,26 +620,36 @@ def test_s02_and_s07_dep_util_access_test_data_reads_advs(
     program_id: str,
     advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
     repo_paths: RepoPaths,
+    sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
 ) -> None:
     """Each program's ADVS reads whole, with its studies and every required variable.
 
-    Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data against ``WORK.ADVS has
-    32139 observations and 44 variables`` [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.log:32;
+    Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data against the
+    observation and variable counts of the ``WORK.ADVS`` NOTE, parsed from each log at run time
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.log:32;
     whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:32], and S02-DEP-assert_depend /
-    S07-DEP-assert_depend on the real input. ``ANL02FL`` is absent from both files, because the
-    07.07 derivation creates it (S07-TRN-03).
+    S07-DEP-assert_depend on the real input. The study row counts sum to the SAS count. ``ANL02FL``
+    is absent from both files, because the 07.07 derivation creates it (S07-TRN-03).
     """
-    relative_path, study_counts = EXPECTED_INPUTS[program_id]
     path = repo_paths.input_xpt(program_id)
     frame, metadata = advs[program_id]
+    checkpoint = _advs_checkpoint(sas_checkpoints, program_id)
+    shape = (checkpoint.NOBS, checkpoint.NVARS)
+    study_rows = frame["STUDYID"].value_counts().to_dict()
+    expected_study_rows = (
+        {CDISC_STUDY: checkpoint.NOBS}
+        if program_id == PROGRAM_07_02
+        else dict(CDISC_SPLIT_STUDY_ROWS)
+    )
 
-    assert path == repo_paths.repo_root / relative_path
-    assert frame.shape == ADVS_SHAPE
-    assert (metadata.n_rows, metadata.n_columns) == ADVS_SHAPE
+    assert path == repo_paths.repo_root / EXPECTED_INPUTS[program_id]
+    assert frame.shape == shape
+    assert (metadata.n_rows, metadata.n_columns) == shape
     assert metadata.path == path
     assert metadata.table_name == "ADVS"
     assert metadata.column_names == tuple(frame.columns)
-    assert frame["STUDYID"].value_counts().to_dict() == study_counts
+    assert study_rows == expected_study_rows
+    assert sum(study_rows.values()) == checkpoint.NOBS
     assert "ANL02FL" not in frame.columns
     require_variables(frame, REQUIRED_INPUT_VARIABLES[program_id], path, program_id)
 
@@ -392,6 +659,7 @@ def test_s02_and_s07_dep_util_access_test_data_reads_labels_and_storage_widths(
     program_id: str,
     advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
     repo_paths: RepoPaths,
+    sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
 ) -> None:
     """Each ADVS variable's label and storage width read back as its NAMESTR record holds them.
 
@@ -404,7 +672,7 @@ def test_s02_and_s07_dep_util_access_test_data_reads_labels_and_storage_widths(
     _, metadata = advs[program_id]
     header = _namestr_records(repo_paths.input_xpt(program_id))
 
-    assert len(header) == ADVS_SHAPE[1]
+    assert len(header) == _advs_checkpoint(sas_checkpoints, program_id).NVARS
     assert tuple(header) == metadata.column_names
     for name, pinned in ADVS_LABELS_AND_WIDTHS.items():
         assert (header[name].label, header[name].width) == pinned, name
@@ -502,25 +770,86 @@ def test_d10_dates_kept_as_sas_day_numbers(
 
 def test_d10_baseline_date_matches_sas_log(
     advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
+    repo_paths: RepoPaths,
+    sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
 ) -> None:
-    """The record SAS prints as ``AVAL=70 ADT=13MAY2013`` holds day number 19491 (D-10).
+    """Each baseline record the 07.07 log prints holds its printed ``ADT`` as a day number (D-10).
 
-    The derivation's omitted-record warning shows the 07.07 baseline record of ``01-703-1279``
-    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:124-128].
+    ``%derive_lastminmax_measure`` prints ``_all_`` of each baseline record it omits because its
+    group has no post-baseline record (LMM-FLT-02)
+    [whitepapers/ADaM/derive_lastminmax_measure.sas:167;
+    whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:124-183]. The records are parsed from the log at
+    run time, one per WARNING the LMM_BASE_OMITTED checkpoint counts. The 07.07 ADVS rows of each
+    record's ``USUBJID``, ``PARAMCD``, ``ATPTN`` and ``AVISITN`` (a printed ``.`` matching a
+    missing visit) include one whose ``ADT`` is the day number of the printed ``DATE9.`` date and
+    whose ``AVAL`` is the printed value, and they carry the printed ``STUDYID`` and ``TRTPN``.
     """
     frame, _ = advs[PROGRAM_07_07]
-    record = frame[
-        (frame["USUBJID"] == "01-703-1279")
-        & (frame["PARAMCD"] == "DIABP")
-        & (frame["ATPTN"] == 817)
-        & (frame["AVISITN"] == 0)
+    (spec,) = [
+        spec
+        for spec in LOG_CHECKPOINT_MAP[PROGRAM_07_07]
+        if spec.kind == KIND_WARNING_COUNT and spec.SAS_DATASET == "LMM_BASE_OMITTED"
+    ]
+    (checkpoint,) = [
+        checkpoint for checkpoint in sas_checkpoints[PROGRAM_07_07] if checkpoint.spec is spec
     ]
 
-    assert (datetime.date(2013, 5, 13) - SAS_EPOCH).days == 19491
-    assert len(record) >= 1
-    assert ((record["ADT"] == 19491) & (record["AVAL"] == 70)).any()
-    assert set(record["STUDYID"]) == {"CDISCPILOT01"}
-    assert set(record["TRTPN"]) == {54}
+    records = parse_log_warning_records(repo_paths.log_file(PROGRAM_07_07), spec)
+
+    assert checkpoint.ok, checkpoint.problem
+    assert checkpoint.NOBS > 0
+    assert len(records) == checkpoint.NOBS
+    for record in records:
+        printed = record.values
+        assert set(WARNING_RECORD_NAMES) <= set(printed), record.line
+        rows = frame[
+            (frame["USUBJID"] == printed["USUBJID"])
+            & (frame["PARAMCD"] == printed["PARAMCD"])
+            & _equals_displayed(frame["ATPTN"], printed["ATPTN"])
+            & _equals_displayed(frame["AVISITN"], printed["AVISITN"])
+        ]
+        dated = (rows["ADT"] == _date9_day_number(printed["ADT"])) & _equals_displayed(
+            rows["AVAL"], printed["AVAL"]
+        )
+        assert dated.any(), record.line
+        assert set(rows["STUDYID"]) == {printed["STUDYID"]}, record.line
+        assert set(rows["TRTPN"]) == {float(printed["TRTPN"])}, record.line
+
+
+@pytest.mark.parametrize(
+    ("text", "day_number"),
+    [
+        pytest.param("01JAN1960", 0, id="epoch"),
+        pytest.param("02JAN1960", 1, id="day-after-epoch"),
+        pytest.param("31DEC1959", -1, id="day-before-epoch"),
+        pytest.param("29FEB1960", 59, id="leap-day"),
+        pytest.param("01MAR1960", 60, id="after-leap-day"),
+        pytest.param("01JAN1961", 366, id="after-leap-year"),
+    ],
+)
+def test_d10_date9_day_numbers(text: str, day_number: int) -> None:
+    """``DATE9.`` text converts to its day count from 1960-01-01, the SAS date scale (D-10).
+
+    Hand-chosen dates around the epoch and the 1960 leap day, not SAS reference values. They pin
+    the conversion that :func:`test_d10_baseline_date_matches_sas_log` applies to the log's dates.
+    """
+    assert _date9_day_number(text) == day_number
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("13May2013", id="lower-case-month"),
+        pytest.param("13MAI2013", id="non-english-month"),
+        pytest.param("1MAY2013", id="one-digit-day"),
+        pytest.param("30FEB2013", id="no-such-day"),
+        pytest.param("2013-05-13", id="iso-date"),
+    ],
+)
+def test_d10_date9_rejects(text: str) -> None:
+    """Text that is not an upper-case English ``DATE9.`` calendar date is refused (D-10)."""
+    with pytest.raises(ValueError):
+        _date9_day_number(text)
 
 
 @pytest.mark.parametrize("program_id", PROGRAMS)

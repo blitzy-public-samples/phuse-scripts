@@ -33,10 +33,13 @@ from wpct.sas_reference import (
     LOG_CHECKPOINT_MAP,
     WARNING_COUNT_PREFIXES,
     ListingTable,
+    LogCheckpointSpec,
+    LogWarningRecord,
     SasCheckpoint,
     load_sas_exports,
     parse_glm_listing,
     parse_log_checkpoints,
+    parse_log_warning_records,
     split_parameter,
 )
 from wpct.schemas import (
@@ -933,6 +936,176 @@ def test_missing_reference_raises(
         parse(missing)
 
     assert str(raised.value) == f"{message}{missing.absolute()}"
+
+
+def _synthetic_warning_spec(line: int, end_line: int) -> LogCheckpointSpec:
+    """A LMM_BASE_OMITTED ``warning_count`` entry over ``line``-``end_line`` of a synthetic log."""
+    return LogCheckpointSpec(
+        SAS_DATASET="LMM_BASE_OMITTED",
+        OCCURRENCE=1,
+        PARAMCD=None,
+        ATPTN=None,
+        line=line,
+        end_line=end_line,
+        kind=KIND_WARNING_COUNT,
+        has_nvars=False,
+        description="synthetic omitted-baseline warnings (LMM-FLT-02)",
+    )
+
+
+def _write_log(directory: Path, lines: list[str]) -> Path:
+    """Write ``lines`` as an LF-terminated synthetic log under ``directory``."""
+    log = directory / "synthetic.log"
+    log.write_bytes(("\n".join(lines) + "\n").encode("latin-1"))
+    return log
+
+
+def test_lmm_flt_02_parse_log_warning_records(tmp_path: Path) -> None:
+    """Each counted WARNING yields the ``name=value`` pairs ``put _all_`` printed with it.
+
+    Verifies the parser of the LMM-FLT-02 omission records: ``%derive_lastminmax_measure`` writes
+    ``put '<text> ' _all_;`` per omitted baseline record
+    [whitepapers/ADaM/derive_lastminmax_measure.sas:167], and the log wraps the pairs over
+    continuation lines. The synthetic log holds hand-chosen values, not SAS output: a record whose
+    pairs start on the next line and wrap, a value with blanks, an empty value, a missing ``.``,
+    a WARNING with another prefix and a NOTE inside the range, the last counted record continuing
+    past the range end, and a counted WARNING after the range.
+    """
+    spec = _synthetic_warning_spec(2, 9)
+    log = _write_log(
+        tmp_path,
+        [
+            "NOTE: There were 4 observations read from the data set WORK.LMM_BASE_ANL.",
+            f"{_OMITTED_WARNING}, such as",
+            "in_base=1 in_post=0 AVAL=61.5 ADT=29FEB2016 STUDYID=STUDYA USUBJID=A-001",
+            "PARAM=Systolic Blood Pressure (mmHg) AVISITN=. avisit=",
+            "FIRST.USUBJID=1 _N_=3",
+            (
+                "WARNING: (DERIVE_LASTMINMAX_MEASURES) Omitting obs without a baseline measure,"
+                " such as"
+            ),
+            "in_base=0 in_post=1 AVAL=99 USUBJID=B-002",
+            "NOTE: An unrelated note inside the range.",
+            f"{_OMITTED_WARNING}, such as in_base=1 in_post=0 AVAL=72 USUBJID=C-003",
+            "ATPT=AFTER LYING DOWN FOR 5 MINUTES base=.",
+            "_N_=9",
+            "NOTE: The data set WORK.LMM_BASE_ANL has 2 observations and 15 variables.",
+            f"{_OMITTED_WARNING}, such as in_base=1 USUBJID=D-004",
+        ],
+    )
+    expected = (
+        (
+            2,
+            {
+                "in_base": "1",
+                "in_post": "0",
+                "AVAL": "61.5",
+                "ADT": "29FEB2016",
+                "STUDYID": "STUDYA",
+                "USUBJID": "A-001",
+                "PARAM": "Systolic Blood Pressure (mmHg)",
+                "AVISITN": ".",
+                "avisit": "",
+                "FIRST.USUBJID": "1",
+                "_N_": "3",
+            },
+        ),
+        (
+            9,
+            {
+                "in_base": "1",
+                "in_post": "0",
+                "AVAL": "72",
+                "USUBJID": "C-003",
+                "ATPT": "AFTER LYING DOWN FOR 5 MINUTES",
+                "base": ".",
+                "_N_": "9",
+            },
+        ),
+    )
+
+    records = parse_log_warning_records(log, spec)
+
+    assert records == tuple(LogWarningRecord(line, values) for line, values in expected)
+    assert [(record.line, list(record.values.items())) for record in records] == [
+        (line, list(values.items())) for line, values in expected
+    ]
+    assert len(set(records)) == len(expected)
+    with pytest.raises(TypeError):
+        records[0].values["AVAL"] = "0"  # type: ignore[index]
+    (checkpoint,) = parse_log_checkpoints(log, [spec])
+    assert checkpoint.ok, checkpoint.problem
+    assert checkpoint.NOBS == len(records)
+
+
+def _record_with_repeated_name(tmp_path: Path) -> tuple[Path, object]:
+    log = _write_log(tmp_path, [f"{_OMITTED_WARNING}, such as AVAL=1 USUBJID=A-001", "aval=2"])
+    return log, _synthetic_warning_spec(1, 1)
+
+
+def _dataset_spec(tmp_path: Path) -> tuple[Path, object]:
+    log = _write_log(tmp_path, [f"{_OMITTED_WARNING}, such as AVAL=1"])
+    specs = LOG_CHECKPOINT_MAP[PROGRAM_07_07]
+    return log, next(spec for spec in specs if spec.kind == KIND_DATASET)
+
+
+def _not_a_spec(tmp_path: Path) -> tuple[Path, object]:
+    log = _write_log(tmp_path, [f"{_OMITTED_WARNING}, such as AVAL=1"])
+    return log, LOG_CHECKPOINT_MAP[PROGRAM_07_07]
+
+
+def _missing_log(tmp_path: Path) -> tuple[Path, object]:
+    return tmp_path / f"{PROGRAM_07_07}.log", _synthetic_warning_spec(1, 1)
+
+
+@pytest.mark.parametrize(
+    "make_input, error, message",
+    [
+        pytest.param(
+            _not_a_spec,
+            TypeError,
+            "spec must be a LogCheckpointSpec, got tuple",
+            id="not-a-spec",
+        ),
+        pytest.param(
+            _dataset_spec,
+            ValueError,
+            "{spec.SAS_DATASET} at log line {spec.line} is a dataset checkpoint, not a "
+            "warning_count",
+            id="dataset-kind",
+        ),
+        pytest.param(
+            _record_with_repeated_name,
+            ValueError,
+            "the WARNING record at log line 1 prints AVAL= and aval=, the same SAS name ignoring "
+            "case",
+            id="repeated-name",
+        ),
+        pytest.param(
+            _missing_log, InputDataError, "reference log not found: {path}", id="missing-log"
+        ),
+    ],
+)
+def test_lmm_flt_02_parse_log_warning_records_rejects(
+    make_input: Callable[[Path], tuple[Path, object]],
+    error: type[Exception],
+    message: str,
+    tmp_path: Path,
+) -> None:
+    """A spec that is not a ``warning_count``, a repeated name or a missing log is refused.
+
+    The LMM-FLT-02 omission records come from ``put _all_``, which prints each variable of the
+    program data vector once [whitepapers/ADaM/derive_lastminmax_measure.sas:167], and SAS names
+    ignore case, so a repeated name means the lines are not one such record. A missing log raises
+    naming its absolute path.
+    """
+    log, spec = make_input(tmp_path)
+
+    with pytest.raises(error) as raised:
+        parse_log_warning_records(log, spec)  # type: ignore[arg-type]
+
+    assert type(raised.value) is error
+    assert str(raised.value) == message.format(spec=spec, path=log.absolute())
 
 
 # --- Full-precision SAS exports -------------------------------------------------------------------

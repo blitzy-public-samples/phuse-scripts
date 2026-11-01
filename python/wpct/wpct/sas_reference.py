@@ -12,6 +12,9 @@ SAS 9.4 TS1M2 with SAS/STAT 13.2, committed in ``6fc757d`` (2016-02-26).
 
 - :data:`LOG_CHECKPOINT_MAP` and :func:`parse_log_checkpoints`: the dataset record counts of the
   logs at the pinned lines of AAP 0.7.3, 15 for 07.02 and 29 for 07.07.
+- :func:`parse_log_warning_records` and :class:`LogWarningRecord`: the ``name=value`` pairs SAS
+  prints with each WARNING a ``warning_count`` checkpoint counts, such as the LMM-FLT-02 omitted
+  baseline records of the 07.07 log, displayed values kept as printed.
 - :data:`GLM_TABLE_MAP` and :func:`parse_glm_listing`: the ParameterEstimates tables of the
   listings (S02-MOD-02, S07-MOD-02, S07-MOD-03), displayed tokens kept as printed.
 - :func:`load_sas_exports`: the seven optional full-precision exports named in
@@ -32,7 +35,7 @@ import numbers
 import os
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
@@ -65,10 +68,12 @@ __all__ = [
     "ListingRow",
     "ListingTable",
     "LogCheckpointSpec",
+    "LogWarningRecord",
     "SasCheckpoint",
     "load_sas_exports",
     "parse_glm_listing",
     "parse_log_checkpoints",
+    "parse_log_warning_records",
     "split_parameter",
 ]
 
@@ -533,6 +538,119 @@ def _count_warnings(spec: LogCheckpointSpec, lines: tuple[str, ...]) -> SasCheck
         ok=not problems,
         problem="; ".join(problems) if problems else None,
     )
+
+
+# A name SAS's ``put _all_`` prints before ``=``: a variable or automatic variable (``AVAL``,
+# ``avisit``, ``_N_``), or a BY-group indicator ``FIRST.<var>`` or ``LAST.<var>``.
+_PUT_NAME = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?"
+# A pair starts the joined record or follows a blank; a continuation line starts with a pair.
+_PUT_PAIR = re.compile(rf"(?:^| )(?P<name>{_PUT_NAME})=")
+_PUT_CONTINUATION = re.compile(rf"^{_PUT_NAME}=")
+
+
+@dataclass(frozen=True)
+class LogWarningRecord:
+    """The record one counted WARNING of a ``warning_count`` checkpoint prints with ``_all_``.
+
+    ``%derive_lastminmax_measure`` writes ``put '<text> ' _all_;`` for each baseline record it
+    omits because its group has no post-baseline record (LMM-FLT-02)
+    [whitepapers/ADaM/derive_lastminmax_measure.sas:167]: the WARNING text, then ``name=value``
+    for every variable of the program data vector, wrapped across log lines between pairs
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:124-183].
+
+    Attributes:
+        line: The 1-based log line of the WARNING.
+        values: Each printed name mapped to its displayed value, in printed order, as a read-only
+            mapping. Names keep their printed case (``AVAL``, ``avisit``, ``FIRST.STUDYID``).
+            Values are the displayed text: ``"."`` for a missing numeric, ``""`` for a blank
+            character value, and the ``DATE9.`` text of a date such as ``ADT=13MAY2013``, whose SAS
+            day number (D-10) the caller derives.
+    """
+
+    line: int
+    values: Mapping[str, str] = field(hash=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
+
+
+def parse_log_warning_records(
+    path: str | os.PathLike[str], spec: LogCheckpointSpec
+) -> tuple[LogWarningRecord, ...]:
+    """Read the ``name=value`` pairs printed with each counted WARNING of a ``warning_count``.
+
+    The counted WARNINGs are the lines :func:`parse_log_checkpoints` counts for ``spec``: those of
+    ``spec.line``-``spec.end_line`` that start with ``WARNING_COUNT_PREFIXES[spec.SAS_DATASET]``.
+    For LMM_BASE_OMITTED each prints one baseline record omitted for want of a post-baseline
+    record (LMM-FLT-02) [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:124-183].
+
+    ``put '<text> ' _all_;`` [whitepapers/ADaM/derive_lastminmax_measure.sas:167] prints the
+    WARNING text, then ``name=value`` for every variable, and the log wraps between pairs. A record
+    is therefore the rest of its WARNING line after the prefix plus every following line that
+    starts with a ``name=`` token, joined with one blank, so the record of the last counted line
+    continues past ``spec.end_line`` (07.07 log lines 179-183). The text before the first pair is
+    the rest of the WARNING text (``, such as``) and is not returned. Any other line of the range,
+    such as a WARNING with another prefix, is skipped along with its continuation lines.
+
+    A name is a SAS name, or ``FIRST.`` or ``LAST.`` followed by a BY variable. A value runs to the
+    blank before the next ``name=`` token, so it may hold blanks
+    (``PARAM=Diastolic Blood Pressure (mmHg)``) or be empty (``avisit=``). SAS prints values
+    unquoted, so a value that itself contains a blank followed by ``name=`` cannot be told apart
+    from the next pair: the record is split there.
+
+    Args:
+        path: The SAS log, e.g. ``paths.log_file("WPCT-F.07.07")``.
+        spec: A ``warning_count`` entry of :data:`LOG_CHECKPOINT_MAP`.
+
+    Returns:
+        One :class:`LogWarningRecord` per counted line, in log order: none when the range holds no
+        counted line or lies past the end of the log. :func:`parse_log_checkpoints` verifies the
+        range, whose checkpoint is ``ok`` only when both of its ends are counted lines.
+
+    Raises:
+        TypeError: When ``spec`` is not a :class:`LogCheckpointSpec`.
+        ValueError: When ``spec`` is not of kind ``warning_count``, or when one record prints a
+            name twice, ignoring case as SAS names do.
+        InputDataError: ``"reference log not found: <absolute path>"`` when the path is not a
+            regular file, or ``"cannot read reference log <absolute path>: <reason>"``.
+    """
+    if not isinstance(spec, LogCheckpointSpec):
+        raise TypeError(f"spec must be a LogCheckpointSpec, got {type(spec).__name__}")
+    if spec.kind != KIND_WARNING_COUNT:
+        raise ValueError(
+            f"{spec.SAS_DATASET} at log line {spec.line} is a {spec.kind} checkpoint, not a "
+            f"{KIND_WARNING_COUNT}"
+        )
+    prefix = WARNING_COUNT_PREFIXES[spec.SAS_DATASET]
+    lines = _read_reference_lines(path, "reference log")
+    records: list[LogWarningRecord] = []
+    for number in range(spec.line, min(spec.end_line, len(lines)) + 1):
+        text = lines[number - 1]
+        if not text.startswith(prefix):
+            continue
+        parts = [text[len(prefix) :]]
+        parts.extend(
+            itertools.takewhile(_PUT_CONTINUATION.match, itertools.islice(lines, number, None))
+        )
+        records.append(LogWarningRecord(line=number, values=_put_pairs(" ".join(parts), number)))
+    return tuple(records)
+
+
+def _put_pairs(text: str, line: int) -> dict[str, str]:
+    """Split one joined ``put _all_`` record into its ``name=value`` pairs, in printed order."""
+    pairs: dict[str, str] = {}
+    printed: dict[str, str] = {}
+    matches = list(_PUT_PAIR.finditer(text))
+    for match, following in itertools.zip_longest(matches, matches[1:]):
+        name = match["name"]
+        if name.upper() in printed:
+            raise ValueError(
+                f"the WARNING record at log line {line} prints {printed[name.upper()]}= and "
+                f"{name}=, the same SAS name ignoring case"
+            )
+        printed[name.upper()] = name
+        pairs[name] = text[match.end() : len(text) if following is None else following.start()]
+    return pairs
 
 
 # --- GLM listings ---------------------------------------------------------------------------------
