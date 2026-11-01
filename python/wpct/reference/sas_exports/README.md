@@ -33,7 +33,7 @@ Notes on the table:
 
 * **Names, not positions.** Columns are matched by name, so their order in the file does not matter. Content columns are listed in SAS dataset order. Header names are matched case-insensitively: `studynum` and `STUDYNUM` are the same column, as are `BASE` and `base`. One file must not hold two columns with the same name ignoring case, whether spelled identically (`CHG,CHG`) or in different case (`CHG,chg`).
 * **Missing columns fail.** Every listed content column and stratum column is read. A column missing from a file is reported as FAIL, not skipped. The one exception is `Parameter` in a ParameterEstimates file, which `EFFECT` and `LEVEL` are derived from. A file without that column, or with a blank label or one of more than two words in it, is a load error rather than a FAIL: `python -m wpct reproduce` exits with code 2 and writes nothing, and the tests that use the exports error (see **Load errors** below).
-* **Extra columns are not compared.** ODS also writes `Dependent` and `Biased`. That is why `WORK.CSS_PVALUES` has 7 variables at `WPCT-F.07.02.log:992`, and `WORK.CSS_PVAL_STDY` has 8, including the BY variable, at `WPCT-F.07.07.log:1128`. Extra columns may stay in the file, and no comparison reads them. `Dependent`, `Biased` and any other column of an unknown name are kept as text. `Estimate`, `StdErr`, `tValue` and `Probt` are different: the loader reads these four as SAS numbers in every file, even one that neither lists nor compares them, so a value in them that is not a SAS number is a load error (see **Load errors** below).
+* **Extra columns are not compared.** ODS also writes `Dependent` and `Biased`. That is why `WORK.CSS_PVALUES` has 7 variables at `WPCT-F.07.02.log:992`, and `WORK.CSS_PVAL_STDY` has 8, including the BY variable, at `WPCT-F.07.07.log:1128`. Extra columns may stay in the file, and no comparison reads them. Only the columns that a file's schema in `wpct/schemas.py` types as numeric are read as SAS numbers. Extra columns are kept as text: `Dependent`, `Biased`, any other column of an unknown name, and an `Estimate`, `StdErr`, `tValue` or `Probt` column in a file whose schema lacks it.
 * **`EFFECT` and `LEVEL` are derived, not supplied.** [`sas_reference.split_parameter`](../../wpct/sas_reference.py) derives them from `Parameter`:
   * `TRTPN     54` gives `TRTPN` / `54`;
   * `Intercept` gives `INTERCEPT` / empty;
@@ -89,11 +89,13 @@ The shipped programs overwrite `CSS_STATS` and the ODS ParameterEstimates output
   * Run both commands from `python/wpct/`. See [`python/wpct/README.md`](../../README.md) for setup.
 * **Read-only.** The folder is read, never written: the port writes only below `python/wpct/outputs/` and to `python/wpct/reports/equivalence_report.md`.
 * **Load errors.** `python -m wpct reproduce` stops with an input error (exit code 2) and writes nothing, and the tests that use the exports error, when:
+  * the export folder, or an entry named as one of the files, is a broken or looping symlink (a link to nothing is not an absent file);
   * a present file cannot be parsed as CSV (an unterminated quote or a NUL byte, for example) or has no header row;
   * a header column has no name;
   * a file has two columns with the same name ignoring case, whether identical or case variants;
   * a record has more or fewer fields than the header;
   * a numeric column holds a value that is not a SAS number;
+  * a numeric column holds a number beyond double precision: one that overflows to infinity (`1E999`), or a nonzero one that underflows to zero (`1E-999`). Zero written in any form, `-0` or `0E999` for example, still loads as zero;
   * a ParameterEstimates file has no usable `Parameter` column.
 
   The one-line message names the file and the header field, column or data row at fault, never a value from the file.

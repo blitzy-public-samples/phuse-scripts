@@ -15,9 +15,10 @@ Exit codes (Agent Action Plan 0.6.5):
 * 2 (:data:`EXIT_INPUT_ERROR`): an input error, i.e. a missing or unreadable required input (an
   ADVS transport file, a SAS listing or log, or the tolerance file), a dataset lacking a required
   variable or storing one under more than one spelling (S02-DEP-assert_depend,
-  S07-DEP-assert_depend), a SAS export that is present but unreadable or malformed, a default
-  export path that exists but is not a directory, or a ``--sas-exports`` that is not an existing
-  directory; a write destination the guard rejects; or a command-line error from ``argparse``.
+  S07-DEP-assert_depend), a SAS export that is present but unreadable (a broken or looping
+  symlink included) or malformed, a default export path that exists but is not a directory or is
+  a broken or looping symlink, or a ``--sas-exports`` that is not an existing directory; a write
+  destination the guard rejects; or a command-line error from ``argparse``.
   The SAS exports are optional: an absent export is not an error, and its quantities are reported
   as NOT COMPARED.
 

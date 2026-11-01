@@ -58,7 +58,7 @@ Run every command from `python/wpct/`. The package runs from there without insta
 
 * `0` - no comparison failed and no program halted;
 * `1` - a comparison failed or a program halted (a halted program exports nothing, and the report records the halt);
-* `2` - an input error or a rejected write destination. Input errors are a missing or unreadable ADVS file, SAS listing, SAS log or tolerance file, a malformed SAS export, an input lacking a required variable, an ADVS file storing a required variable under more than one spelling (columns that differ only in case), a `--sas-exports` that is not an existing directory, and a command-line usage error. Inputs are read before anything is written, so an input error writes nothing. An absent SAS export is not an error: its quantities are reported as NOT COMPARED.
+* `2` - an input error or a rejected write destination. Input errors are a missing or unreadable ADVS file, SAS listing, SAS log or tolerance file, a SAS export that is present but unreadable (a broken or looping symlink included) or malformed, an input lacking a required variable, an ADVS file storing a required variable under more than one spelling (columns that differ only in case), a `--sas-exports` that is not an existing directory, and a command-line usage error. Inputs are read before anything is written, so an input error writes nothing. An absent SAS export is not an error: its quantities are reported as NOT COMPARED.
 
 `git` should be on the `PATH`: the report's provenance and source-integrity sections use it. Without it, the report says that integrity was not verified.
 

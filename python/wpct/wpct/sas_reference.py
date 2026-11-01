@@ -22,8 +22,17 @@ SAS 9.4 TS1M2 with SAS/STAT 13.2, committed in ``6fc757d`` (2016-02-26).
 
 A pinned line that no longer names its dataset, or a listing table that differs from its map
 entry, does not raise: it comes back as ``SasCheckpoint.ok = False`` or in
-``ListingTable.problems``, which ``wpct.compare`` reports as FAIL rows, never as skips. Only a
-missing or unreadable reference file raises :class:`~wpct.errors.InputDataError`.
+``ListingTable.problems``, which ``wpct.compare`` reports as FAIL rows, never as skips. A listing
+or log that is missing, not a regular file or unreadable raises
+:class:`~wpct.errors.InputDataError`.
+
+The exports are optional: an absent export file maps to ``None``, and an absent export directory
+maps every file to ``None``. An export directory or entry that is present but unusable (not a
+directory, not a regular file, or a broken or looping symlink) raises ``InputDataError``, and so
+does a supplied export that is malformed: one that cannot be parsed as CSV, has no header row,
+has an unnamed column, two columns with the same name ignoring case or a record of the wrong
+width, holds a numeric value that is not a SAS number or lies beyond double precision, or is a
+parameter-estimates export without a usable ``Parameter`` column.
 """
 
 from __future__ import annotations
@@ -319,8 +328,8 @@ def _warning_count(
     )
 
 
-# The trailing comment of each entry is the count its line holds, for readers and tests only; the
-# parser reads every value from the log itself.
+# The trailing comment of each entry is the count its line holds, for readers only; the parser
+# reads every value from the log itself.
 _LOG_07_02 = (
     _dataset(32, "ADVS", 1, "ADVS as read (S02-DEP-util_access_test_data)",
              nvars=True),  # 32139/44
@@ -1112,13 +1121,14 @@ def _verify_table(position: int, table: _ScannedTable, spec: GlmTableSpec) -> li
 
 #: Export column types read as numbers; ``char`` columns stay text and ``bool`` has no SAS source.
 _NUMERIC_TYPES = (NUM, INT, NULLABLE_INT)
-#: The ODS ParameterEstimates statistics, numeric in every export that carries them.
-_ESTIMATE_COLUMNS = ("ESTIMATE", "STDERR", "TVALUE", "PROBT")
 #: SAS missing numerics as written to CSV: ``.``, ``._`` and the special missing ``.A``-``.Z``.
 _SAS_MISSING_NUMBER = re.compile(r"^\.[A-Za-z_]?$")
 #: A ``BEST32.`` number. ``float()`` alone would also accept ``nan`` and ``inf``, which SAS never
-#: writes and which would turn a malformed value into a silent missing or infinite one.
-_SAS_NUMBER = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[Ee][+-]?\d+)?$")
+#: writes and which would turn a malformed value into a silent missing or infinite one. The
+#: exponent is unbounded here, so :func:`_sas_numbers` checks the converted range.
+_SAS_NUMBER = re.compile(r"^[+-]?(?P<mantissa>\d+\.?\d*|\.\d+)(?:[Ee][+-]?\d+)?$")
+#: A digit that makes a mantissa, and so the number it scales, nonzero.
+_NONZERO_DIGIT = re.compile(r"[1-9]")
 
 
 def load_sas_exports(
@@ -1133,9 +1143,10 @@ def load_sas_exports(
 
     - column names are stripped and folded to upper case (SAS names are case-insensitive);
     - trailing blanks are stripped from every value;
-    - the columns numeric in the file's ``schemas.sas_export_spec`` (matched upper-case), and
-      ``ESTIMATE STDERR TVALUE PROBT``, become float64: ``.``, ``._``, ``.A``-``.Z`` and empty are
-      NaN, and ``BEST32.`` text is parsed with ``float``;
+    - only the columns numeric in the file's ``schemas.sas_export_spec`` (matched upper-case)
+      become float64: ``.``, ``._``, ``.A``-``.Z`` and empty are NaN, and ``BEST32.`` text is
+      parsed with ``float``. Every other column stays text, a column the spec lacks included
+      even when it is named like a GLM statistic (an ``Estimate`` in ``css_anadata``);
     - a parameter-estimates export gains ``EFFECT`` and ``LEVEL`` from
       :func:`split_parameter` of its ``PARAMETER`` column, inserted before it.
 
@@ -1147,22 +1158,31 @@ def load_sas_exports(
         or ``None`` for an absent file. A directory that does not exist gives all ``None``.
 
     Raises:
-        InputDataError: When ``dir`` exists but is not a directory, or when an export:
-            is not a regular file; cannot be read or parsed as CSV (an unterminated quote or a
-            NUL byte, for example); has no header row; has a header column without a name; has
-            two columns with the same name ignoring case, spelled identically (``CHG,CHG``) or in
-            different case (``CHG,chg``); has a record with more or fewer fields than the
-            header; holds a numeric value that is not a SAS number; or is a parameter-estimates
-            export without a usable ``Parameter`` column. Every message is one line naming the
-            file and the header field, column or data row at fault, never a value from the file.
+        InputDataError: When ``dir`` exists but is not a directory, or is a broken or looping
+            symlink; or when an export: is a broken or looping symlink; is not a regular file;
+            cannot be read or parsed as CSV (an unterminated quote or a NUL byte, for example);
+            has no header row; has a header column without a name; has two columns with the
+            same name ignoring case, spelled identically (``CHG,CHG``) or in different case
+            (``CHG,chg``); has a record with more or fewer fields than the header; holds a
+            numeric value that is not a SAS number, or one beyond double precision (``1E999``
+            overflowing to infinity, or a nonzero ``1E-999`` underflowing to zero); or is a
+            parameter-estimates export without a usable ``Parameter`` column. Every message is
+            one line naming the file and the header field, column or data row at fault, never a
+            value from the file.
     """
     root = Path(dir).absolute()
     exports: dict[str, pd.DataFrame | None] = dict.fromkeys(SAS_EXPORT_FILES)
+    # ``exists`` follows symlinks and is False for a dangling or looping one, while ``lexists``
+    # sees the entry itself: only an entry that is not there at all is an absent export.
     try:
         exists, is_dir = root.exists(), root.is_dir()
     except OSError as exc:
         raise InputDataError(f"cannot read SAS export directory {root}: {exc}") from exc
     if not exists:
+        if os.path.lexists(root):
+            raise InputDataError(
+                f"cannot read SAS export directory {root}: broken or looping symlink"
+            )
         return exports
     if not is_dir:
         raise InputDataError(f"SAS export directory is not a directory: {root}")
@@ -1173,6 +1193,8 @@ def load_sas_exports(
         except OSError as exc:
             raise InputDataError(f"cannot read SAS export {path}: {exc}") from exc
         if not exists:
+            if os.path.lexists(path):
+                raise InputDataError(f"cannot read SAS export {path}: broken or looping symlink")
             continue
         if not is_file:
             raise InputDataError(f"SAS export is not a regular file: {path}")
@@ -1192,7 +1214,6 @@ def _load_export(path: Path, file_name: str) -> pd.DataFrame:
         zip(upper_columns(spec.column_types), spec.column_types.values(), strict=True)
     )
     numeric = {name for name, code in column_types.items() if code in _NUMERIC_TYPES}
-    numeric.update(_ESTIMATE_COLUMNS)
     for column in frame.columns:
         if column in numeric:
             frame[column] = _sas_numbers(frame[column], path, column)
@@ -1279,6 +1300,12 @@ def _fields(positions: Sequence[int]) -> str:
 def _sas_numbers(values: pd.Series, path: Path, column: str) -> pd.Series:
     """Parse one exported numeric column into float64, SAS missing values becoming NaN.
 
+    A number must also be a finite double that is zero only when its text is: ``1E999``, which
+    ``float`` turns into infinity, and a nonzero ``1E-999``, which it flushes to zero, are
+    rejected, since an invented infinity or exact zero would be compared as a SAS value (an exact
+    zero passes the GLM zero-reference rule). Zeros such as ``-0`` or ``0E999``, and subnormals
+    such as ``5E-324``, load as ``float`` reads them.
+
     A rejected value is located by column and data row only: the cell may hold a measurement
     with its units or a subject identifier shifted into the column, so it is never shown.
     """
@@ -1287,13 +1314,21 @@ def _sas_numbers(values: pd.Series, path: Path, column: str) -> pd.Series:
         token = text.strip(" ")
         if is_char_missing(token) or _SAS_MISSING_NUMBER.match(token):
             numbers_out[position] = math.nan
-        elif _SAS_NUMBER.match(token):
-            numbers_out[position] = float(token)
+            continue
+        match = _SAS_NUMBER.match(token)
+        number = math.nan if match is None else float(token)
+        if match is None:
+            reason = "the value is not a SAS numeric value"
+        elif not math.isfinite(number):
+            reason = "the value overflows double precision"
+        elif number == 0.0 and _NONZERO_DIGIT.search(match["mantissa"]):
+            reason = "the nonzero value underflows to zero in double precision"
         else:
-            raise InputDataError(
-                f"SAS export {path}: column {column}, data row {position + 1}: the value is not "
-                "a SAS numeric value"
-            )
+            numbers_out[position] = number
+            continue
+        raise InputDataError(
+            f"SAS export {path}: column {column}, data row {position + 1}: {reason}"
+        )
     return pd.Series(numbers_out, index=values.index, name=column)
 
 

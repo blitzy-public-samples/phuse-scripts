@@ -2,9 +2,18 @@
 
 The listings ``whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst`` and ``WPCT-F.07.07.lst`` carry the
 GLM ParameterEstimates tables of S02-MOD-02, S07-MOD-02 and S07-MOD-03; the logs carry the dataset
-record counts pinned in Agent Action Plan 0.7.3. Every expected value below was read from those
-unchanged files and is stated here independently of the parser's maps, so a map that drifted from
-its file fails here rather than agreeing with itself.
+record counts pinned in Agent Action Plan 0.7.3. No SAS listing token or log count serves as an
+expected value here: each SAS value is parsed at run time from those unchanged files and checked
+against the Python run of the same program, or against structural facts of the map (lines,
+datasets, row layout, aliased rows) that are stated here independently of the parser's maps, so a
+map that drifted from its file fails here rather than agreeing with itself.
+
+The parser-unit oracles read synthetic listings and logs, written under ``tmp_path`` with
+hand-chosen values; the display forms they share with the listings (``<.0001``, ``.``, blanks and
+an aliased row's ``0.00000000``) are the listing format, not SAS results. The full-precision export
+fixtures are synthetic mechanics inputs for the CSV loader, their ParameterEstimates rows modelled
+on the listing's layout: a fixture value that coincides with a listing token is loader input, never
+an expected value, and no fixture is a SAS reference value or evidence of equivalence.
 
 The reference files are located through the ``repo_paths`` fixture, parsed only through
 ``wpct.sas_reference`` and never written: a test that needs a mismatching reference copies it under
@@ -15,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import math
+import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import NamedTuple
@@ -32,6 +42,7 @@ from wpct.sas_reference import (
     KIND_WARNING_COUNT,
     LOG_CHECKPOINT_MAP,
     WARNING_COUNT_PREFIXES,
+    GlmTableSpec,
     ListingTable,
     LogCheckpointSpec,
     LogWarningRecord,
@@ -43,10 +54,13 @@ from wpct.sas_reference import (
     split_parameter,
 )
 from wpct.schemas import (
+    MODEL_KINDS,
     PROGRAM_07_02,
     PROGRAM_07_07,
     PROGRAMS,
     SAS_EXPORT_FILES,
+    SAS_EXPORT_STRATUM_COLUMNS,
+    SAS_PARAMETER_ESTIMATE_COLUMNS,
     export_spec,
 )
 
@@ -168,7 +182,12 @@ def test_listing_default_map_from_file_name(
     repo_paths: RepoPaths,
     listing_tables: Mapping[str, tuple[ListingTable, ...]],
 ) -> None:
-    """Without ``table_map`` the listing's file name selects its program's map."""
+    """Without ``table_map`` the listing's file name selects its program's map.
+
+    ``WPCT-F.07.02.lst`` selects the S02-MOD-02 endpoint tables and ``WPCT-F.07.07.lst`` the
+    S07-MOD-02 per-study and S07-MOD-03 pooled tables, each in the SAS loop order of S02-TRN-04
+    and S07-TRN-07.
+    """
     assert parse_glm_listing(repo_paths.listing_file(program_id)) == listing_tables[program_id]
 
 
@@ -182,83 +201,163 @@ class _Tokens(NamedTuple):
     probt: str
 
 
-@pytest.mark.parametrize(
-    "program_id, table_index, parameter, line, expected",
-    [
-        pytest.param(
-            PROGRAM_07_02,
-            0,
-            "Intercept",
-            10,
-            _Tokens("33.33892013", True, "3.90872985", "8.53", "<.0001"),
-            id="07.02-lst10-pvalue-bound",
-        ),
-        pytest.param(
-            PROGRAM_07_02,
-            0,
-            "BASE",
-            11,
-            _Tokens("-0.46079578", False, "0.05043555", "-9.14", "<.0001"),
-            id="07.02-lst11-negative-not-biased",
-        ),
-        pytest.param(
-            PROGRAM_07_02,
-            0,
-            "TRTPN 0",
-            14,
-            _Tokens("0.00000000", True, ".", ".", "."),
-            id="07.02-lst14-dot-missing",
-        ),
-        # SAS prints missing values as blanks once options missing=' ' takes effect.
-        pytest.param(
-            PROGRAM_07_02,
-            1,
-            "TRTPN 0",
-            29,
-            _Tokens("0.00000000", True, "", "", ""),
-            id="07.02-lst29-blank-missing",
-        ),
-        # The pooled studynum is aliased by the Intercept (D-06, DIV-01).
-        pytest.param(
-            PROGRAM_07_07,
-            2,
-            "studynum",
-            47,
-            _Tokens("0.00000000", True, ".", ".", "."),
-            id="07.07-lst47-pooled-815-studynum-dot",
-        ),
-        pytest.param(
-            PROGRAM_07_07,
-            5,
-            "studynum",
-            147,
-            _Tokens("0.00000000", True, "", "", ""),
-            id="07.07-lst147-pooled-817-studynum-blank",
-        ),
-        pytest.param(
-            PROGRAM_07_07,
-            3,
-            "TRTPN 54",
-            62,
-            _Tokens("0.00134690", True, "1.48321417", "0.00", "0.9993"),
-            id="07.07-lst62-817-study1-near-zero",
-        ),
-    ],
+#: A synthetic listing in the page layout of [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.lst:1-16,
+#: 33-47]: a per-study table under its BY line, then a pooled table without one. Every value is
+#: hand-chosen for the parser test and none is a SAS result. Table 0 prints missing values as
+#: ``.``; table 1 prints them as blanks, as SAS does once ``options missing=' '`` takes effect.
+_SYNTHETIC_LISTING = (
+    "The SAS System\n"  # 1
+    "\n"
+    "studynum=3\n"  # 3
+    "\n"
+    "The GLM Procedure\n"  # 5
+    "\n"
+    "Dependent Variable: chg\n"  # 7
+    "\n"
+    "                                       Standard\n"
+    "Parameter            Estimate             Error    t Value    Pr > |t|\n"  # 10
+    "\n"
+    "Intercept         12.50000000 B      2.50000000       5.00      <.0001\n"  # 12
+    "base              -0.25000000        0.12500000      -2.00      0.0475\n"
+    "TRTPN     54       1.75000000 B      0.87500000       2.00      0.0476\n"
+    "TRTPN     81      -3.25000000 B      1.62500000      -2.00      0.0477\n"
+    "TRTPN     0        0.00000000 B       .                .         .\n"  # 16
+    "The SAS System\n"  # 17
+    "\n"
+    "The GLM Procedure\n"
+    "\n"
+    "Dependent Variable: CHG   Change from Baseline\n"  # 21
+    "\n"
+    "                                       Standard\n"
+    "Parameter            Estimate             Error    t Value    Pr > |t|\n"  # 24
+    "\n"
+    "Intercept          7.50000000 B      2.50000000       3.00      0.0031\n"  # 26
+    "BASE               0.10000000        0.05000000       2.00      0.0472\n"
+    "TRTPN     54      -0.50000000 B      0.25000000      -2.00      0.0473\n"
+    "TRTPN     81       0.75000000 B      0.37500000       2.00      0.0474\n"
+    "TRTPN     0        0.00000000 B\n"  # 30
+    "studynum           0.00000000 B\n"  # 31
+    "\n"
 )
-def test_listing_tokens(
+
+
+def test_listing_tokens(tmp_path: Path) -> None:
+    """Displayed tokens are kept as printed: ``<.0001``, ``.`` and blank all survive the parse.
+
+    ``_SYNTHETIC_LISTING`` is parsed against its own map: a per-study table of ``MODEL CHG = BASE
+    TRTPN`` (S02-MOD-02, S07-MOD-02) and a pooled table that adds ``studynum`` (S07-MOD-03). The
+    hand-chosen tokens come back unchanged: the ``B`` flag and the unflagged ``BASE`` row of the
+    SOLUTION table (D-05), negative estimates and t values, and the aliased REF="0" level and
+    pooled ``studynum`` rows with estimate 0 and missing SE, t and p (D-06, D-07, DIV-01).
+    """
+    listing = tmp_path / "synthetic.lst"
+    listing.write_bytes(_SYNTHETIC_LISTING.encode("latin-1"))
+    _endpoint, study, pooled = MODEL_KINDS
+    table_map = (
+        GlmTableSpec(
+            index=0,
+            PARAMCD="SYNTH",
+            ATPTN=900,
+            MODEL=study,
+            STUDYNUM=3,
+            AVISITN=None,
+            by_line="studynum=3",
+            lines=(10, 16),
+            parameters=_PARAMETERS,
+        ),
+        GlmTableSpec(
+            index=1,
+            PARAMCD="SYNTH",
+            ATPTN=900,
+            MODEL=pooled,
+            STUDYNUM=None,
+            AVISITN=None,
+            by_line=None,
+            lines=(24, 31),
+            parameters=_POOLED_PARAMETERS,
+        ),
+    )
+
+    tables = parse_glm_listing(listing, table_map)
+
+    assert [table.problems for table in tables] == [(), ()]
+    assert [table.spec for table in tables] == list(table_map)
+    assert [
+        (table.index, table.by_line, table.dependent, table.first_line, table.last_line)
+        for table in tables
+    ] == [(0, "studynum=3", "chg", 10, 16), (1, None, "CHG", 24, 31)]
+    assert [tuple((row.EFFECT, row.LEVEL) for row in table.rows) for table in tables] == [
+        _PARAMETERS,
+        _POOLED_PARAMETERS,
+    ]
+    parsed = {
+        row.line: (
+            row.PARAMETER,
+            _Tokens(row.ESTIMATE, row.BIASED, row.STDERR, row.TVALUE, row.PROBT),
+        )
+        for table in tables
+        for row in table.rows
+    }
+    assert parsed == {
+        12: ("Intercept", _Tokens("12.50000000", True, "2.50000000", "5.00", "<.0001")),
+        13: ("base", _Tokens("-0.25000000", False, "0.12500000", "-2.00", "0.0475")),
+        14: ("TRTPN 54", _Tokens("1.75000000", True, "0.87500000", "2.00", "0.0476")),
+        15: ("TRTPN 81", _Tokens("-3.25000000", True, "1.62500000", "-2.00", "0.0477")),
+        16: ("TRTPN 0", _Tokens("0.00000000", True, ".", ".", ".")),
+        26: ("Intercept", _Tokens("7.50000000", True, "2.50000000", "3.00", "0.0031")),
+        27: ("BASE", _Tokens("0.10000000", False, "0.05000000", "2.00", "0.0472")),
+        28: ("TRTPN 54", _Tokens("-0.50000000", True, "0.25000000", "-2.00", "0.0473")),
+        29: ("TRTPN 81", _Tokens("0.75000000", True, "0.37500000", "2.00", "0.0474")),
+        30: ("TRTPN 0", _Tokens("0.00000000", True, "", "", "")),
+        31: ("studynum", _Tokens("0.00000000", True, "", "", "")),
+    }
+
+
+#: The design columns SAS aliases in every listed model: the REF="0" level, dependent on the
+#: Intercept and its sibling indicators (D-07), and the constant pooled ``studynum`` (DIV-01).
+_ALIASED = (("TRTPN", "0"), ("STUDYNUM", ""))
+
+#: The displayed precision of the listings (Agent Action Plan 0.2.2.3): estimate and standard
+#: error to 8 decimals, t to 2, and ``Pr > |t|`` to 4 or as the bound ``<.0001``.
+_DISPLAYED = {
+    "ESTIMATE": re.compile(r"^-?\d+\.\d{8}$"),
+    "STDERR": re.compile(r"^\d+\.\d{8}$"),
+    "TVALUE": re.compile(r"^-?\d+\.\d{2}$"),
+    "PROBT": re.compile(r"^(?:\d\.\d{4}|<\.0001)$"),
+}
+
+
+@pytest.mark.parametrize("program_id", PROGRAMS)
+def test_s02_mod_02_s07_mod_02_03_listing_displayed_values(
     program_id: str,
-    table_index: int,
-    parameter: str,
-    line: int,
-    expected: _Tokens,
     listing_tables: Mapping[str, tuple[ListingTable, ...]],
 ) -> None:
-    """Displayed tokens are kept as printed: ``<.0001``, ``.`` and blank all survive the parse."""
-    table = listing_tables[program_id][table_index]
-    (row,) = [row for row in table.rows if row.PARAMETER == parameter]
+    """Every SAS listing row prints its values at the displayed precision; only aliased rows miss.
 
-    assert row.line == line
-    assert _Tokens(row.ESTIMATE, row.BIASED, row.STDERR, row.TVALUE, row.PROBT) == expected
+    The REF="0" level of every table (D-07) and the pooled ``studynum`` (DIV-01) are aliased, so
+    SAS prints them flagged ``B`` with a zero estimate and missing SE, t and p (D-06): ``.``
+    before ``options missing=' '`` takes effect and blank after, and each listing shows both.
+    Every other row prints all four values (D-05). No token is stated here: each is parsed at run
+    time from the unchanged listing, and the program tests hold its values to the Python run
+    through ``wpct.compare``.
+    """
+    missing_forms = set()
+    for table in listing_tables[program_id]:
+        assert table.problems == ()
+        for row in table.rows:
+            inference = {"STDERR": row.STDERR, "TVALUE": row.TVALUE, "PROBT": row.PROBT}
+            assert _DISPLAYED["ESTIMATE"].match(row.ESTIMATE), row
+            if (row.EFFECT, row.LEVEL) in _ALIASED:
+                assert row.BIASED, row
+                assert float(row.ESTIMATE) == 0.0, row
+                (form,) = set(inference.values())
+                assert form in (".", ""), row
+                missing_forms.add(form)
+            else:
+                for field, token in inference.items():
+                    assert _DISPLAYED[field].match(token), (field, row)
+
+    assert missing_forms == {".", ""}
 
 
 def test_s02_trn_04_and_s07_trn_07_glm_table_map_order() -> None:
@@ -335,8 +434,9 @@ def test_listing_mismatch_reported(
 ) -> None:
     """A listing table that differs from its map entry is reported, never silently accepted.
 
-    The edited table keeps its rows and gains exactly one problem, which ``wpct.compare`` reports
-    as FAIL; every other table stays clean.
+    The edits break the BY ``studynum`` line of an S07-MOD-02 fit, its ``MODEL CHG`` response, and
+    a TRTPN CLASS level of its parameter rows (D-07). The edited table keeps its rows and gains
+    exactly one problem, which ``wpct.compare`` reports as FAIL; every other table stays clean.
     """
     reference = repo_paths.listing_file(PROGRAM_07_07)
     before = file_state(reference)
@@ -600,39 +700,29 @@ def test_s02_mod_02_s07_mod_02_unexpected_listing_table_fails(
     assert file_state(reference) == before
 
 
+def _letter_o(token: str) -> str:
+    """``token`` with its last digit written as the letter ``O``, which no SAS format prints."""
+    assert token[-1].isdigit(), token
+    return f"{token[:-1]}O"
+
+
+def _leading_zero_bound(token: str) -> str:
+    """``token`` as a ``<`` bound with a leading zero (``<0.0001``), a form SAS never prints."""
+    return f"<0{token.removeprefix('<')}"
+
+
 @pytest.mark.parametrize(
-    "old, new, problem",
+    "field, mutate",
     [
-        pytest.param(
-            "3.90872985",
-            "3.9O872985",
-            "unrecognised displayed values 3.9O872985",
-            id="invalid-stderr-token",
-        ),
-        pytest.param(
-            "8.53",
-            "8.O3",
-            "unrecognised displayed values 8.O3",
-            id="invalid-tvalue-token",
-        ),
-        pytest.param(
-            "<.0001",
-            "<0.0001",
-            "unrecognised displayed values <0.0001",
-            id="invalid-pvalue-bound",
-        ),
-        pytest.param(
-            "8.53",
-            "",
-            "expected 3 values or none after the estimate, found 2",
-            id="missing-tvalue-token",
-        ),
+        pytest.param("STDERR", _letter_o, id="invalid-stderr-token"),
+        pytest.param("TVALUE", _letter_o, id="invalid-tvalue-token"),
+        pytest.param("PROBT", _leading_zero_bound, id="invalid-pvalue-bound"),
+        pytest.param("TVALUE", None, id="missing-tvalue-token"),
     ],
 )
 def test_s02_mod_02_rejected_listing_tokens_fail(
-    old: str,
-    new: str,
-    problem: str,
+    field: str,
+    mutate: Callable[[str], str] | None,
     tmp_path: Path,
     repo_paths: RepoPaths,
     file_state: Callable[[Path], object],
@@ -644,13 +734,32 @@ def test_s02_mod_02_rejected_listing_tokens_fail(
 
     Edit only the Intercept [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst:10]; the row is
     rejected, so S02-MOD-02's parameter sequence also differs, and S02-TRN-05's three merged
-    cells fail even though their own TRTPN listing rows are unchanged.
+    cells fail even though their own TRTPN listing rows are unchanged. The edited token is the
+    Intercept's own ``field`` as parsed from the unchanged listing at run time, either altered by
+    ``mutate`` or, without one, deleted.
     """
     reference = repo_paths.listing_file(PROGRAM_07_02)
     before = file_state(reference)
+    intercept = listing_tables[PROGRAM_07_02][0].rows[0]
+    assert (intercept.line, intercept.PARAMETER) == (10, "Intercept")
     original = reference.read_bytes().split(b"\n")[9].decode("latin-1").rstrip(" ")
-    edited_line = original.replace(old, new, 1)
-    copy = _edited_line_copy(reference, tmp_path, 10, old, new)
+    *_, stderr, tvalue, probt = re.finditer(r"\S+", original)
+    spans = {"STDERR": stderr, "TVALUE": tvalue, "PROBT": probt}
+    assert {name: span.group() for name, span in spans.items()} == {
+        "STDERR": intercept.STDERR,
+        "TVALUE": intercept.TVALUE,
+        "PROBT": intercept.PROBT,
+    }
+    span = spans[field]
+    new = "" if mutate is None else mutate(span.group())
+    assert new != span.group()
+    edited_line = f"{original[: span.start()]}{new}{original[span.end() :]}"
+    problem = (
+        "expected 3 values or none after the estimate, found 2"
+        if mutate is None
+        else f"unrecognised displayed values {new}"
+    )
+    copy = _edited_line_copy(reference, tmp_path, 10, original, edited_line)
 
     tables = parse_glm_listing(copy)
 
@@ -690,7 +799,11 @@ def test_s02_mod_02_rejected_listing_tokens_fail(
     ids=["class-level", "intercept", "lower-case-base", "upper-case-base", "pooled-studynum"],
 )
 def test_split_parameter(label: str, expected: tuple[str, str]) -> None:
-    """Labels key on the canonical ``(EFFECT, LEVEL)`` pair whatever case SAS printed."""
+    """Labels key on the canonical ``(EFFECT, LEVEL)`` pair whatever case SAS printed.
+
+    The labels are those of the SOLUTION rows (D-05): the Intercept, ``BASE`` in either case, a
+    TRTPN CLASS level (D-07) and the pooled ``studynum`` of S07-MOD-03.
+    """
     assert split_parameter(label) == expected
 
 
@@ -700,7 +813,11 @@ def test_split_parameter(label: str, expected: tuple[str, str]) -> None:
     ids=["empty", "blank", "three-words", "not-a-string"],
 )
 def test_split_parameter_rejects(label: object, error: type[Exception]) -> None:
-    """A label that is not one effect word, optionally followed by a CLASS level, is refused."""
+    """A label that is not one effect word, optionally followed by a CLASS level, is refused.
+
+    A SOLUTION row names one design column (D-05): a term, or a CLASS variable and its level
+    (D-07).
+    """
     with pytest.raises(error):
         split_parameter(label)
 
@@ -709,66 +826,69 @@ def test_split_parameter_rejects(label: object, error: type[Exception]) -> None:
 
 
 class _Pinned(NamedTuple):
-    """One pinned log count of Agent Action Plan 0.7.3, as the log prints it."""
+    """Where one pinned log count of Agent Action Plan 0.7.3 stands and what its line names.
+
+    Only the structure is stated: the line, the dataset, the NOTE kind, whether the line is
+    compared as ``obs/vars`` and the stratum. The counts are parsed from the log at run time.
+    """
 
     line: int
     dataset: str
     kind: str
-    nobs: int
-    nvars: int | None
+    has_nvars: bool
     paramcd: str | None = None
     atptn: float | None = None
     end_line: int | None = None
 
 
 _PINNED_07_02 = (
-    _Pinned(32, "ADVS", KIND_DATASET, 32139, 44),
-    _Pinned(59, "ADVS_SUB", KIND_DATASET, 5925, 45),
-    _Pinned(202, "CSS_ANADATA", KIND_DATASET, 3548, 14),
-    _Pinned(726, "CSS_NEXTPARAM", KIND_DATASET, 1774, None, "DIABP"),
-    _Pinned(803, "CSS_NEXTTIMEPT", KIND_DATASET, 1774, None, "DIABP", 815),
-    _Pinned(978, "CSS_STATS", KIND_DATASET, 30, 12, "DIABP", 815),
-    _Pinned(992, "CSS_PVALUES", KIND_DATASET, 5, None, "DIABP", 815),
-    _Pinned(1024, "CSS_PVALUES", KIND_DATASET, 3, None, "DIABP", 815),
-    _Pinned(1049, "CSS_STATS", KIND_DATASET, 30, 13, "DIABP", 815),
-    _Pinned(1141, "CSS_NEXTPARAM", KIND_DATASET, 1774, None, "SYSBP"),
-    _Pinned(1219, "CSS_NEXTTIMEPT", KIND_DATASET, 1774, None, "SYSBP", 816),
-    _Pinned(1400, "CSS_STATS", KIND_DATASET, 30, 12, "SYSBP", 816),
-    _Pinned(1414, "CSS_PVALUES", KIND_DATASET, 5, None, "SYSBP", 816),
-    _Pinned(1446, "CSS_PVALUES", KIND_DATASET, 3, None, "SYSBP", 816),
-    _Pinned(1471, "CSS_STATS", KIND_DATASET, 30, 13, "SYSBP", 816),
+    _Pinned(32, "ADVS", KIND_DATASET, True),
+    _Pinned(59, "ADVS_SUB", KIND_DATASET, True),
+    _Pinned(202, "CSS_ANADATA", KIND_DATASET, True),
+    _Pinned(726, "CSS_NEXTPARAM", KIND_DATASET, False, "DIABP"),
+    _Pinned(803, "CSS_NEXTTIMEPT", KIND_DATASET, False, "DIABP", 815),
+    _Pinned(978, "CSS_STATS", KIND_DATASET, True, "DIABP", 815),
+    _Pinned(992, "CSS_PVALUES", KIND_DATASET, False, "DIABP", 815),
+    _Pinned(1024, "CSS_PVALUES", KIND_DATASET, False, "DIABP", 815),
+    _Pinned(1049, "CSS_STATS", KIND_DATASET, True, "DIABP", 815),
+    _Pinned(1141, "CSS_NEXTPARAM", KIND_DATASET, False, "SYSBP"),
+    _Pinned(1219, "CSS_NEXTTIMEPT", KIND_DATASET, False, "SYSBP", 816),
+    _Pinned(1400, "CSS_STATS", KIND_DATASET, True, "SYSBP", 816),
+    _Pinned(1414, "CSS_PVALUES", KIND_DATASET, False, "SYSBP", 816),
+    _Pinned(1446, "CSS_PVALUES", KIND_DATASET, False, "SYSBP", 816),
+    _Pinned(1471, "CSS_STATS", KIND_DATASET, True, "SYSBP", 816),
 )
 
 _PINNED_07_07 = (
-    _Pinned(32, "ADVS", KIND_DATASET, 32139, 44),
-    _Pinned(61, "ADVS_SUB", KIND_DATASET, 5926, 45),
-    _Pinned(79, "LMM_BASE", KIND_DATASET, 1514, None),
-    _Pinned(80, "LMM_POST", KIND_DATASET, 4411, None),
-    _Pinned(95, "LMM_BASE_ANL", KIND_TABLE, 629, None),
-    _Pinned(98, "LMM_POST_ANL", KIND_TABLE, 794, None),
-    _Pinned(108, "LMM_BASE_ANL", KIND_DATASET, 508, None),
-    _Pinned(117, "LMM_POST_ANL", KIND_DATASET, 498, None),
-    _Pinned(124, "LMM_BASE_OMITTED", KIND_WARNING_COUNT, 10, None, end_line=178),
-    _Pinned(186, "LMM_BASE_ANL", KIND_DATASET, 498, None),
-    _Pinned(195, "LMM_POST_ANL", KIND_DATASET, 498, None),
-    _Pinned(205, "ADVS_MIN", KIND_DATASET, 996, 16),
-    _Pinned(229, "ADVS_MIN", KIND_DATASET, 498, 16),
-    _Pinned(367, "CSS_SAFANA", KIND_DATASET, 498, 12),
-    _Pinned(399, "CSS_ANADATA", KIND_DATASET, 996, 12),
-    _Pinned(427, "CSS_ANADATA", KIND_DATASET, 996, 13),
-    _Pinned(859, "CSS_NEXTPARAM", KIND_DATASET, 996, None, "DIABP"),
-    _Pinned(936, "CSS_NEXTTIMEPT", KIND_DATASET, 500, None, "DIABP", 815),
-    _Pinned(1111, "CSS_STATS", KIND_DATASET, 9, 12, "DIABP", 815),
-    _Pinned(1128, "CSS_PVAL_STDY", KIND_DATASET, 10, None, "DIABP", 815),
-    _Pinned(1144, "CSS_PVAL_POOL", KIND_DATASET, 6, None, "DIABP", 815),
-    _Pinned(1162, "CSS_PVAL_STDY", KIND_DATASET, 9, None, "DIABP", 815),
-    _Pinned(1215, "CSS_STATS", KIND_DATASET, 9, 13, "DIABP", 815),
-    _Pinned(1295, "CSS_NEXTTIMEPT", KIND_DATASET, 496, None, "DIABP", 817),
-    _Pinned(1476, "CSS_STATS", KIND_DATASET, 9, 12, "DIABP", 817),
-    _Pinned(1493, "CSS_PVAL_STDY", KIND_DATASET, 10, None, "DIABP", 817),
-    _Pinned(1509, "CSS_PVAL_POOL", KIND_DATASET, 6, None, "DIABP", 817),
-    _Pinned(1528, "CSS_PVAL_STDY", KIND_DATASET, 9, None, "DIABP", 817),
-    _Pinned(1581, "CSS_STATS", KIND_DATASET, 9, 13, "DIABP", 817),
+    _Pinned(32, "ADVS", KIND_DATASET, True),
+    _Pinned(61, "ADVS_SUB", KIND_DATASET, True),
+    _Pinned(79, "LMM_BASE", KIND_DATASET, False),
+    _Pinned(80, "LMM_POST", KIND_DATASET, False),
+    _Pinned(95, "LMM_BASE_ANL", KIND_TABLE, False),
+    _Pinned(98, "LMM_POST_ANL", KIND_TABLE, False),
+    _Pinned(108, "LMM_BASE_ANL", KIND_DATASET, False),
+    _Pinned(117, "LMM_POST_ANL", KIND_DATASET, False),
+    _Pinned(124, "LMM_BASE_OMITTED", KIND_WARNING_COUNT, False, end_line=178),
+    _Pinned(186, "LMM_BASE_ANL", KIND_DATASET, False),
+    _Pinned(195, "LMM_POST_ANL", KIND_DATASET, False),
+    _Pinned(205, "ADVS_MIN", KIND_DATASET, True),
+    _Pinned(229, "ADVS_MIN", KIND_DATASET, True),
+    _Pinned(367, "CSS_SAFANA", KIND_DATASET, True),
+    _Pinned(399, "CSS_ANADATA", KIND_DATASET, True),
+    _Pinned(427, "CSS_ANADATA", KIND_DATASET, True),
+    _Pinned(859, "CSS_NEXTPARAM", KIND_DATASET, False, "DIABP"),
+    _Pinned(936, "CSS_NEXTTIMEPT", KIND_DATASET, False, "DIABP", 815),
+    _Pinned(1111, "CSS_STATS", KIND_DATASET, True, "DIABP", 815),
+    _Pinned(1128, "CSS_PVAL_STDY", KIND_DATASET, False, "DIABP", 815),
+    _Pinned(1144, "CSS_PVAL_POOL", KIND_DATASET, False, "DIABP", 815),
+    _Pinned(1162, "CSS_PVAL_STDY", KIND_DATASET, False, "DIABP", 815),
+    _Pinned(1215, "CSS_STATS", KIND_DATASET, True, "DIABP", 815),
+    _Pinned(1295, "CSS_NEXTTIMEPT", KIND_DATASET, False, "DIABP", 817),
+    _Pinned(1476, "CSS_STATS", KIND_DATASET, True, "DIABP", 817),
+    _Pinned(1493, "CSS_PVAL_STDY", KIND_DATASET, False, "DIABP", 817),
+    _Pinned(1509, "CSS_PVAL_POOL", KIND_DATASET, False, "DIABP", 817),
+    _Pinned(1528, "CSS_PVAL_STDY", KIND_DATASET, False, "DIABP", 817),
+    _Pinned(1581, "CSS_STATS", KIND_DATASET, True, "DIABP", 817),
 )
 
 
@@ -785,8 +905,14 @@ def _assert_pinned(
     position: int,
     pinned: tuple[_Pinned, ...],
     sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
+    results: Mapping[str, ProgramResult],
 ) -> None:
-    """Check map entry ``position`` against the pinned line and the count parsed from the log."""
+    """Check map entry ``position`` against its pinned line, and its parsed count against Python.
+
+    The SAS count is the one ``parse_log_checkpoints`` read from the unchanged log. It must be an
+    integer, carry a variable count exactly where the line is compared as ``obs/vars``, and equal
+    the count of the Python run's checkpoint of the same dataset, occurrence and stratum.
+    """
     expected = pinned[position]
     spec = LOG_CHECKPOINT_MAP[program_id][position]
     checkpoint = sas_checkpoints[program_id][position]
@@ -800,11 +926,22 @@ def _assert_pinned(
     )
     assert spec.OCCURRENCE == occurrence
     assert (spec.PARAMCD, spec.ATPTN) == (expected.paramcd, expected.atptn)
-    assert spec.has_nvars is (expected.nvars is not None)
+    assert spec.has_nvars is expected.has_nvars
     assert checkpoint.spec is spec
     assert checkpoint.ok, checkpoint.problem
     assert checkpoint.problem is None
-    assert (checkpoint.NOBS, checkpoint.NVARS) == (expected.nobs, expected.nvars)
+    assert type(checkpoint.NOBS) is int
+    if expected.has_nvars:
+        assert type(checkpoint.NVARS) is int
+    else:
+        assert checkpoint.NVARS is None
+    (python,) = [
+        recorded
+        for recorded in results[program_id].checkpoints
+        if (recorded.SAS_DATASET, recorded.OCCURRENCE) == (expected.dataset, occurrence)
+    ]
+    assert (python.PARAMCD, python.ATPTN) == (expected.paramcd, expected.atptn)
+    assert (python.NOBS, python.NVARS) == (checkpoint.NOBS, checkpoint.NVARS)
     if expected.kind == KIND_WARNING_COUNT:
         assert WARNING_COUNT_PREFIXES[expected.dataset] == _OMITTED_WARNING
         assert checkpoint.found_dataset is None
@@ -816,7 +953,14 @@ def _assert_pinned(
 
 
 def test_log_checkpoint_map_sizes() -> None:
-    """AAP 0.7.3 pins 15 log lines of WPCT-F.07.02 and 29 of WPCT-F.07.07."""
+    """AAP 0.7.3 pins 15 log lines of WPCT-F.07.02 and 29 of WPCT-F.07.07.
+
+    The 07.02 lines count the S02-DEP-util_access_test_data input, the S02-FLT-01 subset, the
+    S02-POP-01 analysis set and, per stratum, S02-TRN-04, S02-MOD-01, S02-MOD-02 and S02-TRN-05.
+    The 07.07 lines count the S07-DEP-util_access_test_data input, the S07-FLT-01 subset, the
+    derivation (LMM-FLT-01 to LMM-TRN-07), the S07-FLT-02 and S07-POP-01 selections, S07-TRN-05,
+    S07-TRN-06 and, per timepoint, S07-TRN-07, S07-MOD-01, S07-MOD-02, S07-MOD-03 and S07-TRN-08.
+    """
     assert tuple(LOG_CHECKPOINT_MAP) == PROGRAMS
     assert len(LOG_CHECKPOINT_MAP[PROGRAM_07_02]) == len(_PINNED_07_02) == 15
     assert len(LOG_CHECKPOINT_MAP[PROGRAM_07_07]) == len(_PINNED_07_07) == 29
@@ -826,30 +970,100 @@ def test_log_checkpoint_map_sizes() -> None:
 def test_s02_flt_01_to_trn_05_log_pinned_lines(
     position: int,
     sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
+    results: Mapping[str, ProgramResult],
 ) -> None:
-    """Each pinned WPCT-F.07.02.log line names its dataset and prints the AAP 0.7.3 count.
+    """Each pinned WPCT-F.07.02.log line names its dataset, and its count is the Python run's.
 
     The input and analysis sets (S02-DEP-util_access_test_data, S02-FLT-01, S02-POP-01), then per
     stratum the records (S02-TRN-04), statistics (S02-MOD-01), ParameterEstimates (S02-MOD-02)
     and merged statistics (S02-TRN-05) [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.log:32-1471].
     """
-    _assert_pinned(PROGRAM_07_02, position, _PINNED_07_02, sas_checkpoints)
+    _assert_pinned(PROGRAM_07_02, position, _PINNED_07_02, sas_checkpoints, results)
 
 
 @pytest.mark.parametrize("position", _pinned_cases(_PINNED_07_07))
 def test_lmm_flt_01_to_s07_trn_08_log_pinned_lines(
     position: int,
     sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
+    results: Mapping[str, ProgramResult],
 ) -> None:
-    """Each pinned WPCT-F.07.07.log line names its dataset and prints the AAP 0.7.3 count.
+    """Each pinned WPCT-F.07.07.log line names its dataset, and its count is the Python run's.
 
     The derivation counts (LMM-FLT-01 to LMM-TRN-07) include the PROC SQL row counts, the
-    NODUPKEY results and the 10 omitted-baseline WARNING lines of LMM-FLT-02; then the pooled
+    NODUPKEY results and the omitted-baseline WARNING lines of LMM-FLT-02; then the pooled
     analysis set (S07-TRN-05, S07-TRN-06) and per timepoint the statistics (S07-MOD-01), the
     per-study and pooled ParameterEstimates (S07-MOD-02, S07-MOD-03) and the merge (S07-TRN-08)
     [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:32-1581].
     """
-    _assert_pinned(PROGRAM_07_07, position, _PINNED_07_07, sas_checkpoints)
+    _assert_pinned(PROGRAM_07_07, position, _PINNED_07_07, sas_checkpoints, results)
+
+
+def _synthetic_spec(
+    name: str, line: int, kind: str, has_nvars: bool, end_line: int | None = None
+) -> LogCheckpointSpec:
+    """A map entry for the synthetic log: the first occurrence of ``name``, in no stratum."""
+    return LogCheckpointSpec(
+        SAS_DATASET=name,
+        OCCURRENCE=1,
+        PARAMCD=None,
+        ATPTN=None,
+        line=line,
+        end_line=end_line,
+        kind=kind,
+        has_nvars=has_nvars,
+        description=f"synthetic {kind} line",
+    )
+
+
+def test_lmm_trn_03_lmm_flt_02_synthetic_log_counts(tmp_path: Path) -> None:
+    """Hand-chosen counts are read from each NOTE form and from a pinned WARNING range.
+
+    A synthetic log holds data set NOTEs, the form of every DATA-step checkpoint such as the
+    S02-FLT-01 subset, read with and without the variable count; PROC SQL table NOTEs, the form
+    of LMM-TRN-03, read with and without the column count; and the omitted-baseline WARNINGs of
+    LMM-FLT-02, counted only inside their range. No count is a SAS result.
+    """
+    lines = (
+        "NOTE: The data set WORK.ALPHA has 123 observations and 7 variables.",  # 1
+        "NOTE: DATA statement used (Total process time):",
+        "NOTE: The data set WORK.BETA has 4567 observations and 8 variables.",  # 3
+        "",
+        "NOTE: Table WORK.GAMMA created, with 89 rows and 5 columns.",  # 5
+        "NOTE: Table WORK.DELTA created, with 21 rows and 3 columns.",  # 6
+        f"{_OMITTED_WARNING}, such as",  # 7: the range starts
+        "in_base=1 in_post=0 _N_=1",
+        f"{_OMITTED_WARNING}, such as",  # 9
+        "NOTE: PROCEDURE SQL used (Total process time):",
+        f"{_OMITTED_WARNING}, such as",  # 11: the range ends
+        f"{_OMITTED_WARNING}, such as",  # 12: outside the range
+    )
+    log = tmp_path / "synthetic.log"
+    log.write_bytes("".join(f"{line}\n" for line in lines).encode("latin-1"))
+    checkpoint_map = (
+        _synthetic_spec("ALPHA", 1, KIND_DATASET, True),
+        _synthetic_spec("BETA", 3, KIND_DATASET, False),
+        _synthetic_spec("GAMMA", 5, KIND_TABLE, False),
+        _synthetic_spec("DELTA", 6, KIND_TABLE, True),
+        _synthetic_spec("LMM_BASE_OMITTED", 7, KIND_WARNING_COUNT, False, end_line=11),
+    )
+
+    checkpoints = parse_log_checkpoints(log, checkpoint_map)
+
+    assert [checkpoint.spec for checkpoint in checkpoints] == list(checkpoint_map)
+    assert [
+        (checkpoint.found_dataset, checkpoint.NOBS, checkpoint.NVARS, checkpoint.ok)
+        for checkpoint in checkpoints
+    ] == [
+        ("ALPHA", 123, 7, True),
+        ("BETA", 4567, None, True),
+        ("GAMMA", 89, None, True),
+        ("DELTA", 21, 3, True),
+        (None, 3, None, True),
+    ]
+    assert [checkpoint.problem for checkpoint in checkpoints] == [None] * 5
+    assert [checkpoint.line_text for checkpoint in checkpoints] == [
+        lines[number - 1] for number in (1, 3, 5, 6, 7)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -888,7 +1102,11 @@ def test_log_mismatch_reported(
     repo_paths: RepoPaths,
     file_state: Callable[[Path], object],
 ) -> None:
-    """A pinned line that no longer holds its count is reported with no count, never dropped."""
+    """A pinned line that no longer holds its count is reported with no count, never dropped.
+
+    The edits rename the NOTE of the analysis set of S02-POP-01, S02-FLT-02, S02-FLT-03 and
+    S02-TRN-03, and break the range of the LMM-FLT-02 omitted-baseline WARNINGs.
+    """
     reference = repo_paths.log_file(program_id)
     before = file_state(reference)
     copy = _edited_line_copy(reference, tmp_path, line, old, new)
@@ -929,7 +1147,11 @@ def test_log_mismatch_reported(
 def test_missing_reference_raises(
     parse: Callable[[Path], object], file_name: str, message: str, tmp_path: Path
 ) -> None:
-    """Only a missing or unreadable reference raises, naming its absolute path."""
+    """Only a missing or unreadable reference raises, naming its absolute path.
+
+    Without the listing no S02-MOD-02 table can be compared, and without the log no record count
+    from S02-DEP-util_access_test_data to S02-TRN-05; neither absence is skipped.
+    """
     missing = tmp_path / file_name
 
     with pytest.raises(InputDataError) as raised:
@@ -1113,7 +1335,12 @@ def test_lmm_flt_02_parse_log_warning_records_rejects(
 
 @pytest.mark.parametrize("create", [True, False], ids=["empty-dir", "absent-dir"])
 def test_load_sas_exports_empty_dir(create: bool, tmp_path: Path) -> None:
-    """Without exports every ``schemas.SAS_EXPORT_FILES`` name is present and maps to None."""
+    """Without exports every ``schemas.SAS_EXPORT_FILES`` name is present and maps to None.
+
+    The seven names cover the record exports of S02-TRN-03, LMM-TRN-07 and S07-TRN-06, the merged
+    statistics of S02-TRN-05 and S07-TRN-08, and the ParameterEstimates of S02-MOD-02, S07-MOD-02
+    and S07-MOD-03; with none supplied, none is loaded.
+    """
     directory = tmp_path / "sas_exports"
     if create:
         directory.mkdir()
@@ -1157,6 +1384,73 @@ def test_s07_trn_05_load_sas_exports_latin1(tmp_path: Path) -> None:
     assert [name for name, loaded in exports.items() if loaded is not None] == [file_name]
 
 
+def _parameter_estimates_header(program_id: str) -> tuple[str, ...]:
+    """The SAS header of a program's ParameterEstimates export, as the export contract fixes it.
+
+    The stratum columns the user adds come first, then the ODS ``ParameterEstimates`` columns,
+    both taken from ``wpct.schemas`` rather than restated here.
+    """
+    file_name = export_spec(program_id, "parameter_estimates").sas_export_file
+    return (*SAS_EXPORT_STRATUM_COLUMNS[file_name], *SAS_PARAMETER_ESTIMATE_COLUMNS)
+
+
+def _parameter_estimates_export(program_id: str, records: list[Mapping[str, str]]) -> bytes:
+    """A synthetic ParameterEstimates export: the contract header, then one line per record.
+
+    Each record maps every header name, upper-cased, to the text written in its field, so a
+    record that misses or adds a contract column fails here instead of shifting its fields.
+    """
+    header = _parameter_estimates_header(program_id)
+    names = [name.upper() for name in header]
+    lines = [",".join(header)]
+    for record in records:
+        assert sorted(record) == sorted(names)
+        lines.append(",".join(record[name] for name in names))
+    return "".join(f"{line}\n" for line in lines).encode("latin-1")
+
+
+def _loaded_parameter_estimates_columns(program_id: str) -> list[str]:
+    """The columns a ParameterEstimates export loads with.
+
+    The header folded to upper case, with the ``EFFECT`` and ``LEVEL`` that ``split_parameter``
+    derives inserted before ``PARAMETER``.
+    """
+    columns = [name.upper() for name in _parameter_estimates_header(program_id)]
+    at = columns.index("PARAMETER")
+    return [*columns[:at], "EFFECT", "LEVEL", *columns[at:]]
+
+
+def _pooled_parameter_rows(studynum_estimate: str) -> list[Mapping[str, str]]:
+    """Synthetic rows of one pooled 07.07 table, its ``studynum`` estimate written as given.
+
+    The rows follow the pooled design order (S07-MOD-03, D-05, D-07): ``Intercept``, ``base``,
+    the ``TRTPN`` levels with the reference last, then the aliased continuous ``studynum`` (D-06,
+    DIV-01), with missing standard error, t and p. Pooled rows carry ``studynum = &stdyn``, 3
+    here. The values are invented controls, not SAS results.
+    """
+    statistics = (
+        ("Intercept", "21.5", "4.3", "5", "2.0E-6"),
+        ("base", "-0.25", "0.05", "-5", "1.0E-6"),
+        ("TRTPN     54", "1.5", "0.75", "2", "0.046"),
+        ("TRTPN     81", "-1.5", "0.75", "-2", "0.046"),
+        ("TRTPN     0", "0", ".", ".", "."),
+        ("studynum", studynum_estimate, ".", ".", "."),
+    )
+    return [
+        {
+            "PARAMCD": "DIABP",
+            "ATPTN": "815",
+            "STUDYNUM": "3",
+            "PARAMETER": parameter,
+            "ESTIMATE": estimate,
+            "STDERR": stderr,
+            "TVALUE": tvalue,
+            "PROBT": probt,
+        }
+        for parameter, estimate, stderr, tvalue, probt in statistics
+    ]
+
+
 def test_s02_mod_02_load_sas_exports_parameter_estimates(tmp_path: Path) -> None:
     """A ParameterEstimates export gains ``EFFECT`` and ``LEVEL`` before ``PARAMETER``.
 
@@ -1165,26 +1459,35 @@ def test_s02_mod_02_load_sas_exports_parameter_estimates(tmp_path: Path) -> None
     """
     file_name = export_spec(PROGRAM_07_02, "parameter_estimates").sas_export_file
     assert file_name in SAS_EXPORT_FILES
+    stratum = {"PARAMCD": "DIABP", "ATPTN": "815"}
     (tmp_path / file_name).write_bytes(
-        "PARAMCD,ATPTN,Parameter,Estimate,StdErr,tValue,Probt\n"
-        "DIABP,815,Intercept,33.338920131,3.908729851,8.53,1.0E-15\n"
-        "DIABP,815,TRTPN     0,0,.,.,.\n".encode("latin-1")
+        _parameter_estimates_export(
+            PROGRAM_07_02,
+            [
+                {
+                    **stratum,
+                    "PARAMETER": "Intercept",
+                    "ESTIMATE": "33.338920131",
+                    "STDERR": "3.908729851",
+                    "TVALUE": "8.53",
+                    "PROBT": "1.0E-15",
+                },
+                {
+                    **stratum,
+                    "PARAMETER": "TRTPN     0",
+                    "ESTIMATE": "0",
+                    "STDERR": ".",
+                    "TVALUE": ".",
+                    "PROBT": ".",
+                },
+            ],
+        )
     )
 
     frame = load_sas_exports(tmp_path)[file_name]
 
     assert frame is not None
-    assert list(frame.columns) == [
-        "PARAMCD",
-        "ATPTN",
-        "EFFECT",
-        "LEVEL",
-        "PARAMETER",
-        "ESTIMATE",
-        "STDERR",
-        "TVALUE",
-        "PROBT",
-    ]
+    assert list(frame.columns) == _loaded_parameter_estimates_columns(PROGRAM_07_02)
     pairs = list(zip(frame["EFFECT"], frame["LEVEL"], strict=True))
     assert pairs == [("INTERCEPT", ""), ("TRTPN", "0")]
     assert frame["ATPTN"].tolist() == [815.0, 815.0]
@@ -1196,9 +1499,10 @@ def test_s02_mod_02_load_sas_exports_parameter_estimates(tmp_path: Path) -> None
 def test_load_sas_exports_csv_quoting(tmp_path: Path) -> None:
     """Standard CSV quoting, CRLF records and blank lines load as written.
 
-    A quoted comma, a quoted line break and a doubled quote keep their characters; an explicitly
-    empty field is an empty character value or a missing number; blank lines are not records; an
-    extra column such as ODS ``Dependent`` stays text.
+    The file is the S07-TRN-06 ``css_anadata`` export. A quoted comma, a quoted line break and a
+    doubled quote keep their characters; an explicitly empty field is an empty character value,
+    which SAS treats as missing (D-11), or a missing number; blank lines are not records; an extra
+    column such as ODS ``Dependent`` stays text.
     """
     file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
     (tmp_path / file_name).write_bytes(
@@ -1228,7 +1532,11 @@ def test_load_sas_exports_csv_quoting(tmp_path: Path) -> None:
 
 
 def test_load_sas_exports_header_only(tmp_path: Path) -> None:
-    """A header without records loads as an empty frame that keeps its columns."""
+    """A header without records loads as an empty frame that keeps its columns.
+
+    An S07-TRN-06 ``css_anadata`` export with no records is a loaded, empty frame, not an absent
+    file.
+    """
     file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
     (tmp_path / file_name).write_bytes(b"studyid,usubjid,chg\n")
 
@@ -1242,7 +1550,8 @@ def test_load_sas_exports_header_only(tmp_path: Path) -> None:
 def test_load_sas_exports_one_column_quoted_empty(tmp_path: Path) -> None:
     """In a one-column export a lone ``""`` is a record holding a missing value, not a blank line.
 
-    Only the empty physical line at the end is skipped.
+    Only the empty physical line at the end is skipped. In the S07-TRN-06 ``css_anadata`` export a
+    record whose ``CHG`` is missing still counts as a record, as it does in SAS (D-03).
     """
     file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
     (tmp_path / file_name).write_bytes(b'CHG\n1\n""\n\n')
@@ -1338,7 +1647,9 @@ def test_load_sas_exports_rejects(content: bytes, message: str, tmp_path: Path) 
     """A malformed export raises one line naming the file, never loading an altered frame.
 
     pandas would rename an identical duplicate header to ``CHG.1``, take surplus leading fields
-    as an ignored index and pad short records; the loader's own parse refuses all three.
+    as an ignored index and pad short records; the loader's own parse refuses all three, so no
+    field of the S07-TRN-06 ``css_anadata`` export (the S07-TRN-04 keep list plus ``studynum``)
+    is shifted, renamed or padded.
     """
     file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
     export = tmp_path / file_name
@@ -1389,18 +1700,93 @@ _ANADATA_HEAD = b"studyid,usubjid,base,chg\nCDISCPILOT01,01-701-1023,80,-4\n"
         (
             PROGRAM_07_02,
             "parameter_estimates",
-            (
-                b"PARAMCD,ATPTN,Parameter,Estimate,StdErr,tValue,Probt\n"
-                b"DIABP,815,Intercept,1,1,1,0.5\n"
-                b"DIABP,815,TRTPN 01-701-1015 54,1,1,1,0.5\n"
+            _parameter_estimates_export(
+                PROGRAM_07_02,
+                [
+                    {
+                        "PARAMCD": "DIABP",
+                        "ATPTN": "815",
+                        "PARAMETER": label,
+                        "ESTIMATE": "1",
+                        "STDERR": "1",
+                        "TVALUE": "1",
+                        "PROBT": "0.5",
+                    }
+                    for label in ("Intercept", "TRTPN 01-701-1015 54")
+                ],
             ),
             "PARAMETER",
             2,
             "parameter label of 3 words cannot be split into an effect and a CLASS level",
             ("01-701-1015", "TRTPN 01-701-1015"),
         ),
+        (
+            PROGRAM_07_07,
+            "css_anadata",
+            _ANADATA_HEAD + b"CDISCPILOT01,01-701-1028,80,1E999\n",
+            "CHG",
+            2,
+            "the value overflows double precision",
+            ("1E999",),
+        ),
+        (
+            PROGRAM_07_07,
+            "css_anadata",
+            _ANADATA_HEAD + b"CDISCPILOT01,01-701-1028,-2.5E400,-4\n",
+            "BASE",
+            2,
+            "the value overflows double precision",
+            ("-2.5E400", "E400"),
+        ),
+        (
+            PROGRAM_07_07,
+            "css_anadata",
+            _ANADATA_HEAD + b"CDISCPILOT01,01-701-1028,80,1E-999\n",
+            "CHG",
+            2,
+            "the nonzero value underflows to zero in double precision",
+            ("1E-999",),
+        ),
+        (
+            PROGRAM_07_07,
+            "css_anadata",
+            _ANADATA_HEAD + b"CDISCPILOT01,01-701-1028,-0.0001E-320,-4\n",
+            "BASE",
+            2,
+            "the nonzero value underflows to zero in double precision",
+            ("-0.0001E-320", "E-320"),
+        ),
+        (
+            PROGRAM_07_07,
+            "parameter_estimates",
+            _parameter_estimates_export(PROGRAM_07_07, _pooled_parameter_rows("1E-999")),
+            "ESTIMATE",
+            6,
+            "the nonzero value underflows to zero in double precision",
+            ("1E-999",),
+        ),
+        (
+            PROGRAM_07_07,
+            "parameter_estimates",
+            _parameter_estimates_export(PROGRAM_07_07, _pooled_parameter_rows("-1E-999")),
+            "ESTIMATE",
+            6,
+            "the nonzero value underflows to zero in double precision",
+            ("1E-999",),
+        ),
     ],
-    ids=["measurement-in-chg", "subject-id-in-chg", "subject-id-in-base", "parameter-label"],
+    ids=[
+        "measurement-in-chg",
+        "subject-id-in-chg",
+        "subject-id-in-base",
+        "parameter-label",
+        "overflow-in-chg",
+        "negative-overflow-in-base",
+        "underflow-in-chg",
+        "negative-underflow-in-base",
+        "s07-mod-03-div-01-aliased-studynum-underflow",
+        "s07-mod-03-div-01-aliased-studynum-negative-underflow",
+    ],
 )
 def test_load_sas_exports_redacts_rejected_values(
     program_id: str,
@@ -1415,7 +1801,9 @@ def test_load_sas_exports_redacts_rejected_values(
     """A rejected cell is located by file, column and data row, and its contents never shown.
 
     The CLI prints the message on stderr, so a measurement or a subject identifier misplaced in
-    a numeric column or a ``Parameter`` label must not reach it.
+    a numeric column or a ``Parameter`` label (D-05) must not reach it, whether the export is the
+    S07-TRN-06 ``css_anadata`` or a ParameterEstimates file of S02-MOD-02, S07-MOD-02 and
+    S07-MOD-03.
     """
     export = tmp_path / export_spec(program_id, name).sas_export_file
     export.write_bytes(content)
@@ -1426,3 +1814,107 @@ def test_load_sas_exports_redacts_rejected_values(
     text = str(raised.value)
     assert text == f"SAS export {export.absolute()}: column {column}, data row {row}: {reason}"
     assert [token for token in hidden if token in text] == []
+
+
+#: The GLM statistics a ParameterEstimates spec compares; no other export spec has them.
+_GLM_STATISTICS = (
+    *export_spec(PROGRAM_07_07, "parameter_estimates").glm_fields,
+    *export_spec(PROGRAM_07_07, "parameter_estimates").p_value_fields,
+)
+
+
+@pytest.mark.parametrize("statistic", _GLM_STATISTICS)
+def test_s07_trn_04_load_sas_exports_extra_statistic_column_is_text(
+    statistic: str, tmp_path: Path
+) -> None:
+    """A GLM statistic name in an export whose spec lacks it is an extra column, kept as text.
+
+    The ``css_anadata`` spec (the S07-TRN-04 keep list plus the S07-TRN-06 ``studynum``) types
+    no GLM statistic, so a column of that name is neither parsed as a SAS number nor rejected,
+    while the spec's own numeric ``CHG`` still is.
+    """
+    spec = export_spec(PROGRAM_07_07, "css_anadata")
+    assert statistic not in {name.upper() for name in spec.columns}
+    (tmp_path / spec.sas_export_file).write_bytes(
+        f"studyid,usubjid,chg,{statistic.capitalize()}\n"
+        "CDISCPILOT01,01-701-1015,-4,not reported\n"
+        "CDISCPILOT01,01-701-1023,2.5,1E999\n".encode("latin-1")
+    )
+
+    frame = load_sas_exports(tmp_path)[spec.sas_export_file]
+
+    assert frame is not None
+    assert list(frame.columns) == ["STUDYID", "USUBJID", "CHG", statistic]
+    assert frame[statistic].dtype == object
+    assert frame[statistic].tolist() == ["not reported", "1E999"]
+    assert frame["CHG"].dtype == "float64"
+    assert frame["CHG"].tolist() == [-4.0, 2.5]
+
+
+@pytest.mark.parametrize(
+    "token, expected",
+    [
+        ("0", 0.0),
+        ("-0", -0.0),
+        ("0.000", 0.0),
+        ("0E999", 0.0),
+        ("-.0E-999", -0.0),
+        ("5E-324", 5e-324),
+        ("4.9E-324", 5e-324),
+        ("-4.9E-324", -5e-324),
+        ("1.7976931348623157E308", 1.7976931348623157e308),
+    ],
+)
+def test_s07_mod_03_d_06_load_sas_exports_keeps_zero_and_subnormal_estimates(
+    token: str, expected: float, tmp_path: Path
+) -> None:
+    """The aliased pooled ``studynum`` estimate loads as the zero, or the tiny number, written.
+
+    SAS reports the aliased term with estimate 0 (S07-MOD-03, D-06, DIV-01), and only an exact
+    zero agrees with a zero reference, so every spelling of zero loads as zero with its sign. A
+    subnormal stays nonzero, and the largest double stays finite: neither is a range error.
+    """
+    file_name = export_spec(PROGRAM_07_07, "parameter_estimates").sas_export_file
+    (tmp_path / file_name).write_bytes(
+        _parameter_estimates_export(PROGRAM_07_07, _pooled_parameter_rows(token))
+    )
+
+    frame = load_sas_exports(tmp_path)[file_name]
+
+    assert frame is not None
+    assert list(frame.columns) == _loaded_parameter_estimates_columns(PROGRAM_07_07)
+    aliased = frame.iloc[-1]
+    assert (aliased["EFFECT"], aliased["LEVEL"]) == ("STUDYNUM", "")
+    assert aliased["ESTIMATE"] == expected
+    assert math.copysign(1.0, aliased["ESTIMATE"]) == math.copysign(1.0, expected)
+    assert aliased[["STDERR", "TVALUE", "PROBT"]].isna().all()
+    assert frame["ESTIMATE"].iloc[:-1].tolist() == [21.5, -0.25, 1.5, -1.5, 0.0]
+
+
+@pytest.mark.parametrize("target", ["dangling", "looping"])
+@pytest.mark.parametrize("where", ["export", "directory"])
+def test_s02_trn_03_load_sas_exports_broken_symlink_raises(
+    where: str, target: str, tmp_path: Path
+) -> None:
+    """A dangling or self-looping symlink is present but unreadable, never an absent export.
+
+    Under the name of the S02-TRN-03 ``css_anadata`` export, or standing for the export
+    directory itself, it raises one line naming its absolute path, where treating it as absent
+    would leave the export's quantities NOT COMPARED without a word.
+    """
+    directory = tmp_path / "sas_exports"
+    directory.mkdir()
+    if where == "export":
+        link = directory / export_spec(PROGRAM_07_02, "css_anadata").sas_export_file
+        root, label = directory, "SAS export"
+    else:
+        link = tmp_path / "linked_exports"
+        root, label = link, "SAS export directory"
+    link.symlink_to(tmp_path / "missing" if target == "dangling" else link.name)
+    assert link.is_symlink()
+    assert not link.exists()
+
+    with pytest.raises(InputDataError) as raised:
+        load_sas_exports(root)
+
+    assert str(raised.value) == f"cannot read {label} {link.absolute()}: broken or looping symlink"
