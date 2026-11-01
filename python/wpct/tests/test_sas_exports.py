@@ -56,17 +56,9 @@ import pytest
 from wpct import compare, sas_reference, schemas
 from wpct.programs import ProgramResult
 
-#: The seven export file names of AAP 0.7.3. They are restated here only to guard
-#: ``schemas.SAS_EXPORT_FILES``, the parameter list the READMEs and the loader share.
-_AAP_EXPORT_FILES = (
-    "WPCT-F.07.02_css_anadata.csv",
-    "WPCT-F.07.02_css_stats.csv",
-    "WPCT-F.07.02_parameter_estimates.csv",
-    "WPCT-F.07.07_advs_min.csv",
-    "WPCT-F.07.07_css_anadata.csv",
-    "WPCT-F.07.07_css_stats.csv",
-    "WPCT-F.07.07_parameter_estimates.csv",
-)
+#: How many SAS exports the contract has: "the seven export files" of AAP 0.7.3 and 0.7.4. Only
+#: the count is kept here; the file names themselves come from ``wpct.schemas`` alone (AAP 0.9.5).
+_SAS_EXPORT_COUNT = 7
 
 #: Each export's SAS file name, as its own ``schemas`` spec gives it.
 _FILE_07_02_ANADATA = schemas.export_spec(schemas.PROGRAM_07_02, "css_anadata").sas_export_file
@@ -374,14 +366,30 @@ def test_d01_02_05_to_09_sas_export_equivalence(
 def test_export_parameter_list_matches_schemas(
     sas_exports: Mapping[str, pd.DataFrame | None],
 ) -> None:
-    """The parameter list is exactly the seven AAP 0.7.3 export names, in AAP order (AAP 0.9.5).
+    """The parameter list is exactly the SAS exports ``schemas.EXPORTS`` declares (AAP 0.9.5).
 
-    The loader returns an entry for every name, so no case can miss its export. Each name is the
-    SAS export of its own program's spec. Every export has a count from the SAS log. The record
-    counts cover exactly the exports that have neither statistics nor GLM fields, which
-    ``compare`` treats as record-level, and the key counts cover the rest.
+    They come in program order, then export order within each program, with no name repeated, and
+    there are seven of them (AAP 0.7.3). For 07.02 they are the datasets of S02-TRN-03, of
+    S02-MOD-01 with the S02-TRN-05 ``pval``, and of S02-MOD-02. For 07.07 they are the LMM-TRN-07
+    records after S07-FLT-02, the analysis dataset of S07-TRN-04, S07-TRN-05 and S07-TRN-06, the
+    statistics of S07-MOD-01 with the S07-TRN-08 ``pval``, and the estimates of S07-MOD-02 and
+    S07-MOD-03. The loader returns an entry for every name, so no case can miss its export. Each
+    name is the SAS export of its own program's spec. Every export has a count from the SAS log.
+    The record counts cover exactly the exports that have neither statistics nor GLM fields, which
+    ``compare`` treats as record-level: the S02-TRN-03 and LMM-TRN-07 datasets and the S07-TRN-04,
+    S07-TRN-05 and S07-TRN-06 analysis dataset. The key counts cover the rest, the exports of
+    S02-MOD-01, S02-MOD-02, S07-MOD-01, S07-MOD-02 and S07-MOD-03.
     """
-    assert schemas.SAS_EXPORT_FILES == _AAP_EXPORT_FILES
+    assert tuple(schemas.EXPORTS) == schemas.PROGRAMS
+    declared = tuple(
+        spec.sas_export_file
+        for program_id in schemas.PROGRAMS
+        for spec in schemas.EXPORTS[program_id]
+        if spec.sas_export_file is not None
+    )
+    assert schemas.SAS_EXPORT_FILES == declared
+    assert len(set(declared)) == len(declared), f"a SAS export name repeats: {declared}"
+    assert len(declared) == _SAS_EXPORT_COUNT
     assert tuple(sas_exports) == schemas.SAS_EXPORT_FILES
     record_level = set()
     for file_name in schemas.SAS_EXPORT_FILES:
@@ -1011,7 +1019,10 @@ def test_export_coverage_rejects_incomplete_group(
     with the same program and key, without some rows: every field row, one field row, one key's
     field rows or one stratum row. Every remaining row is PASS, so only the coverage check can
     reject it, and it must. A comparison that ran only the key-set and record-count rows cannot
-    stand in for field, statistics or estimate agreement.
+    stand in for the record-level field agreement of the S02-TRN-03 and LMM-TRN-07 datasets and of
+    the S07-TRN-04, S07-TRN-05 and S07-TRN-06 analysis dataset, for the statistics of S02-MOD-01
+    and S07-MOD-01 with their S02-TRN-05 and S07-TRN-08 ``pval``, or for the estimates of
+    S02-MOD-02, S07-MOD-02 and S07-MOD-03.
     """
     spec = schemas.sas_export_spec(file_name)
     python_frame = results[spec.program_id].datasets[spec.name]
