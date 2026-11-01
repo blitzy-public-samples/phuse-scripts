@@ -1538,6 +1538,82 @@ def test_s02_dep_util_access_test_data_failed_checkpoint_reason_in_report(
     assert reported == [(failed[0].quantity, failed[0].reason)]
 
 
+@pytest.mark.parametrize(
+    ("halted", "status", "reason"),
+    [
+        pytest.param(
+            False, compare.FAIL, "no Python checkpoint recorded", id="checkpoint-not-recorded"
+        ),
+        pytest.param(
+            True,
+            compare.NOT_COMPARED,
+            "not reached: the run halted before this step",
+            id="run-halted-before-checkpoint",
+        ),
+    ],
+)
+def test_s07_trn_05_and_s07_flt_04_absent_python_checkpoint_shows_no_value(
+    halted: bool,
+    status: str,
+    reason: str,
+    results: Mapping[str, Any],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """A SAS log checkpoint without a Python counterpart shows no Python value, not SAS missing.
+
+    WPCT-F.07.07's checkpoint after CSS_SAFANA, the stacked CSS_ANADATA of S07-TRN-05, is absent
+    on the Python side either because the run recorded every checkpoint but that one, a FAIL, or
+    because the run halted at CSS_SAFANA (S07-FLT-04), so it and every later one are NOT
+    COMPARED. Each such row keeps the clean comparison's SAS count and shows no Python value
+    (``""``) rather than ``.``, with no difference or tolerance; every other row is the clean
+    comparison's.
+    """
+    result = results[PROGRAM_07_07]
+    halt = _css_safana_halt(result)
+    if halted:
+        halted_result = type(result).from_halt(halt)
+        python, halt_message = halted_result.checkpoints, halted_result.halt_message
+    else:
+        unrecorded = result.checkpoints[len(halt.checkpoints)]
+        assert (unrecorded.SAS_DATASET, unrecorded.OCCURRENCE) == ("CSS_ANADATA", 1)
+        python = tuple(
+            checkpoint for checkpoint in result.checkpoints if checkpoint is not unrecorded
+        )
+        halt_message = None
+    sas = sas_checkpoints[PROGRAM_07_07]
+    clean = compare.compare_counts(PROGRAM_07_07, result.checkpoints, sas, tolerances)
+    group = compare.compare_counts(
+        PROGRAM_07_07, python, sas, tolerances, halt_message=halt_message
+    )
+
+    assert clean.n_pass == len(clean.rows) == len(group.rows) == len(sas)
+    recorded = {(checkpoint.SAS_DATASET, checkpoint.OCCURRENCE) for checkpoint in python}
+    absent = [
+        position
+        for position, checkpoint in enumerate(sas)
+        if (checkpoint.spec.SAS_DATASET, checkpoint.spec.OCCURRENCE) not in recorded
+    ]
+    assert len(absent) == (len(sas) - len(halt.checkpoints) if halted else 1)
+    for position, (row, clean_row) in enumerate(zip(group.rows, clean.rows, strict=True)):
+        if position not in absent:
+            assert row == clean_row
+            continue
+        assert "" not in (clean_row.sas_value, clean_row.python_value)
+        assert (row.quantity, row.stratum, row.sas_value) == (
+            clean_row.quantity,
+            clean_row.stratum,
+            clean_row.sas_value,
+        )
+        assert (row.python_value, row.difference, row.tolerance, row.status, row.reason) == (
+            "",
+            "",
+            "",
+            status,
+            reason,
+        )
+
+
 @pytest.mark.parametrize("program", PROGRAMS)
 def test_s02_trn_05_and_s07_trn_08_merged_pval_group_separate(
     program: str, written: _Written, clean_comparisons: _Comparisons

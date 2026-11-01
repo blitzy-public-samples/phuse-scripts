@@ -466,12 +466,16 @@ def _assert_listing_failure_propagates(
 
     The clean table's rendered comparison keys identify its stratum, including pooled study
     numbering and the merged cells' TRTPN levels, without duplicating comparison formatting.
+    A failed value whose listing row the damaged table still holds shows the clean SAS token,
+    a printed ``.`` included; one whose row is gone, or an unexpected table's single row, shows
+    no SAS value (``""``) rather than a SAS missing ``.``.
     """
     counts = {PROGRAM_07_02: (40, 6), PROGRAM_07_07: (128, 18)}[program_id]
     table = tables[table_index]
     unexpected = table.spec is None
     reason = "; ".join(table.problems)
     assert reason
+    present = {(row.EFFECT, row.LEVEL) for row in table.rows}
     for compare_group, count in zip(
         (compare.compare_listing, compare.compare_merged_pval), counts, strict=True
     ):
@@ -485,6 +489,7 @@ def _assert_listing_failure_propagates(
         if unexpected:
             affected_keys = {(f"listing table {table_index}", "—")}
             expected_keys.append((f"listing table {table_index}", "—"))
+            expected_sas = dict.fromkeys(affected_keys, "")
         else:
             affected = compare_group(program_id, (clean[table_index],), result, tolerances)
             affected_keys = {(row.quantity, row.stratum) for row in affected.rows}
@@ -493,6 +498,17 @@ def _assert_listing_failure_propagates(
             )
             assert len(affected_keys) == expected_affected
             assert affected_keys <= baseline_by_key.keys()
+            # Rows follow the map entry's parameters: four values each in the listing group, one
+            # merged cell per CLASS level in the other.
+            if compare_group is compare.compare_listing:
+                pairs = [pair for pair in table.spec.parameters for _ in range(4)]
+            else:
+                pairs = [pair for pair in table.spec.parameters if pair[1]]
+            expected_sas = {
+                (row.quantity, row.stratum): row.sas_value if pair in present else ""
+                for row, pair in zip(affected.rows, pairs, strict=True)
+            }
+            assert "" not in {row.sas_value for row in affected.rows}
         assert len(group.rows) == count + int(unexpected)
         assert [(row.quantity, row.stratum) for row in group.rows] == expected_keys
         assert group.n_not_compared == 0
@@ -503,6 +519,7 @@ def _assert_listing_failure_propagates(
             if key in affected_keys:
                 assert row.status == compare.FAIL
                 assert row.reason == reason
+                assert row.sas_value == expected_sas[key], (key, row.sas_value)
             else:
                 assert row.status == compare.PASS
                 assert row == baseline_by_key[key]
@@ -1101,11 +1118,16 @@ def test_s02_pop_01_log_mismatch_reported(
     tmp_path: Path,
     repo_paths: RepoPaths,
     file_state: Callable[[Path], object],
+    sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
+    results: Mapping[str, ProgramResult],
+    tolerances: compare.Tolerances,
 ) -> None:
     """A pinned line that no longer holds its count is reported with no count, never dropped.
 
     The edits rename the NOTE of the analysis set of S02-POP-01, S02-FLT-02, S02-FLT-03 and
-    S02-TRN-03, and break the range of the LMM-FLT-02 omitted-baseline WARNINGs.
+    S02-TRN-03, and break the range of the LMM-FLT-02 omitted-baseline WARNINGs. Compared with the
+    Python run, that checkpoint's row FAILs with the problem and shows no SAS value (``""``), not
+    a SAS missing ``.``, beside the Python count; every other row is the clean comparison's.
     """
     reference = repo_paths.log_file(program_id)
     before = file_state(reference)
@@ -1124,6 +1146,24 @@ def test_s02_pop_01_log_mismatch_reported(
     assert problem in failed.problem
     assert [checkpoint.ok for checkpoint in checkpoints if checkpoint is not failed] == [True] * (
         len(checkpoint_map) - 1
+    )
+
+    python = results[program_id].checkpoints
+    clean = compare.compare_counts(program_id, python, sas_checkpoints[program_id], tolerances)
+    group = compare.compare_counts(program_id, python, checkpoints, tolerances)
+    assert len(group.rows) == len(clean.rows) == len(checkpoint_map)
+    assert clean.n_pass == len(clean.rows)
+    row, clean_row = group.rows[position], clean.rows[position]
+    assert "" not in (clean_row.sas_value, clean_row.python_value)
+    assert (row.quantity, row.stratum) == (clean_row.quantity, clean_row.stratum)
+    assert (row.status, row.reason, row.sas_value, row.python_value) == (
+        compare.FAIL,
+        failed.problem,
+        "",
+        clean_row.python_value,
+    )
+    assert group.rows[:position] + group.rows[position + 1 :] == (
+        clean.rows[:position] + clean.rows[position + 1 :]
     )
     assert file_state(reference) == before
 

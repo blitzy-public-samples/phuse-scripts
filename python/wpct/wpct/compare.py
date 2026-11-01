@@ -141,9 +141,13 @@ _MAX_LISTED_KEYS = 20
 
 _NO_STRATUM = "—"
 _ALL_STRATA = "all strata"
-#: ``python_value`` of a listing ParameterEstimates or merged-pval row for which Python produced no
-#: value to compare; ``"."`` is kept for a Python value that is SAS missing.
+#: ``python_value`` of a row for which Python produced no value to compare: a listing
+#: ParameterEstimates or merged-pval value it has none for, or a log checkpoint it never recorded;
+#: ``"."`` is kept for a Python value that is SAS missing.
 _NO_PYTHON_VALUE = ""
+#: ``sas_value`` of a row for which SAS has no value: a listing row absent from its table, or a log
+#: line that failed its verification; ``"."`` is kept for a value SAS displays as missing.
+_NO_SAS_VALUE = ""
 
 
 # --- Tolerances -----------------------------------------------------------------------------------
@@ -702,12 +706,16 @@ class ComparisonRow:
         group: The key of the :class:`ComparisonGroup` holding the row.
         quantity: What is compared, e.g. ``"TRTPN 54 PROBT"`` or ``"CSS_STATS #2"``.
         stratum: The stratum or record key, e.g. ``"PARAMCD=DIABP ATPTN=815 AVISITN=99"``.
-        sas_value: The SAS value as displayed or parsed; ``"."`` for SAS missing.
-        python_value: The Python value, shortest round-trip form; ``"."`` for missing. In the
-            listing ParameterEstimates and merged-pval groups it is ``""`` when Python produced no
-            value to compare (GLM skipped, model absent or not fitted, dataset columns colliding
-            in case, no single matching row or cell), and it still shows the Python value when only
-            the SAS listing side fails.
+        sas_value: The SAS value as displayed or parsed; ``"."`` for a value SAS displays as
+            missing, ``(blank)`` for a blank listing token. It is ``""`` when SAS has no value for
+            the row, such as a listing row absent from its table or a log line that failed its
+            verification.
+        python_value: The Python value, shortest round-trip form; ``"."`` for missing. It is
+            ``""`` when Python produced no value to compare: in the listing ParameterEstimates and
+            merged-pval groups (GLM skipped, model absent or not fitted, dataset columns colliding
+            in case, no single matching row or cell), and in the log-checkpoint group when no
+            Python checkpoint was recorded, a halted run's unreached ones included. It still shows
+            the Python value when only the SAS listing side fails.
         difference: ``py - sas`` (relative where marked), ``""`` when not applicable.
         tolerance: The rule applied, rendered from the limits, e.g. ``"abs ≤ <limit>"``,
             ``"rel ≤ <limit>"``, ``"exact"`` or ``"displayed (4 dp): ±<half unit>"``.
@@ -931,8 +939,13 @@ def _trimmed(value: object) -> str:
 
 
 def _checkpoint_text(nobs: int | None, nvars: int | None, has_nvars: bool) -> str:
+    """A checkpoint's count: ``nobs``, or ``nobs/nvars`` where the log shows ``obs/vars``.
+
+    Only a SAS log line that failed its verification has no ``nobs``, so it shows no value
+    (:data:`_NO_SAS_VALUE`); every Python checkpoint carries one.
+    """
     if nobs is None:
-        return "."
+        return _NO_SAS_VALUE
     if has_nvars:
         return f"{nobs}/{'.' if nvars is None else nvars}"
     return str(nobs)
@@ -982,7 +995,9 @@ def compare_counts(
         sas_text = _checkpoint_text(sas.NOBS, sas.NVARS, spec.has_nvars)
         python = by_key.get((spec.SAS_DATASET, spec.OCCURRENCE))
         python_text = (
-            "." if python is None else _checkpoint_text(python.NOBS, python.NVARS, spec.has_nvars)
+            _NO_PYTHON_VALUE
+            if python is None
+            else _checkpoint_text(python.NOBS, python.NVARS, spec.has_nvars)
         )
         if python is None and halt_message is not None:
             builder.add(
@@ -1267,7 +1282,7 @@ def compare_listing(
             for field in _LISTING_FIELDS:
                 quantity = f"{label} {field}"
                 token = getattr(listing_row, field) if listing_row is not None else None
-                sas_text = "." if token is None else _render_token(token)
+                sas_text = _NO_SAS_VALUE if token is None else _render_token(token)
                 python_reason = python_blocker or _python_row_problem(matches, field)
                 python_value = None if python_reason else matches[0][field]
                 python_text = _NO_PYTHON_VALUE if python_reason else _render_value(python_value)
@@ -1360,7 +1375,7 @@ def compare_merged_pval(
             )
             listing_row = listing_rows.get((effect, level))
             token = None if listing_row is None else listing_row.PROBT
-            sas_text = "." if token is None else _render_token(token)
+            sas_text = _NO_SAS_VALUE if token is None else _render_token(token)
             value, python_reason = None, python_blocker
             if not python_reason:
                 value, python_reason = _merged_pval_cell(
