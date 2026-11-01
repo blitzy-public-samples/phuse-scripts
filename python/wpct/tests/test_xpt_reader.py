@@ -171,6 +171,110 @@ def test_missing_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     require_variables(frame, ["usubjid"], "advs.xpt", PROGRAM_07_02)
 
 
+@pytest.mark.parametrize(
+    ("names", "error", "message"),
+    [
+        pytest.param(
+            "SAFFL",
+            TypeError,
+            "require_variables: names must be a sequence of variable names, not the single "
+            "string 'SAFFL'",
+            id="lone-string",
+        ),
+        pytest.param(
+            ("SAFFL", 7),
+            TypeError,
+            "require_variables: names[1] must be a variable name string, got int",
+            id="non-string-item",
+        ),
+        pytest.param(
+            ("SAFFL", "USUBJID", "saffl"),
+            ValueError,
+            "require_variables: names lists a variable more than once, ignoring case: SAFFL saffl",
+            id="repeated-other-case",
+        ),
+        pytest.param(
+            ("SAFFL", "SAFFL"),
+            ValueError,
+            "require_variables: names lists a variable more than once, ignoring case: SAFFL SAFFL",
+            id="repeated-same-case",
+        ),
+    ],
+)
+def test_require_variables_rejects_invalid_names(
+    names: object, error: type[Exception], message: str
+) -> None:
+    """``names`` must list each variable once, as strings; a lone string is not split.
+
+    Iterating a lone string would check each of its characters as a variable name, and a variable
+    listed twice in different cases leaves no single spelling for its column.
+    """
+    frame = pd.DataFrame({"SAFFL": ["Y"], "USUBJID": ["a"]})
+
+    with pytest.raises(error) as excinfo:
+        require_variables(frame, names, "advs.xpt", PROGRAM_07_02)
+
+    assert type(excinfo.value) is error
+    assert str(excinfo.value) == message
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(("SAFFL", "USUBJID"), id="exact"),
+        pytest.param(("saffl", "usubjid"), id="lower-case"),
+        pytest.param(("SafFL", "usubjID"), id="mixed-case"),
+    ],
+)
+def test_require_variables_returns_given_spelling(stored: tuple[str, str]) -> None:
+    """Each required column comes back under its spelling in ``names``; ``df`` is not modified.
+
+    Verifies S02-DEP-assert_var_exist and S07-DEP-assert_var_exist: SAS finds a variable whatever
+    the case of its name [whitepapers/utilities/assert_var_exist.sas:23], and every later step
+    addresses it by any spelling, so the drivers' upper-case names reach the stored columns. A
+    column not required keeps its stored spelling, and a frame already spelled as given is returned
+    itself.
+    """
+    stored_saffl, stored_usubjid = stored
+    frame = pd.DataFrame(
+        {stored_saffl: ["Y", "N"], "trtp_short": ["P", "X-high"], stored_usubjid: ["a", "b"]}
+    )
+    original = frame.copy(deep=True)
+
+    result = require_variables(frame, ("USUBJID", "SAFFL"), "advs.xpt", PROGRAM_07_02)
+
+    assert (result is frame) == (stored == ("SAFFL", "USUBJID"))
+    expected = original.set_axis(["SAFFL", "trtp_short", "USUBJID"], axis="columns")
+    pd.testing.assert_frame_equal(result, expected)
+    pd.testing.assert_frame_equal(frame, original)
+
+
+def test_require_variables_rejects_case_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A required variable matching two columns that differ only in case is an input error.
+
+    SAS variable names are case-insensitive, so such a frame holds no single variable to address.
+    Only the required names are checked, and a missing variable is reported first.
+    """
+    monkeypatch.chdir(tmp_path)
+    frame = pd.DataFrame(
+        {"SAFFL": ["Y"], "USUBJID": ["a"], "saffl": ["N"], "AVAL": [1.0], "aval": [2.0]}
+    )
+
+    with pytest.raises(InputDataError) as excinfo:
+        require_variables(frame, ("USUBJID", "SAFFL"), "advs.xpt", PROGRAM_07_07)
+
+    assert str(excinfo.value) == (
+        f"WPCT-F.07.07: {tmp_path / 'advs.xpt'} has variables that differ only in case: SAFFL saffl"
+    )
+    with pytest.raises(InputDataError) as excinfo:
+        require_variables(frame, ("SAFFL", "ADT"), "advs.xpt", PROGRAM_07_07)
+    assert str(excinfo.value) == (
+        f"WPCT-F.07.07: {tmp_path / 'advs.xpt'} lacks required variables: ADT"
+    )
+
+
 # --- Repository inputs (read-only) ---------------------------------------------------------------
 
 

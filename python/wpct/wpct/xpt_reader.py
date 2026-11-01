@@ -131,27 +131,83 @@ def require_variables(
     names: Iterable[str],
     path: str | os.PathLike[str],
     program: str,
-) -> None:
-    """Raise unless ``df`` holds every variable in ``names`` (S02/S07-DEP-assert_depend ``vars=``).
+) -> pd.DataFrame:
+    """Return ``df`` with ``names`` spelled as given (S02/S07-DEP-assert_depend ``vars=`` check).
 
     SAS variable names are case-insensitive, and ``assert_var_exist`` looks up the upper-cased name
-    with ``varnum()`` [whitepapers/utilities/assert_var_exist.sas:23], so the comparison folds case.
-    As ``assert_depend`` checks every listed variable before the program halts
-    [whitepapers/utilities/assert_depend.sas:111-120], the error names every missing variable, as
-    given and in the order given.
+    with ``varnum()`` [whitepapers/utilities/assert_var_exist.sas:23]
+    (S02/S07-DEP-assert_var_exist), so the comparison folds case. As ``assert_depend`` checks every
+    listed variable before the program halts [whitepapers/utilities/assert_depend.sas:111-120], the
+    error names every missing variable, as given and in the order given. Every later SAS step then
+    addresses a variable by any spelling, so the frame returned carries each required variable under
+    its spelling in ``names``, the one the drivers index, whatever case the file stores.
 
     Args:
-        df: The frame to check, normally the one :func:`read_xpt` returned.
-        names: Required variable names; the drivers pass ``schemas.REQUIRED_INPUT_VARIABLES``.
+        df: The frame to check, normally the one :func:`read_xpt` returned. It is not modified.
+        names: Required variable names, a sequence of strings such as the tuples of
+            ``schemas.REQUIRED_INPUT_VARIABLES`` the drivers pass.
         path: The file ``df`` was read from, named in the message.
         program: Program identifier that prefixes the message.
 
+    Returns:
+        ``df`` itself when each name already matches its column exactly. Otherwise a new frame in
+        which each matched column is renamed to its spelling in ``names``; other columns keep their
+        stored spelling, and the column order and values are those of ``df``.
+
     Raises:
-        InputDataError: ``"<program>: <absolute path> lacks required variables: <names>"``.
+        TypeError: ``names`` is a single string, or one of its items is not a string.
+        ValueError: ``names`` lists a variable more than once, ignoring case, so no single spelling
+            can be given to its column.
+        InputDataError: ``"<program>: <absolute path> lacks required variables: <names>"`` when a
+            variable is absent, or ``"<program>: <absolute path> has variables that differ only in
+            case: <columns>"`` when a required variable matches more than one column of ``df``.
     """
-    present = {str(column).upper() for column in df.columns}
-    missing = [name for name in names if name.upper() not in present]
+    if isinstance(names, str):
+        # Iterating a lone string would check each of its characters as a variable name.
+        raise TypeError(
+            "require_variables: names must be a sequence of variable names, not the single string "
+            f"{names!r}"
+        )
+    required = tuple(names)
+    for position, name in enumerate(required):
+        if not isinstance(name, str):
+            raise TypeError(
+                f"require_variables: names[{position}] must be a variable name string, got "
+                f"{type(name).__name__}"
+            )
+    keys = [name.upper() for name in required]
+    repeated = [name for name, key in zip(required, keys, strict=True) if keys.count(key) > 1]
+    if repeated:
+        raise ValueError(
+            "require_variables: names lists a variable more than once, ignoring case: "
+            f"{' '.join(repeated)}"
+        )
+
+    columns_by_key: dict[str, list[object]] = {}
+    for column in df.columns:
+        columns_by_key.setdefault(str(column).upper(), []).append(column)
+    missing = [name for name, key in zip(required, keys, strict=True) if key not in columns_by_key]
     if missing:
         raise InputDataError(
             f"{program}: {Path(path).absolute()} lacks required variables: {' '.join(missing)}"
         )
+    clashing = [
+        str(column)
+        for key in keys
+        if len(columns_by_key[key]) > 1
+        for column in columns_by_key[key]
+    ]
+    if clashing:
+        raise InputDataError(
+            f"{program}: {Path(path).absolute()} has variables that differ only in case: "
+            f"{' '.join(clashing)}"
+        )
+
+    renames = {
+        columns_by_key[key][0]: name
+        for name, key in zip(required, keys, strict=True)
+        if columns_by_key[key][0] != name
+    }
+    if not renames:
+        return df
+    return df.rename(columns=renames)

@@ -13,9 +13,10 @@ Exit codes (Agent Action Plan 0.6.5):
   (S07-FLT-04, S07-FLT-05). Like ``%assert_continue`` (S07-DEP-assert_continue), the halt stops
   that program before any export; the report records it.
 * 2 (:data:`EXIT_INPUT_ERROR`): an input error, i.e. a missing or unreadable ADVS file, SAS
-  reference, SAS export or tolerance file, a dataset lacking a required variable
-  (S02-DEP-assert_depend, S07-DEP-assert_depend), or a ``--sas-exports`` that is not an existing
-  directory; a write destination the guard rejects; or a command-line error from ``argparse``.
+  reference, SAS export or tolerance file, a dataset lacking a required variable or storing one
+  under more than one spelling (S02-DEP-assert_depend, S07-DEP-assert_depend), or a
+  ``--sas-exports`` that is not an existing directory; a write destination the guard rejects; or a
+  command-line error from ``argparse``.
 
 Data reach and write policy (Agent Action Plan 0.8): ``--sas-exports`` is the only option, and it
 names a read-only input directory, which is never written. No option reaches an input file, an

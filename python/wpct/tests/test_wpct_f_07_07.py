@@ -14,6 +14,7 @@ the ADVS frame (``advs_07_07``), so none re-reads the transport file or writes i
   that every one is PASS, so a FAIL or a NOT COMPARED row fails the test.
 - Edge states (AAP 0.6.4): the halt on a missing ``CHG`` (S07-FLT-04), the GLM skipped by setting,
   an empty population after the derivation, an empty derivation input (U-03) and a single study.
+  Variable names stored in lower case give the default run (S07-DEP-assert_var_exist).
 """
 
 from __future__ import annotations
@@ -505,3 +506,27 @@ def test_single_study_numbering(advs_07_07, repo_paths):
     assert (stats.loc[pooled_rows, "studynum"] == 2).all()
     assert (stats.loc[~pooled_rows, "studynum"] == 1).all()
     _assert_pval_mapping(result)
+
+
+def test_lower_case_variable_names(advs_07_07, result_07_07, repo_paths):
+    """S07-DEP-assert_var_exist: lower-case variable names in ADVS give the default run.
+
+    SAS finds a variable whatever the case of its name
+    [whitepapers/utilities/assert_var_exist.sas:23], and every later step addresses it by any
+    spelling, so the datasets, checkpoints, models, omission counts, notes and pooled ``studynum``
+    equal those of the default run. The frame passed in keeps its lower-case names.
+    """
+    lower = advs_07_07.rename(columns=str.lower)
+    lower_names = list(lower.columns)
+    result = _run(lower, repo_paths)
+
+    assert lower_names != list(advs_07_07.columns)
+    assert list(lower.columns) == lower_names
+    assert list(result.datasets) == list(DATASETS)
+    for name in DATASETS:
+        pd.testing.assert_frame_equal(result.dataset(name), result_07_07.dataset(name))
+    assert result.checkpoints == result_07_07.checkpoints
+    assert result.models == result_07_07.models
+    assert dict(result.omission_counts) == dict(result_07_07.omission_counts)
+    assert result.pooled_studynum == result_07_07.pooled_studynum
+    assert result.notes == result_07_07.notes

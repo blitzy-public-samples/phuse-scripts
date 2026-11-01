@@ -334,8 +334,9 @@ def run(
         the 15 checkpoints of the SAS log, in log order.
 
     Raises:
-        InputDataError: The input file is missing or unreadable, or lacks a required variable
-            (S02-DEP-assert_depend ``vars=``).
+        InputDataError: The input file is missing or unreadable, lacks a required variable, or
+            stores a required variable under more than one spelling, as columns that differ only
+            in case (S02-DEP-assert_depend ``vars=``).
     """
     if not isinstance(config, Config):
         raise TypeError(f"{PROGRAM_ID}: config must be a Config, got {type(config).__name__}")
@@ -343,7 +344,10 @@ def run(
     path = paths.input_xpt(PROGRAM_ID)
     if advs is None:
         advs, _metadata = xpt_reader.read_xpt(path, PROGRAM_ID)
-    xpt_reader.require_variables(advs, REQUIRED_INPUT_VARIABLES[PROGRAM_ID], path, PROGRAM_ID)
+    # The returned frame spells each required variable as the schema does, whatever its stored case.
+    advs = xpt_reader.require_variables(
+        advs, REQUIRED_INPUT_VARIABLES[PROGRAM_ID], path, PROGRAM_ID
+    )
 
     log = _CheckpointLog()
     log.record("ADVS", advs, nvars=True)

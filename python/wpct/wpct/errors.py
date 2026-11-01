@@ -6,8 +6,9 @@ so any module may depend on it.
 
 * ``InputDataError`` ports the failures of ``%util_access_test_data`` and the
   ``vars=`` check of ``%assert_depend``: a missing input file, an unreadable SAS
-  transport file, or a dataset lacking required variables
-  (S02-DEP-util_access_test_data, S07-DEP-util_access_test_data,
+  transport file, a dataset lacking required variables, or a dataset storing a
+  required variable under more than one spelling, in columns that differ only
+  in case (S02-DEP-util_access_test_data, S07-DEP-util_access_test_data,
   S02-DEP-assert_depend, S07-DEP-assert_depend).
 * ``AnalysisHalted`` ports ``%assert_continue`` forcing syntax-checking mode
   after a failed assertion (S02-DEP-assert_continue, S07-DEP-assert_continue),
@@ -43,7 +44,7 @@ class WpctError(Exception):
 
 
 class InputDataError(WpctError):
-    """A required input is missing, unreadable, or lacks required variables.
+    """A required input is missing, unreadable, lacks required variables, or has a case clash.
 
     Raised by ``xpt_reader`` and ``sas_reference``. The raiser supplies the full
     message, which ``str(exc)`` returns verbatim, for example:
@@ -52,12 +53,17 @@ class InputDataError(WpctError):
     * ``"WPCT-F.07.07: cannot read SAS transport file <absolute path>:
       <reader message>"``
     * ``"<program>: <absolute path> lacks required variables: <names>"``
+    * ``"<program>: <absolute path> has variables that differ only in case:
+      <columns>"``
 
     SAS counterparts: ``ERROR: (UTIL_ACCESS_TEST_DATA) Please confirm that data
     set ADVS exists in transport file ADVS.``
     [whitepapers/utilities/util_access_test_data.sas:68-71] and ``ERROR:
     (ASSERT_DEPEND) Data set ... does not contain required variable ...``
-    [whitepapers/utilities/assert_depend.sas:114-116].
+    [whitepapers/utilities/assert_depend.sas:114-116]. A case clash has none:
+    SAS variable names are case-insensitive, and ``assert_var_exist`` looks up
+    the upper-cased name with ``varnum()``
+    [whitepapers/utilities/assert_var_exist.sas:23].
     """
 
 

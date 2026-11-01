@@ -433,3 +433,26 @@ def test_absent_param_timepoint(
         pd.testing.assert_frame_equal(result.dataset(name), result_07_02.dataset(name))
     assert result.models == result_07_02.models
     assert result.checkpoints == result_07_02.checkpoints
+
+
+def test_lower_case_variable_names(
+    advs_07_02: pd.DataFrame, result_07_02: ProgramResult, repo_paths
+) -> None:
+    """S02-DEP-assert_var_exist: lower-case variable names in ADVS give the default run.
+
+    SAS finds a variable whatever the case of its name
+    [whitepapers/utilities/assert_var_exist.sas:23], and every later step addresses it by any
+    spelling, so the datasets, checkpoints and models equal those of the default run. The frame
+    passed in keeps its lower-case names.
+    """
+    lower = advs_07_02.rename(columns=str.lower)
+    lower_names = list(lower.columns)
+    result = wpct_f_07_02.run(wpct_f_07_02.Config(), repo_paths, advs=lower)
+
+    assert lower_names != list(advs_07_02.columns)
+    assert list(lower.columns) == lower_names
+    assert list(result.datasets) == list(result_07_02.datasets)
+    for name, frame in result.datasets.items():
+        pd.testing.assert_frame_equal(frame, result_07_02.dataset(name))
+    assert result.checkpoints == result_07_02.checkpoints
+    assert result.models == result_07_02.models

@@ -579,8 +579,9 @@ def run(
         checkpoints of the SAS log, in log order.
 
     Raises:
-        InputDataError: The input file is missing or unreadable, or lacks a required variable
-            (S07-DEP-assert_depend ``vars=``).
+        InputDataError: The input file is missing or unreadable, lacks a required variable, or
+            stores a required variable under more than one spelling, as columns that differ only
+            in case (S07-DEP-assert_depend ``vars=``).
         AnalysisHalted: ``CHG`` is missing in ``CSS_SAFANA`` (S07-FLT-04) or the pooled analysis
             set repeats a ``STUDYID USUBJID PARAMCD ATPTN`` key (S07-FLT-05). The exception carries
             the checkpoints recorded before the halt.
@@ -591,7 +592,10 @@ def run(
     path = paths.input_xpt(PROGRAM_ID)
     if advs is None:
         advs, _metadata = xpt_reader.read_xpt(path, PROGRAM_ID)
-    xpt_reader.require_variables(advs, REQUIRED_INPUT_VARIABLES[PROGRAM_ID], path, PROGRAM_ID)
+    # The returned frame spells each required variable as the schema does, whatever its stored case.
+    advs = xpt_reader.require_variables(
+        advs, REQUIRED_INPUT_VARIABLES[PROGRAM_ID], path, PROGRAM_ID
+    )
 
     log = _CheckpointLog()
     notes: list[str] = []

@@ -399,7 +399,11 @@ another macro. 07.02 reaches 19 macros. It does not reach `derive_lastminmax_mea
   and the nested pagination call (S02-DEP-util_boxplot_block_ranges)
 - `Relies on:` —
 - `Port notes:` A missing variable raises
-  `InputDataError("WPCT-F.07.02: <absolute path> lacks required variables: <names>")`.
+  `InputDataError("WPCT-F.07.02: <absolute path> lacks required variables: <names>")`. Required
+  variables match case-insensitively, as `varnum()` does [whitepapers/utilities/assert_var_exist.sas:23],
+  and are returned under their spelling in `schemas.REQUIRED_INPUT_VARIABLES`; a required variable
+  stored under more than one spelling raises
+  `InputDataError("WPCT-F.07.02: <absolute path> has variables that differ only in case: <columns>")`.
 
 #### S02-DEP-assert_continue — Halt on failed assertion
 
@@ -1100,7 +1104,11 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
   and the nested pagination call (S07-DEP-util_boxplot_block_ranges)
 - `Relies on:` —
 - `Port notes:` A missing variable raises
-  `InputDataError("WPCT-F.07.07: <absolute path> lacks required variables: <names>")`.
+  `InputDataError("WPCT-F.07.07: <absolute path> lacks required variables: <names>")`. Required
+  variables match case-insensitively, as `varnum()` does [whitepapers/utilities/assert_var_exist.sas:23],
+  and are returned under their spelling in `schemas.REQUIRED_INPUT_VARIABLES`; a required variable
+  stored under more than one spelling raises
+  `InputDataError("WPCT-F.07.07: <absolute path> has variables that differ only in case: <columns>")`.
 
 #### S07-DEP-assert_continue — Halt on failed assertion
 
