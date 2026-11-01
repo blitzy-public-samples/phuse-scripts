@@ -5,7 +5,7 @@ This report compares the Python port of WPCT-F.07.02 and WPCT-F.07.07 under `pyt
 ## Provenance
 
 - Upstream commit, the commit the port was built against: `398a6d33ced9359ffb58c46650a6d488811176b1`
-- Checkout `HEAD` when the report was generated (`git rev-parse HEAD`): `5f01652fa8214ddc335180681ef44f8c85ba064e`
+- Checkout `HEAD` when the report was generated (`git rev-parse HEAD`): `46178cd5939d8791f53d3916b4e33ed502b16ea1`
 - Python: `3.10.22`
 - Source integrity: all 36 read-only inputs match their blobs at the upstream commit.
 
