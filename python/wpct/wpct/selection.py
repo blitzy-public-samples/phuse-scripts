@@ -481,8 +481,8 @@ def assert_var_nonmissing(
 def _duplicate_key_groups(df: pd.DataFrame, columns: list[str], caller: str) -> int:
     """Return the row count of ``select <keys> ... group by <keys> having count(<last key>) > 1``.
 
-    The SELECT lists only the grouped keys, so the query returns one row per key group that fails
-    HAVING; that row count is the macro's ``SQLOBS``
+    The SELECT lists only the grouped keys, so the query returns one row per key group that
+    satisfies HAVING (and so violates uniqueness); that row count is the macro's ``SQLOBS``
     [whitepapers/utilities/assert_unique_keys.sas:84-99]. GROUP BY puts missing values in one group
     and ignores trailing blanks, and ``count`` counts non-missing values only (D-13).
     """

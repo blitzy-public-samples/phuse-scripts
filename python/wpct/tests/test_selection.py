@@ -29,8 +29,14 @@ from wpct.schemas import (
 PAIRS_07_02 = (("DIABP", (815,)), ("SYSBP", (816,)))
 #: The 07.07 subset WHERE [whitepapers/WPCT/WPCT-F.07.07.sas:146-148].
 PAIRS_07_07 = (("DIABP", (815, 817)),)
-#: The record key of ``%assert_unique_keys`` [whitepapers/WPCT/WPCT-F.07.07.sas:244].
-POOLED_KEYS = ("STUDYID", "USUBJID", "PARAMCD", "ATPTN")
+#: The 07.07 ``css_anadata`` record key from :mod:`wpct.schemas`, the key ``%assert_unique_keys``
+#: checks [whitepapers/WPCT/WPCT-F.07.07.sas:244].
+POOLED_KEYS = export_spec(PROGRAM_07_07, "css_anadata").key
+#: The 07.07 ``css_anadata`` columns from :mod:`wpct.schemas` before S07-TRN-06 appends
+#: ``studynum``: the ``css_safana`` order that S07-TRN-04 keeps and S07-TRN-05 stacks.
+CSS_SAFANA_COLUMNS = tuple(
+    column for column in export_spec(PROGRAM_07_07, "css_anadata").columns if column != "studynum"
+)
 
 #: Unique ``css_safana`` records ``(STUDYID, USUBJID, TRTPN, ATPTN, CHG)``; their pooled stacking is
 #: unique on :data:`POOLED_KEYS` too.
@@ -60,7 +66,11 @@ def _variables_frame(columns: tuple[str, ...]) -> pd.DataFrame:
 
 
 def _css_safana(records) -> pd.DataFrame:
-    """A 07.07 ``css_safana`` frame in its S07-TRN-04 column order, one row per record tuple."""
+    """A 07.07 ``css_safana`` frame in its S07-TRN-04 column order, one row per record tuple.
+
+    The order is :data:`CSS_SAFANA_COLUMNS`. Every row names exactly those columns, so a column the
+    schema adds, drops or renames fails here instead of turning into a column of missing values.
+    """
     rows = [
         {
             "STUDYID": studyid,
@@ -78,7 +88,9 @@ def _css_safana(records) -> pd.DataFrame:
         }
         for studyid, usubjid, trtpn, atptn, chg in records
     ]
-    return pd.DataFrame(rows)
+    for row in rows:
+        assert sorted(row) == sorted(CSS_SAFANA_COLUMNS)
+    return pd.DataFrame(rows, columns=list(CSS_SAFANA_COLUMNS))
 
 
 def _css_anadata(records) -> pd.DataFrame:
@@ -313,11 +325,10 @@ def test_s02_trn_03_keep_variables():
         "STUDYID USUBJID SAFFL TRTP TRTPN PARAMCD PARAM ATPTN ATPT AVISIT AVISITN AVAL BASE CHG "
         "ANL01FL ADT TRTSDT trtp_short"
     )
-    expected = _sas_list(
-        "STUDYID USUBJID SAFFL TRTPN PARAMCD PARAM ATPTN ATPT AVISIT AVISITN BASE CHG ANL01FL "
-        "trtp_short"
+    expected = export_spec(PROGRAM_07_02, "css_anadata").columns
+    assert expected == tuple(
+        column for column in advs_sub_columns if column in ANA_VARIABLES[PROGRAM_07_02]
     )
-    assert expected == export_spec(PROGRAM_07_02, "css_anadata").columns
 
     _assert_keep_variables(PROGRAM_07_02, advs_sub_columns, expected)
 
@@ -392,10 +403,11 @@ def test_s07_trn_04_keep_variables():
         "STUDYID USUBJID SAFFL ANL02FL trtp_short TRTPN PARAM PARAMCD CHG BASE ATPT ATPTN"
     )
     advs_min_columns = export_spec(PROGRAM_07_07, "advs_min").columns
-    expected = _sas_list(
-        "STUDYID USUBJID SAFFL TRTPN PARAMCD PARAM ATPTN ATPT trtp_short BASE CHG ANL02FL"
-    )
+    expected = CSS_SAFANA_COLUMNS
     assert (*expected, "studynum") == export_spec(PROGRAM_07_07, "css_anadata").columns
+    assert expected == tuple(
+        column for column in advs_min_columns if column in ANA_VARIABLES[PROGRAM_07_07]
+    )
 
     _assert_keep_variables(PROGRAM_07_07, advs_min_columns, expected)
 
@@ -529,7 +541,7 @@ def _assert_frame_returned(result, frame: pd.DataFrame) -> None:
 
 
 @pytest.mark.parametrize(
-    "keys", [POOLED_KEYS, "studyid usubjid paramcd atptn"], ids=["names", "sas-list"]
+    "keys", [POOLED_KEYS, " ".join(POOLED_KEYS).lower()], ids=["names", "sas-list"]
 )
 @pytest.mark.parametrize(
     ("extra_record", "duplicates"),
@@ -563,7 +575,7 @@ def test_unique_keys_halt(keys, extra_record, duplicates):
     assert str(halt) == halt.message
     assert halt.message == (
         "WPCT-F.07.07: assert_unique_keys failed: unexpected duplicates in CSS_ANADATA with unique "
-        f"keys STUDYID USUBJID PARAMCD ATPTN (SQLOBS = {duplicates})"
+        f"keys {' '.join(POOLED_KEYS).upper()} (SQLOBS = {duplicates})"
     )
     assert (halt.program_id, halt.check, halt.checkpoints) == (
         PROGRAM_07_07,

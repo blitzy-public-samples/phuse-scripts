@@ -140,9 +140,12 @@ def proc_summary(
     The frame is sorted with :func:`wpct.sas_semantics.sas_sort` (stable, missing BY values lowest;
     D-04, D-14) and split into BY groups with ``groupby(dropna=False, sort=False)``, so a record
     with a missing BY value still forms its own group. SAS sorts the data only by the leading BY
-    variables (``AVISITN TRTPN``, ``STUDYID TRTPN``) and relies on the trailing ones being constant
-    within them; sorting on every BY variable gives the same order whenever that holds, and when it
-    does not, the SAS step stops with a not-sorted error instead of producing statistics.
+    variables (``AVISITN TRTPN``, ``STUDYID TRTPN``), while BY processing needs the records in
+    ascending order of the full BY list. Sorting stably on every BY variable gives the same order
+    whenever the records SAS sorted already follow the full BY order: the trailing BY variables are
+    constant within the leading keys, as in the repository data, or already ascending within them.
+    SAS stops the step with a not-sorted error, instead of producing statistics, only when the
+    actual record sequence violates the full BY order.
 
     Within each group only ``var`` is examined (D-03): its missing values are dropped, ``BASE`` and
     every other column are ignored, and ``n`` counts the remaining values. The statistics are

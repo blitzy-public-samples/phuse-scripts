@@ -19,7 +19,8 @@ Tolerance classes (AAP 0.7.1), dispatched by class key:
   with ``d`` decimals; the ``bound_token`` ``<.0001`` passes only ``0 <= py < bound_upper``.
 - ``missing``: both missing passes, exactly one missing fails; it applies before every other rule.
 
-Groups (AAP 0.7.2, 0.7.3), in report order per program:
+Groups (AAP 0.7.2, 0.7.3), per program in the order :func:`compare_program` returns them, which is
+the report order. A normal run:
 
 - ``log_checkpoints``: one row per pinned SAS log checkpoint (15 for 07.02, 29 for 07.07).
 - ``listing_parameter_estimates``: every ParameterEstimates value of the listings, 40 for 07.02 and
@@ -29,7 +30,14 @@ Groups (AAP 0.7.2, 0.7.3), in report order per program:
 - ``export:<file>``: one group per user-supplied full-precision export: record-level sets
   (``css_anadata``, ``advs_min``), statistics (S02-MOD-01, S07-MOD-01) and ParameterEstimates.
 - ``not_compared``: every quantity without a SAS reference, each with its reason (AAP 0.7.5).
-- ``halt``: present only when a halting check stopped the run (S07-FLT-04, S07-FLT-05).
+
+A run stopped by a halting check (S07-FLT-04, S07-FLT-05) has no listing or ``export:<file>`` group:
+
+- ``halt``: one FAIL row carrying the halt message.
+- ``log_checkpoints``: still one row per pinned SAS log checkpoint; the checkpoints the run reached
+  are compared, and each step it never reached is NOT COMPARED.
+- ``not_compared``: the listing ParameterEstimates, the merged ``pval`` and every supplied export
+  are NOT COMPARED, beside the rows for the exports not supplied.
 
 A row's status is :data:`PASS`, :data:`FAIL` or :data:`NOT_COMPARED`. NOT COMPARED is never counted
 as PASS: the group counters and :func:`count_statuses` keep the three apart. Row order is
@@ -340,6 +348,7 @@ class Tolerances:
 
     @property
     def schema_version(self) -> int:
+        """The file's ``schema_version``; construction rejects every unsupported version."""
         return int(self.raw["schema_version"])
 
     @property
@@ -366,34 +375,61 @@ class Tolerances:
 
     @property
     def strip_trailing_blanks(self) -> bool:
+        """``categorical.strip_trailing_blanks``: whether text compares without trailing blanks."""
         return bool(self.entry("categorical")["strip_trailing_blanks"])
 
     @property
     def zero_reference(self) -> str:
+        """``glm_estimates.zero_reference``: the rule for a SAS value of 0.
+
+        Only ``"exact"`` is accepted, under which only an exact Python 0 agrees.
+        """
         return str(self.entry("glm_estimates")["zero_reference"])
 
     @property
     def half_unit(self) -> float:
+        """``rounded_listing.half_unit``: the allowed difference from a displayed token.
+
+        It is in units of the token's last displayed decimal: ``half_unit * 10**-d`` for a token
+        with ``d`` decimals, before :attr:`epsilon` is added.
+        """
         return float(self.entry("rounded_listing")["half_unit"])
 
     @property
     def epsilon(self) -> float:
+        """``rounded_listing.epsilon``: the absolute allowance added to the half-unit bound."""
         return float(self.entry("rounded_listing")["epsilon"])
 
     @property
     def bound_token(self) -> str:
+        """``rounded_listing.bound_token``: the listing token that stands for a bounded value.
+
+        The token, such as ``<.0001``, replaces the digits of a value below :attr:`bound_upper`.
+        """
         return str(self.entry("rounded_listing")["bound_token"])
 
     @property
     def bound_upper(self) -> float:
+        """``rounded_listing.bound_upper``: the exclusive upper bound of :attr:`bound_token`.
+
+        A Python value compared with that token passes only when ``0 <= py < bound_upper``.
+        """
         return float(self.entry("rounded_listing")["bound_upper"])
 
     @property
     def both_missing(self) -> str:
+        """``missing.both_missing``: the status given when both values are missing.
+
+        It is :data:`PASS` or :data:`FAIL`; construction rejects any other value.
+        """
         return str(self.entry("missing")["both_missing"])
 
     @property
     def one_missing(self) -> str:
+        """``missing.one_missing``: the status given when exactly one value is missing.
+
+        It is :data:`PASS` or :data:`FAIL`; construction rejects any other value.
+        """
         return str(self.entry("missing")["one_missing"])
 
 
@@ -497,7 +533,6 @@ def _numeric_inputs(
     return values[0], values[1]
 
 
-#: The reason of a ``counts`` FAIL whose two integers differ.
 _COUNTS_DIFFER = "counts differ"
 
 
@@ -761,14 +796,17 @@ class ComparisonGroup:
 
     @property
     def n_pass(self) -> int:
+        """The number of :data:`PASS` rows."""
         return self._count(PASS)
 
     @property
     def n_fail(self) -> int:
+        """The number of :data:`FAIL` rows."""
         return self._count(FAIL)
 
     @property
     def n_not_compared(self) -> int:
+        """The number of :data:`NOT_COMPARED` rows; :attr:`n_pass` never counts them."""
         return self._count(NOT_COMPARED)
 
 
@@ -1362,7 +1400,13 @@ def _column_kinds(spec: ExportSpec) -> dict[str, str]:
 
 
 def _key_value(value: object, kind: str, strip: bool) -> Any:
-    """Normalise one key value: text without trailing blanks (``''`` missing), numbers as floats."""
+    """Normalise one key value of type code ``kind``: ``CHAR`` keys as text, all others as floats.
+
+    A ``CHAR`` character missing value becomes ``''``; any other ``CHAR`` value becomes its text,
+    with trailing blanks removed only when ``strip`` is true. For any other kind, a numeric missing
+    value becomes ``None`` and any other value a built-in ``float``; a non-number raises
+    ``TypeError``.
+    """
     if kind == CHAR:
         if is_char_missing(value):
             return ""
