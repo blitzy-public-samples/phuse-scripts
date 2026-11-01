@@ -105,9 +105,37 @@ _TOLERANCE_COLUMN_KEYS = ("label", "rule", "limit", "applies_to")
 _NONE = "—"
 _MISSING = "."
 
-# "<" followed by a letter, "/", "!" or "?" would open raw HTML in Markdown and hide the text, as
-# for the pooled identifier that wpct.compare renders as "<A0>Pooled" (D-16).
-_HTML_START = re.compile(r"<(?=[A-Za-z/!?])")
+# Control characters: C0 (tab included), DEL and C1. Each is shown as "<XX>", its two-digit
+# uppercase hex code, the notation wpct.compare uses for the 'A0'x of the pooled identifier (D-16),
+# so no terminal escape sequence or invisible byte reaches the report. Every code starts with a
+# digit, so its "<" opens no HTML and needs no escape.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+# What would make literal text active Markdown, encoded in a single pass, so a backslash already
+# in the text is itself escaped and cannot cancel an escape added here.
+# A run of "@" becomes one inline code span. cmark-gfm, GitHub's renderer, merges adjacent text
+# before it looks for e-mail addresses, so neither a backslash escape nor "&#64;" stops it from
+# linking a bare, "mailto:" or "xmpp:" address, or from turning "<local@domain>" into an
+# autolink that also drops the angle brackets. A code span splits the text around it, so no
+# address, autolink or GitHub @mention can form across it, and it shows the "@" literally, in
+# monospace. The whole run is one span: a span per "@" would put two backticks side by side and
+# open a longer span. No e-mail autolink therefore remains. Every other match is backslash-escaped:
+# - always "\", "`", "*", "[", "]", "~", "|", "&" and "$": backslash escapes, code spans,
+#   emphasis, links and images ("!" and parentheses are inert once the brackets are escaped),
+#   strikethrough, table cell separators, entity references and GitHub math;
+# - "_" unless it sits between two alphanumerics, where CommonMark's flanking rules never let it
+#   open or close emphasis, so names such as CSS_STATS and trtp_short stay as written;
+# - "<" followed by a letter, "/", "!" or "?", which would open raw HTML or an autolink and hide
+#   the text, as for the pooled identifier that wpct.compare renders as "<A0>Pooled" (D-16);
+#   "<.0001" and the "<XX>" control codes stay as written;
+# - ":" before "//" and "." after "www", which GFM would turn into URL and www autolinks.
+_MARKDOWN_ACTIVE = re.compile(
+    r"@+|[\\`*\[\]~|&$]|<(?=[A-Za-z/!?])|(?<![^\W_])_|_(?![^\W_])|:(?=//)|(?<=www)\.",
+    re.IGNORECASE,
+)
+
+# What an inline code span cannot hold literally: see _code.
+_CODE_UNSAFE = re.compile(r"[`\\|\x00-\x1f\x7f-\x9f]")
 
 
 # --- Text and number formatting -------------------------------------------------------------------
@@ -132,7 +160,14 @@ def _format_number(value: object) -> str:
 
 
 def _format_setting(value: object) -> str:
-    """Render a value of the tolerance file as its JSON spelling would read."""
+    """Render a tolerance-table value as readable report text rather than its JSON spelling.
+
+    A string is shown as written, without quotes. A mapping becomes ``key = value`` pairs joined
+    by ``; `` and a list or tuple its items joined by single spaces, each value and item rendered
+    the same way. Any other value is rendered by :func:`_format_number`: booleans as ``true`` or
+    ``false``, integers and integral floats below ``1e16`` as integers, other floats in shortest
+    round-trip form, and ``None`` or NaN as the SAS missing value ``.`` rather than JSON ``null``.
+    """
     if isinstance(value, str):
         return value
     if isinstance(value, Mapping):
@@ -147,18 +182,36 @@ def _flatten(text: object) -> str:
 
 
 def _cell(text: object) -> str:
-    """Escape one table cell: one line, ``|`` escaped, no raw-HTML opening ``<``."""
-    return _HTML_START.sub(r"\\<", _flatten(text).replace("|", "\\|"))
+    """Encode ``text`` as literal Markdown text for a table cell, a heading or a paragraph.
+
+    Line breaks become single spaces, each control character becomes its ``<XX>`` code
+    (:data:`_CONTROL`), and the text that would make it active Markdown is encoded in one pass
+    (:data:`_MARKDOWN_ACTIVE`): each run of ``@`` becomes one inline code span, because GFM
+    links an e-mail address however its ``@`` is escaped and a code span splits the text so no
+    address can form, and every other match is backslash-escaped. The text therefore renders as
+    written, with each ``@`` in monospace, stays in its table cell, and opens no raw HTML,
+    emphasis, image or link, an e-mail autolink and an @mention included.
+    """
+    visible = _CONTROL.sub(lambda match: f"<{ord(match.group()):02X}>", _flatten(text))
+    return _MARKDOWN_ACTIVE.sub(
+        lambda match: f"`{match.group()}`" if match.group()[0] == "@" else "\\" + match.group(),
+        visible,
+    )
 
 
 def _code(text: object) -> str:
-    """Render ``text`` as an inline code span that is also safe inside a table cell."""
+    """Render ``text``, flattened to one line, as an inline code span, or by :func:`_cell`.
+
+    A code span shows its content literally and processes no escape, so a value it cannot hold as
+    written goes to :func:`_cell` instead: an empty value, or one with a backtick (it would end the
+    span), a backslash (before ``|``, GFM table parsers split it differently), a ``|`` (it would
+    split a table cell, and its escape would show outside a table) or a control character (it is
+    shown as its ``<XX>`` code). Any other value is wrapped in single backticks unchanged.
+    """
     value = _flatten(text)
-    if not value or "`" in value:
+    if not value or _CODE_UNSAFE.search(value):
         return _cell(value)
-    # GFM splits table cells before parsing code spans, so "|" needs its escape here too.
-    escaped = value.replace("|", "\\|")
-    return f"`{escaped}`"
+    return f"`{value}`"
 
 
 def _table(header: Sequence[str], rows: Iterable[Sequence[str]]) -> list[str]:
@@ -323,7 +376,7 @@ def _tolerance_lines(tolerances: Tolerances, paths: RepoPaths) -> list[str]:
         "",
     ]
     if raw.get("description"):
-        lines.extend([f"File description: {_flatten(raw['description'])}", ""])
+        lines.extend([f"File description: {_cell(raw['description'])}", ""])
     rows = []
     for class_key in tolerances.classes:
         entry = tolerances.entry(class_key)

@@ -80,8 +80,11 @@ from wpct.schemas import (
     PROGRAM_07_02,
     PROGRAM_07_07,
     PROGRAMS,
+    SAS_EXPORT_STRATUM_COLUMNS,
+    SAS_PARAMETER_ESTIMATE_COLUMNS,
     STATISTICS,
     export_spec,
+    upper_columns,
 )
 
 #: The ``file_state`` fixture: ``(bytes, st_mtime_ns)`` of a file, or a directory's sorted listing.
@@ -160,8 +163,16 @@ _TIMESTAMP = re.compile(r"\d{2}:\d{2}:\d{2}")
 #: An ISO 8601 date and time.
 _ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 
-#: A Markdown cell separator: a ``|`` not escaped as ``\\|``.
-_CELL_SEPARATOR = re.compile(r"(?<!\\)\|")
+#: What the report's literal text encodes, matched left to right as CommonMark reads it: a backslash
+#: escape (a backslash before an ASCII punctuation character), an inline code span holding only a
+#: run of ``@`` between single backticks, or any other backtick run, which is kept as written.
+_ENCODED_LITERAL = re.compile(r"\\([!-/:-@\[-`{-~])|`(@+)`(?!`)|`+")
+#: An inline code span holding only a run of ``@`` between single backticks: literal text.
+_AT_CODE_SPAN = re.compile(r"`@+`(?!`)")
+#: A run of backticks, which CommonMark reads as one code span delimiter.
+_BACKTICK_RUN = re.compile(r"`+")
+#: A control character: C0 (tab included), DEL or C1.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 #: A number as the report prints a limit, e.g. ``0``, ``0.5`` or ``1e-08``.
 _NUMBER = re.compile(r"\d+(?:\.\d+)?(?:e[-+]?\d+)?")
 #: A full git object id.
@@ -213,8 +224,12 @@ def _subsection(lines: Sequence[str], heading: str) -> list[str]:
 
 
 def _unescape(text: str) -> str:
-    """Undo the report's Markdown escapes of ``|`` and of a raw-HTML ``<``."""
-    return text.replace("\\|", "|").replace("\\<", "<")
+    """Undo the report's literal-text encoding, read left to right as CommonMark reads it: each
+    backslash before an ASCII punctuation character gives that character, so ``\\\\`` is one
+    literal backslash, and each inline code span holding only a run of ``@`` gives that run."""
+    return _ENCODED_LITERAL.sub(
+        lambda match: match.group(1) or match.group(2) or match.group(), text
+    )
 
 
 def _code_text(cell: str) -> str:
@@ -224,10 +239,34 @@ def _code_text(cell: str) -> str:
     return cell
 
 
+def _raw_cells(line: str) -> list[str]:
+    """The cells of a Markdown table row as written, escapes kept, split as GFM splits them.
+
+    Read left to right, a backslash takes the character after it, so only a ``|`` after an even
+    run of backslashes, none included, ends a cell.
+    """
+    parts: list[str] = []
+    cell: list[str] = []
+    row = line.strip()
+    index = 0
+    while index < len(row):
+        if row[index] == "\\":
+            cell.append(row[index : index + 2])
+            index += 2
+            continue
+        if row[index] == "|":
+            parts.append("".join(cell))
+            cell = []
+        else:
+            cell.append(row[index])
+        index += 1
+    parts.append("".join(cell))
+    assert len(parts) >= 2 and parts[0] == "" and parts[-1] == "", f"not a table row: {line!r}"
+    return [part.strip() for part in parts[1:-1]]
+
+
 def _cells(line: str) -> list[str]:
-    parts = _CELL_SEPARATOR.split(line.strip())
-    assert parts[0] == "" and parts[-1] == "", f"not a table row: {line!r}"
-    return [_unescape(part.strip()) for part in parts[1:-1]]
+    return [_unescape(cell) for cell in _raw_cells(line)]
 
 
 def _tables(lines: Sequence[str]) -> list[list[dict[str, str]]]:
@@ -541,7 +580,9 @@ def test_write_report_writes_only_the_report(
     """``write_report`` writes the rendered text to the fixed report path and nothing else.
 
     The write root then holds only ``python/wpct/reports/equivalence_report.md`` and the
-    directories above it. The bytes are those of ``render_report`` with the tolerances of
+    directories above it: a fixed location under ``python/wpct/``, because the port has no
+    counterpart of the SAS ``outputs_folder`` setting, blank in 07.02 (ENV-03) and a UNC share in
+    07.07 (ENV-04). The bytes are those of ``render_report`` with the tolerances of
     ``python/wpct/tolerances.json``, as UTF-8 with ``\\n`` line ends.
     """
     assert _tree(write_paths.write_root) == {
@@ -557,8 +598,11 @@ def test_write_report_writes_only_the_report(
 def test_report_sections_in_order(written: _Written) -> None:
     """One title, then Provenance, Summary, both programs, Not compared and Source integrity.
 
-    Each section heading appears once, in the order Agent Action Plan 0.7.5 fixes, and the
-    tolerance table sits in Provenance, so it is printed before any result.
+    Each section heading appears once, in the order Agent Action Plan 0.7.5 fixes: the
+    WPCT-F.07.02 section, which judges among others the endpoint ANCOVA (S02-MOD-02), before the
+    WPCT-F.07.07 section, which judges the per-study and pooled ANCOVAs (S07-MOD-02, S07-MOD-03).
+    The tolerance table those results are judged under sits in Provenance, so it is printed before
+    any result.
     """
     assert report.SECTION_TITLES == _EXPECTED_SECTIONS
     lines = written.text.split("\n")
@@ -573,7 +617,10 @@ def test_report_provenance(written: _Written) -> None:
     """Provenance names both commits, the Python and library versions and the SAS references.
 
     The upstream commit is ``398a6d33…``; ``HEAD`` is a full commit id or ``unavailable``. The
-    references come from commit ``6fc757d`` (2016-02-26), produced by SAS 9.4 TS1M2.
+    references come from commit ``6fc757d`` (2016-02-26), produced by SAS 9.4 TS1M2, the release
+    the programs' version gate demands (ENV-06). That gate has no Python counterpart, because
+    ``requirements.txt`` fixes the Python environment, so the report records the Python and
+    library versions the run used.
     """
     facts = written.facts
     section = _section(written.text, "Provenance")
@@ -624,8 +671,9 @@ def test_tolerance_table_rendered_from_file(
     a string) and the one its ``compare.Tolerances`` accessor applies, so every class, those
     without a limit included, shows how it compares (Agent Action Plan 0.7.1, 0.9.5).
     Comparisons judged under a modified copy of the loaded tolerances, whose summary-statistics
-    limit is a sentinel, render that sentinel and leave every other row unchanged, so the table is
-    not written by hand. ``tolerances.json`` itself is not edited.
+    limit, the one the PROC SUMMARY statistics of S02-MOD-01 and S07-MOD-01 are held to, is a
+    sentinel, render that sentinel and leave every other row unchanged, so the table is not
+    written by hand. ``tolerances.json`` itself is not edited.
     """
     tolerance_file = repo_paths.tolerances_file
     file_before = file_state(tolerance_file)
@@ -674,12 +722,13 @@ def test_changed_tolerance_setting_rendered(
     """A changed configurable setting reaches its Settings cell; nothing else in the table moves.
 
     A copy of the loaded tolerances takes a rounded-listing epsilon of :data:`_SETTINGS_EPSILON`
-    and the opposite trailing-blank rule for keys and categorical fields, settings a user changes
-    by editing ``tolerances.json`` alone (Agent Action Plan 0.7.1). The clean-checkout comparisons
-    judged under that copy render both new values, read back as the copy's accessors apply them,
-    and every other cell of every row as before, so the Settings column is rendered from the
-    applied tolerances and not written by hand (Agent Action Plan 0.9.5). Neither the session
-    tolerances nor ``tolerances.json`` itself changes.
+    and the opposite of the trailing-blank rule for keys and categorical fields, which by default
+    strips trailing blanks because SAS character comparisons ignore them (D-11). Both are settings
+    a user changes by editing ``tolerances.json`` alone (Agent Action Plan 0.7.1). The
+    clean-checkout comparisons judged under that copy render both new values, read back as the
+    copy's accessors apply them, and every other cell of every row as before, so the Settings
+    column is rendered from the applied tolerances and not written by hand (Agent Action Plan
+    0.9.5). Neither the session tolerances nor ``tolerances.json`` itself changes.
     """
     tolerance_file = repo_paths.tolerances_file
     file_before = file_state(tolerance_file)
@@ -775,11 +824,12 @@ def test_load_tolerances_rejects_invalid_file(
     Each case edits the repository file as ``compare.load_tolerances`` gives it and writes the
     result under ``tmp_path``: bytes that are not UTF-8, a limit beyond the floating-point range,
     nesting beyond the parser's recursion limit, a key the class does not read (a ``limit`` of
-    ``categorical`` or ``rounded_listing``, or a field list, which only ``wpct.schemas`` holds),
-    a counts limit other than 0 (counts compare by exact integer equality), an unknown top-level
-    key, and a description that is not a string. Loading raises ``ValueError``, which the command
-    line reports with exit code 2, and the message names the absolute file path and the offending
-    key where there is one; it never repeats the 401-digit integer.
+    ``categorical`` or ``rounded_listing``, or a field list, which only ``wpct.schemas`` holds,
+    here the summary-statistics fields, the S02-MOD-01 and S07-MOD-01 statistics ``mean`` to
+    ``q3``), a counts limit other than 0 (counts compare by exact integer equality), an unknown
+    top-level key, and a description that is not a string. Loading raises ``ValueError``, which
+    the command line reports with exit code 2, and the message names the absolute file path and
+    the offending key where there is one; it never repeats the 401-digit integer.
     """
     target = tmp_path / "tolerances.json"
     target.write_bytes(edit(compare.load_tolerances(repo_paths.tolerances_file).to_dict()))
@@ -806,9 +856,10 @@ def test_write_report_renders_applied_tolerances(
     """``write_report`` prints the tolerances the comparisons applied; it never re-reads the file.
 
     The comparisons are judged under a copy of the loaded tolerances whose summary-statistics
-    limit is a sentinel. Every group that applies a tolerance carries that copy, the written table
-    shows the sentinel while ``tolerances.json`` keeps its own limit and stays unchanged, and the
-    bytes are those ``render_report`` gives for the copy.
+    limit, the one the S02-MOD-01 and S07-MOD-01 statistics are held to, is a sentinel. Every
+    group that applies a tolerance carries that copy, the written table shows the sentinel while
+    ``tolerances.json`` keeps its own limit and stays unchanged, and the bytes are those
+    ``render_report`` gives for the copy.
     """
     tolerance_file = repo_paths.tolerances_file
     file_before = file_state(tolerance_file)
@@ -842,7 +893,8 @@ def test_write_report_needs_one_applied_snapshot(
     """Without exactly one tolerance snapshot across the groups, ``write_report`` writes nothing.
 
     - ``mixed``: WPCT-F.07.02 is judged under the loaded tolerances and WPCT-F.07.07 under a copy
-      with a sentinel limit, so no single table matches every verdict.
+      with a sentinel summary-statistics limit, so the S02-MOD-01 and S07-MOD-01 statistics are
+      held to different limits and no single table matches every verdict.
     - ``none``: no group carries the tolerances it was judged under.
 
     Either raises ``ValueError`` before anything is created, so the write root stays empty.
@@ -878,7 +930,8 @@ def test_render_report_rejects_other_tolerances(
     """``render_report`` refuses a tolerance table other than the one the comparisons applied.
 
     The clean-checkout groups carry the loaded tolerances, so rendering them with a copy whose
-    summary-statistics limit is a sentinel raises ``ValueError`` naming the first such group.
+    summary-statistics limit, the one the S02-MOD-01 and S07-MOD-01 statistics are held to, is a
+    sentinel raises ``ValueError`` naming the first such group.
     """
     facts = provenance.collect(write_paths)
     first = clean_comparisons[PROGRAM_07_02][0]
@@ -894,8 +947,11 @@ def test_summary_counts(written: _Written, clean_comparisons: _Comparisons) -> N
     """The Summary counts PASS, FAIL and NOT COMPARED apart, per program and overall.
 
     Each count equals the rows with exactly that status, counted row by row here. On a clean
-    checkout nothing fails, every log checkpoint and listing-based value passes (61 rows for
-    07.02, 175 for 07.07) and each program has NOT COMPARED rows, which are not in its PASS count.
+    checkout nothing fails and every log checkpoint and listing-based value passes: 61 rows for
+    07.02, its 15 checkpoints, the 40 ParameterEstimates values of S02-MOD-02 and the 6 merged
+    ``pval`` cells of S02-TRN-05; 175 for 07.07, its 29 checkpoints, the 128 values of S07-MOD-02
+    and S07-MOD-03 and the 18 cells of S07-TRN-08. Each program has NOT COMPARED rows, which are
+    not in its PASS count.
     """
     summary = {row["Program"]: row for row in _single_table(_section(written.text, "Summary"))}
     assert list(summary) == [*PROGRAMS, "Overall"]
@@ -938,9 +994,11 @@ def test_not_compared_rows_never_counted_as_pass(
 ) -> None:
     """Adding NOT COMPARED rows raises only the NOT COMPARED counts, never PASS.
 
-    A synthetic group of three NOT COMPARED rows and one PASS row is added to WPCT-F.07.02. Its
-    Summary row gains exactly one PASS and three NOT COMPARED, WPCT-F.07.07 is unchanged, and the
-    three rows are listed under Not compared with their reason.
+    NOT COMPARED marks a quantity without a SAS reference, such as a PROC SUMMARY statistic of
+    S02-MOD-01 or S07-MOD-01, so no such row may count as PASS. A synthetic group of three NOT
+    COMPARED rows and one PASS row is added to WPCT-F.07.02. Its Summary row gains exactly one PASS
+    and three NOT COMPARED, WPCT-F.07.07 is unchanged, and the three rows are listed under Not
+    compared with their reason.
     """
     key = compare.export_group_key("synthetic.csv")
     reason = "synthetic quantity without a SAS reference"
@@ -998,6 +1056,260 @@ def test_not_compared_rows_never_counted_as_pass(
         if entry["Comparison"] == synthetic.title
     ]
     assert listed == [(synthetic.title, f"synthetic NC {n}", reason) for n in (1, 2, 3)]
+
+
+#: Characters that are active Markdown wherever the report leaves them unescaped: escapes,
+#: emphasis, links and images, strikethrough, cell separators, entity references and GitHub math.
+#: A backtick and ``@`` have their own rules in :func:`_active_markdown`.
+_ALWAYS_ACTIVE = frozenset("\\*[]~|&$")
+
+
+def _active_markdown(raw: str) -> list[str]:
+    """What in ``raw``, report text as written, would not render as literal text in cmark-gfm.
+
+    Read left to right as CommonMark reads it, a backslash takes the character after it and a
+    backtick run delimits a code span. Flagged are every control character; every ``@`` outside
+    an inline code span, escaped or not, because cmark-gfm links an e-mail address, a
+    ``<local@domain>`` autolink included, however its ``@`` is escaped; every unescaped backtick
+    run except the single backticks around a code span holding only ``@``; and, outside an
+    escape, ``\\ * [ ] ~ | & $``, a ``_`` that is not between two alphanumerics, a ``<`` before a
+    letter, ``/``, ``!`` or ``?`` (raw HTML or an autolink), a ``:`` before ``//`` and a ``.``
+    after ``www`` (GFM autolinks).
+    """
+    found = [f"control character {ord(char):02X}" for char in _CONTROL_CHARACTER.findall(raw)]
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "\\" and index + 1 < len(raw):
+            if raw[index + 1] == "@":
+                found.append(f"'@' at {index + 1}")
+            index += 2
+            continue
+        if char == "`":
+            span = _AT_CODE_SPAN.match(raw, index)
+            if span is not None:
+                index = span.end()
+                continue
+            run = _BACKTICK_RUN.match(raw, index)
+            assert run is not None
+            found.extend(f"'`' at {position}" for position in range(*run.span()))
+            index = run.end()
+            continue
+        before, after = raw[index - 1 : index], raw[index + 1 : index + 2]
+        if (
+            char in _ALWAYS_ACTIVE
+            or char == "@"
+            or (char == "_" and not (before.isalnum() and after.isalnum()))
+            or (char == "<" and ((after.isascii() and after.isalpha()) or after in ("/", "!", "?")))
+            or (char == ":" and raw.startswith("//", index + 1))
+            or (char == "." and raw[max(index - 3, 0) : index].lower() == "www")
+        ):
+            found.append(f"{char!r} at {index}")
+        index += 1
+    return found
+
+
+def _literal_text(raw: str) -> str:
+    """The literal text report text ``raw`` renders as, once nothing in it is found active.
+
+    Text that is one inline code span, its content free of backticks, is a value the report holds
+    as written; it must hold no backslash, ``|`` or control character, and gives its content. Any
+    other text, inline code spans holding only ``@`` included, must hold no active Markdown
+    (:func:`_active_markdown`) and gives its decoded text (:func:`_unescape`).
+    """
+    content = raw[1:-1]
+    if len(raw) >= 2 and raw[0] == raw[-1] == "`" and "`" not in content:
+        assert not re.search(r"[\\|]", content), f"code span cannot hold {content!r} as written"
+        assert not _CONTROL_CHARACTER.search(content), f"control character in code span {raw!r}"
+        return content
+    active = _active_markdown(raw)
+    assert not active, f"active Markdown in {raw!r}: {active}"
+    return _unescape(raw)
+
+
+def _raw_table(lines: Sequence[str]) -> list[dict[str, str]]:
+    """The one table in ``lines``, its rows keyed by header cell, with each cell as written."""
+    assert len(_tables(lines)) == 1, "expected one table"
+    table = [line for line in lines if line.startswith("|")]
+    header = _cells(table[0])
+    return [dict(zip(header, _raw_cells(line), strict=True)) for line in table[2:]]
+
+
+#: Untrusted text, as ``(text, literal)``: ``literal`` is what the report must show, the text on
+#: one line with each control character as its ``<XX>`` code. Every text is synthetic; a key of a
+#: user-supplied SAS export, which the report shows in a stratum or a reason, could carry any of
+#: them.
+_UNTRUSTED_TEXT = (
+    pytest.param("a\\|b|c", "a\\|b|c", id="odd-backslashes-before-pipe"),
+    pytest.param("p\\\\|q", "p\\\\|q", id="even-backslashes-before-pipe"),
+    pytest.param(
+        "\\<img src=x onerror=alert(4)>",
+        "\\<img src=x onerror=alert(4)>",
+        id="odd-backslashes-before-img",
+    ),
+    pytest.param(
+        "\\\\<svg onload=alert(8)>", "\\\\<svg onload=alert(8)>", id="even-backslashes-before-svg"
+    ),
+    pytest.param(
+        "\\<script>alert(2)\\</script>", "\\<script>alert(2)\\</script>", id="backslash-script"
+    ),
+    pytest.param("\\<br>", "\\<br>", id="backslash-br"),
+    pytest.param("trailing backslash \\", "trailing backslash \\", id="trailing-backslash"),
+    pytest.param("a|b||c |", "a|b||c |", id="pipes"),
+    pytest.param("`code` and ``double``", "`code` and ``double``", id="backticks"),
+    pytest.param(
+        "![t](http://127.0.0.1:9/track.png)", "![t](http://127.0.0.1:9/track.png)", id="image"
+    ),
+    pytest.param("[click](javascript:alert(5))", "[click](javascript:alert(5))", id="link"),
+    pytest.param("*em* _u_ ~~del~~ __strong__", "*em* _u_ ~~del~~ __strong__", id="emphasis"),
+    pytest.param("&lt;b&gt;&#124;", "&lt;b&gt;&#124;", id="entities"),
+    pytest.param(
+        "http://evil.example/x www.evil.example WWW.EVIL.EXAMPLE",
+        "http://evil.example/x www.evil.example WWW.EVIL.EXAMPLE",
+        id="url-and-www-autolinks",
+    ),
+    pytest.param("x<1@evil.example>", "x<1@evil.example>", id="angle-bracket-email-autolink"),
+    pytest.param("foo@bar.example", "foo@bar.example", id="bare-email-autolink"),
+    pytest.param("mailto:x@y.example", "mailto:x@y.example", id="mailto-autolink"),
+    pytest.param("xmpp:x@y.example/r", "xmpp:x@y.example/r", id="xmpp-autolink"),
+    pytest.param("a@@@b.example", "a@@@b.example", id="at-run"),
+    pytest.param("x`@", "x`@", id="backtick-before-at"),
+    pytest.param("@`", "@`", id="at-before-backtick"),
+    pytest.param("\\@x.example", "\\@x.example", id="backslash-before-at"),
+    pytest.param("$x^2$", "$x^2$", id="math"),
+    pytest.param(
+        "CSS_STATS trtp_short _lead trail_ a__b",
+        "CSS_STATS trtp_short _lead trail_ a__b",
+        id="underscores",
+    ),
+    pytest.param("\x1b[31mRED\x1b]0;title\x07", "<1B>[31mRED<1B>]0;title<07>", id="esc-osc-bel"),
+    pytest.param(
+        "del\x7f csi\x9b nul\x00 tab\t", "del<7F> csi<9B> nul<00> tab<09>", id="del-c1-c0"
+    ),
+    pytest.param(
+        "line one\nline two\r\nline three", "line one line two line three", id="line-breaks"
+    ),
+    pytest.param("<A0>Pooled", "<A0>Pooled", id="d16-pooled-marker"),
+    pytest.param("<.0001", "<.0001", id="bound-token"),
+)
+
+
+@pytest.mark.parametrize(("text", "literal"), _UNTRUSTED_TEXT)
+def test_untrusted_text_rendered_literally(
+    text: str,
+    literal: str,
+    results: Mapping[str, object],
+    clean_comparisons: _Comparisons,
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+) -> None:
+    """Untrusted text reaches the report as literal Markdown text, wherever the report shows it.
+
+    The record keys STUDYID, USUBJID and PARAMCD (S02-TRN-03, S07-TRN-04) of a supplied SAS export
+    reach the report in strata and reasons, and the pooled STUDYID shows its 'A0'x byte as
+    ``<A0>`` (S07-TRN-05, D-16). A synthetic text fills every field of a synthetic FAIL row, the
+    quantity, stratum and reason of a synthetic NOT COMPARED row, the group title, a synthetic
+    library version, the Python version and one Source integrity path, so the report shows it in
+    table cells, a heading, list items and a paragraph, as plain text or as an inline code span.
+    Every table row splits into its header's cell count, the report holds no control character,
+    and every place shows the literal text with no Markdown-active text outside a backslash escape
+    and no ``@``, which cmark-gfm would link as an e-mail address, outside an inline code span.
+    """
+    key = compare.export_group_key("synthetic-untrusted.csv")
+    heading = f"Synthetic group {literal}"
+
+    def make_row(status: str, value: str) -> compare.ComparisonRow:
+        return compare.ComparisonRow(
+            program=PROGRAM_07_02,
+            group=key,
+            quantity=text,
+            stratum=text,
+            sas_value=value,
+            python_value=value,
+            difference=value,
+            tolerance=value,
+            status=status,
+            reason=text,
+        )
+
+    synthetic = compare.ComparisonGroup(
+        program=PROGRAM_07_02,
+        key=key,
+        title=f"Synthetic group {text}",
+        heading_note=None,
+        rounded=False,
+        rows=(make_row(compare.FAIL, text), make_row(compare.NOT_COMPARED, "")),
+    )
+    comparisons = {
+        **clean_comparisons,
+        PROGRAM_07_02: (*clean_comparisons[PROGRAM_07_02], synthetic),
+    }
+    facts = provenance.collect(repo_paths)
+    facts = dataclasses.replace(
+        facts,
+        python_version=text,
+        library_versions={**facts.library_versions, "synthetic-package": text},
+        integrity=(
+            dataclasses.replace(facts.integrity[0], path=text, status=provenance.STATUS_CHANGED),
+            *facts.integrity[1:],
+        ),
+    )
+    rendered = report.render_report(results, comparisons, facts, tolerances)
+    lines = rendered.split("\n")
+    assert not _CONTROL_CHARACTER.search(rendered.replace("\n", ""))
+
+    header_width: int | None = None
+    for line in lines:
+        if not line.startswith("|"):
+            header_width = None
+            continue
+        width = len(_raw_cells(line))
+        header_width = width if header_width is None else header_width
+        assert width == header_width, f"{width} cells under a {header_width}-cell header: {line!r}"
+
+    program_section = _section(rendered, PROGRAM_07_02)
+    headings = [line[4:] for line in program_section if line.startswith("### Synthetic group ")]
+    assert len(headings) == 1
+    assert _literal_text(headings[0]) == heading
+
+    failed, not_compared = _raw_table(_subsection(program_section, heading))
+    values = ("SAS value", "Python value", "Difference", "Tolerance")
+    for column in ("Quantity", "Stratum", *values, "Reason"):
+        assert _literal_text(failed[column]) == literal, column
+    for column in ("Quantity", "Stratum", "Reason"):
+        assert _literal_text(not_compared[column]) == literal, column
+    assert [not_compared[column] for column in values] == [""] * len(values)
+    assert (_unescape(failed["Result"]), _unescape(not_compared["Result"])) == (
+        compare.FAIL,
+        compare.NOT_COMPARED,
+    )
+
+    listed = [
+        row
+        for row in _raw_table(_section(rendered, "Not compared"))
+        if _unescape(row["Comparison"]) == heading
+    ]
+    assert len(listed) == 1
+    for column in ("Comparison", "Quantity", "Stratum", "Reason"):
+        assert _literal_text(listed[0][column]) == (heading if column == "Comparison" else literal)
+
+    provenance_section = _section(rendered, "Provenance")
+    versions = {
+        _unescape(row["Package"]): row["Version"]
+        for row in _raw_table(_subsection(provenance_section, "Library versions"))
+    }
+    assert _literal_text(versions["synthetic-package"]) == literal
+    python_lines = [line for line in provenance_section if line.startswith("- Python: ")]
+    assert len(python_lines) == 1
+    assert _literal_text(python_lines[0].removeprefix("- Python: ")) == literal
+
+    integrity_section = _section(rendered, "Source integrity")
+    first = _raw_table(integrity_section)[0]
+    assert _literal_text(first["Path"]) == literal
+    assert _unescape(first["Result"]) == provenance.STATUS_CHANGED
+    changed = [line for line in integrity_section if line.startswith("Changed inputs: ")]
+    assert len(changed) == 1 and changed[0].endswith(".")
+    assert _literal_text(changed[0].removeprefix("Changed inputs: ")[:-1]) == literal
 
 
 #: Every outcome path of the primitive comparison rules, as ``(tolerance class, Python value, SAS
@@ -1162,11 +1474,12 @@ def test_rule_outcome_reasons(
 ) -> None:
     """Every FAIL of a primitive comparison rule says why, without showing either value.
 
-    Unequal counts and categorical values, an absolute or relative limit exceeded, a displayed
-    precision exceeded and a value outside the ``<.0001`` bound each FAIL with an explanation, so
-    no failed report row lacks one. The explanation names neither value, so a record-level field
-    mismatch can report only the keys of its records. A plain PASS has no reason, and a PASS of
-    the missing rule keeps ``both missing``.
+    Unequal counts and categorical values, an absolute or relative limit exceeded, a non-zero
+    value against a SAS 0, which only an exact 0 matches because SAS reports an aliased column as
+    0 (D-06), a displayed precision exceeded and a value outside the ``<.0001`` bound each FAIL
+    with an explanation, so no failed report row lacks one. The explanation names neither value,
+    so a record-level field mismatch can report only the keys of its records. A plain PASS has no
+    reason, and a PASS of the missing rule keeps ``both missing``.
     """
     py_value, sas_value = python(tolerances), sas(tolerances)
     if class_key == "rounded_listing":
@@ -1191,10 +1504,11 @@ def test_failed_checkpoint_reason_in_report(
 ) -> None:
     """A failed log checkpoint states why, once per count, in the report's Reason column.
 
-    The first WPCT-F.07.02 checkpoint, ADVS at an ``obs/vars`` log line, is given more Python
-    observations and variables than the counts limit allows. Its row FAILs as ``observation count
-    differs; variable count differs``, every other checkpoint still passes without a reason, and
-    the report's log-checkpoint table shows that reason beside the FAIL.
+    The first WPCT-F.07.02 checkpoint, ADVS at an ``obs/vars`` log line, counts the ``WORK.ADVS``
+    copy that ``%util_access_test_data`` makes (S02-DEP-util_access_test_data). It is given more
+    Python observations and variables than the counts limit allows. Its row FAILs as
+    ``observation count differs; variable count differs``, every other checkpoint still passes
+    without a reason, and the report's log-checkpoint table shows that reason beside the FAIL.
     """
     result = results[PROGRAM_07_02]
     first, *others = result.checkpoints
@@ -1307,10 +1621,11 @@ def test_rounded_reference_wording(
     The note is the sentence Agent Action Plan 0.7.5 fixes, word for word. It names the program's
     listing ``whitepapers/WPCT/outputs_sas/<program>.lst`` and the decimals that listing displays
     per statistic (Agent Action Plan 0.2.2.3): ``8 (Estimate, StdErr), 2 (t Value), 4 (Pr > |t|)``
-    for ParameterEstimates and ``4`` for the merged ``pval``. Its rule gives the relative
-    ``glm_estimates`` limit for Estimate, StdErr and t Value and the absolute ``p_values`` limit
-    for ``Pr > |t|`` (Agent Action Plan 0.7.1); each limit is read at its own position and must
-    equal its own class's applied limit. A swapped limit, rule kind or precision therefore fails.
+    for ParameterEstimates (S02-MOD-02, S07-MOD-02, S07-MOD-03) and ``4`` for the merged ``pval``
+    (S02-TRN-05, S07-TRN-08). Its rule gives the relative ``glm_estimates`` limit for Estimate,
+    StdErr and t Value and the absolute ``p_values`` limit for ``Pr > |t|`` (Agent Action Plan
+    0.7.1); each limit is read at its own position and must equal its own class's applied limit.
+    A swapped limit, rule kind or precision therefore fails.
 
     - ``loaded``: the written report of the clean-checkout comparisons, under ``tolerances.json``.
     - ``sentinel``: the report rendered for comparisons judged under a copy whose two limits are
@@ -1410,7 +1725,9 @@ def test_source_integrity_rows(written: _Written) -> None:
     """Source integrity has one row per read-only input, in ``READ_ONLY_INPUTS`` order.
 
     Each row shows the input's blob at the upstream commit, its working-tree blob and the result
-    ``provenance.collect`` found (Agent Action Plan 0.11.2).
+    ``provenance.collect`` found (Agent Action Plan 0.11.2). The inputs include the two ADVS files
+    the port reads from the checkout in place of the GitHub URL (ENV-02) and the UNC share
+    (ENV-04), so the report shows whether the data read are the upstream blobs.
     """
     table = _single_table(_section(written.text, "Source integrity"))
     assert len(provenance.READ_ONLY_INPUTS) == 36
@@ -1931,7 +2248,9 @@ def test_source_integrity_explanations(
     The provenance facts of the checkout get synthetic git facts, so no case depends on this
     host's git (Agent Action Plan 0.1.1, 0.7.5, 0.11.2): git unavailable, with ``HEAD`` shown as
     ``unavailable``; the upstream commit unavailable; or two CHANGED inputs, one edited and one
-    missing. The statement of each is the Provenance ``- Source integrity: `` line and ends the
+    missing. The synthetic edit is to the 07.02 program, whose legacy environment settings the
+    specification records without fixing them (ENV-01, ENV-02, ENV-03), so an edit there must show
+    as CHANGED. The statement of each is the Provenance ``- Source integrity: `` line and ends the
     Source integrity introduction. Only changed inputs add ``Changed inputs: <paths>.``. The table
     shows every row's status, and ``unavailable`` for each missing blob.
     """
@@ -1991,7 +2310,8 @@ def test_report_deterministic(
     """Equal inputs give equal text, with no timestamp, absolute path or ``\\r``.
 
     Two renders, one with freshly collected provenance, equal the written file. The report quotes
-    no SAS page header, so no time of day appears anywhere in it.
+    no SAS page header, presentation output the port excludes (S02-PRS-01, S07-PRS-01), so no time
+    of day appears anywhere in it.
     """
     first = report.render_report(results, clean_comparisons, written.facts, tolerances)
     second = report.render_report(
@@ -2032,8 +2352,9 @@ def test_reproduce_under_write_root(
       the report equals the clean-checkout rendering, and the directory stays empty.
 
     The write root ends up holding exactly ``python/wpct/reports/equivalence_report.md`` and every
-    ``python/wpct/outputs/<program>/`` file of ``schemas.EXPORTS``, and the checkout's own report
-    and outputs locations are unchanged.
+    ``python/wpct/outputs/<program>/`` file of ``schemas.EXPORTS``, the fixed locations the port
+    writes to because it has no counterpart of the SAS ``outputs_folder`` setting (ENV-03,
+    ENV-04), and the checkout's own report and outputs locations are unchanged.
     """
     checkout_watched = (
         repo_paths.report_file,
@@ -2087,7 +2408,9 @@ def test_reproduce_rejects_missing_sas_exports_dir(
     """A ``--sas-exports`` that is not an existing directory is an input error: exit 2, no writes.
 
     The check runs before anything is read or written, so the write root stays empty and the named
-    directory is not created.
+    directory is not created. That is the outcome the specification gives an input error after a
+    failed dependency assertion (S02-DEP-assert_continue, S07-DEP-assert_continue): the error on
+    stderr, exit code 2 and nothing written.
     """
     missing = tmp_path / "no_such_exports"
 
@@ -2107,24 +2430,49 @@ _CLI_ERROR_PREFIX = f"{cli.PROG} reproduce: error: "
 #: The WPCT-F.07.02 ParameterEstimates export a user may supply (Agent Action Plan 0.7.3).
 _CLI_ESTIMATES_EXPORT = export_spec(PROGRAM_07_02, "parameter_estimates").sas_export_file
 
+#: The SAS variables of that export, as ``wpct.schemas`` alone defines them: the stratum columns the
+#: user adds, then the ODS ParameterEstimates columns.
+_CLI_ESTIMATES_COLUMNS = (
+    *SAS_EXPORT_STRATUM_COLUMNS[str(_CLI_ESTIMATES_EXPORT)],
+    *SAS_PARAMETER_ESTIMATE_COLUMNS,
+)
+
 #: The fabricated values of a synthetic stand-in for that export, by compared field. None is a SAS
 #: result, and each lies far outside every tolerance around the Python fit, so each must FAIL.
 _CLI_FABRICATED_VALUES: Mapping[str, str] = MappingProxyType(
     {"ESTIMATE": "-999.5", "STDERR": "0.25", "TVALUE": "-3998", "PROBT": "0.5"}
 )
 
-#: The synthetic stand-in: one row on the real DIABP/815 Intercept key, carrying those values in
-#: the export's ``Estimate StdErr tValue Probt`` columns.
+#: The stand-in's one row by upper-folded SAS variable: the real DIABP/815 Intercept key, then the
+#: fabricated values. It is synthetic, and no SAS result.
+_CLI_FABRICATED_RECORD: Mapping[str, str] = MappingProxyType(
+    {"PARAMCD": "DIABP", "ATPTN": "815", "PARAMETER": "Intercept", **_CLI_FABRICATED_VALUES}
+)
+
+#: That row's cells in the export's column order, each matched to its column case-insensitively.
+#: A schema column the row has no cell for fails at import with that column's name.
+_CLI_FABRICATED_CELLS = tuple(
+    _CLI_FABRICATED_RECORD[name] for name in upper_columns(_CLI_ESTIMATES_COLUMNS)
+)
+
+#: The synthetic stand-in: the schema's header row, then that row.
 _CLI_FABRICATED_EXPORT = (
-    "PARAMCD,ATPTN,Parameter,Estimate,StdErr,tValue,Probt\n"
-    f"DIABP,815,Intercept,{','.join(_CLI_FABRICATED_VALUES.values())}\n"
+    f"{','.join(_CLI_ESTIMATES_COLUMNS)}\n{','.join(_CLI_FABRICATED_CELLS)}\n"
 ).encode("latin-1")
 
-#: A stand-in for the same export whose header names ``Estimate`` twice in different case, which
-#: the export contract refuses (``python/wpct/reference/sas_exports/README.md``).
+#: The schema's spelling of the export's ``ESTIMATE`` column.
+_CLI_ESTIMATE_COLUMN = dict(zip(upper_columns(_CLI_ESTIMATES_COLUMNS), _CLI_ESTIMATES_COLUMNS))[
+    "ESTIMATE"
+]
+
+#: A stand-in for the same export whose header is the schema's, plus ``Estimate`` repeated in
+#: swapped case, which the export contract refuses
+#: (``python/wpct/reference/sas_exports/README.md``). Its row repeats the fabricated estimate under
+#: that column; no value is a SAS result.
 _CLI_MALFORMED_EXPORT = (
-    b"PARAMCD,ATPTN,Parameter,Estimate,estimate\nDIABP,815,Intercept,-999.5,-999.5\n"
-)
+    f"{','.join((*_CLI_ESTIMATES_COLUMNS, _CLI_ESTIMATE_COLUMN.swapcase()))}\n"
+    f"{','.join((*_CLI_FABRICATED_CELLS, _CLI_FABRICATED_VALUES['ESTIMATE']))}\n"
+).encode("latin-1")
 
 
 def _cli_watch_drivers(
@@ -2358,10 +2706,11 @@ def test_reproduce_failed_export_comparison_exits_1(
     """A comparison that FAILs makes ``reproduce`` exit 1, with every output still written.
 
     ``--sas-exports`` names a directory under ``tmp_path`` holding only a synthetic stand-in for
-    ``WPCT-F.07.02_parameter_estimates.csv``: one row on the real DIABP/815 Intercept key with
-    fabricated values. The real loader and comparison judge it (Agent Action Plan 0.7.3), so its
-    ``Export <file>`` group in the WPCT-F.07.02 section FAILs on every row, each with a reason,
-    the fabricated SAS values among them, while every listing and log comparison still passes. No
+    ``WPCT-F.07.02_parameter_estimates.csv``, the export of the endpoint ANCOVA's
+    ParameterEstimates (S02-MOD-02): one row on the real DIABP/815 Intercept key with fabricated
+    values. The real loader and comparison judge it (Agent Action Plan 0.7.3), so its
+    ``Export <file>`` group in the WPCT-F.07.02 section FAILs on every row, each with a reason, the
+    fabricated SAS values among them, while every listing and log comparison still passes. No
     program halted, so both programs' exports and the report are written, and the exit code is 1
     (Agent Action Plan 0.6.5). The export directory is a read-only input (0.8): the stand-in's
     bytes and ``st_mtime_ns`` and the directory's listing are unchanged.
@@ -2437,13 +2786,14 @@ def test_reproduce_input_error_exits_2_writing_nothing(
 ) -> None:
     """An input error makes ``reproduce`` exit 2 and write nothing (Agent Action Plan 0.6.4, 0.6.5).
 
-    - ``malformed_sas_export``: ``--sas-exports`` holds a ParameterEstimates export whose header
-      names ``Estimate`` twice in different case. ``load_sas_exports`` raises ``InputDataError``
-      naming the file and the column, never a value, before either driver runs; the file and its
-      directory are unchanged.
-    - ``missing_07_07_input``: the WPCT-F.07.07 driver raises the ``InputDataError`` of an ADVS
-      file missing from ``tmp_path``. WPCT-F.07.02 has run by then, yet its exports are not
-      written, because every input is read before any write (Agent Action Plan 0.6.7).
+    - ``malformed_sas_export``: ``--sas-exports`` holds a ParameterEstimates export (S02-MOD-02)
+      whose header names ``Estimate`` twice in different case. ``load_sas_exports`` raises
+      ``InputDataError`` naming the file and the column, never a value, before either driver runs;
+      the file and its directory are unchanged.
+    - ``missing_07_07_input``: the WPCT-F.07.07 driver raises the ``input dataset not found``
+      ``InputDataError`` that S07-DEP-util_access_test_data gives an ADVS file missing from
+      ``tmp_path``. WPCT-F.07.02 has run by then, yet its exports are not written, because every
+      input is read before any write (Agent Action Plan 0.6.7).
 
     stdout stays empty, stderr carries one ``python -m wpct reproduce: error:`` line with the
     message, and the write root stays empty.
@@ -2492,8 +2842,9 @@ def test_reproduce_rejected_destination_exits_2(
 ) -> None:
     """A destination the write guard refuses makes ``reproduce`` exit 2 (AAP 0.6.5, 0.8).
 
-    The write root's ``link`` is a symlink to an external directory under ``tmp_path`` that already
-    holds ``sentinel.csv``:
+    The guard holds every write to the fixed locations under ``python/wpct/``, as the port has no
+    counterpart of the SAS ``outputs_folder`` setting (ENV-03, ENV-04). The write root's ``link``
+    is a symlink to an external directory under ``tmp_path`` that already holds ``sentinel.csv``:
 
     - ``outputs_dir``: ``python/wpct/outputs``. The first export call, WPCT-F.07.02's, refuses its
       first target, so nothing is written.
@@ -2567,7 +2918,9 @@ def test_rejects_protected_destination(
 ) -> None:
     """The guard refuses a protected repository file or a path outside the checkout (AAP 0.8).
 
-    ``relative`` names a SAS-era file of the checkout, or ``None`` for a report-named file under
+    ``relative`` names a SAS-era file of the checkout: the 07.02 program, the ADVS file the port
+    reads there in place of the GitHub URL (ENV-02, S02-DEP-util_access_test_data) or the listing
+    holding the endpoint ANCOVA reference (S02-MOD-02); or ``None`` for a report-named file under
     ``tmp_path``. The guard is called with ``RepoPaths.checkout()``, the paths the command line
     uses, and must raise ``OutputPathError`` naming the target and its resolved path. The file's
     bytes and ``st_mtime_ns`` and its directory's listing are unchanged, and the outside path is
@@ -2615,6 +2968,10 @@ def test_rejects_symlinked_destination(
     file_state: _FileState,
 ) -> None:
     """A report destination reached through a symlink is refused, and nothing is opened (AAP 0.8).
+
+    The report has one fixed location under ``python/wpct/``, as the port has no counterpart of
+    the SAS ``outputs_folder`` setting (ENV-03, ENV-04), and a link must not lead its write
+    elsewhere:
 
     - ``report_file``: ``python/wpct/reports/`` under the write root is a real directory, and
       ``equivalence_report.md`` in it is a symlink to an external stand-in for a SAS-export CSV
@@ -2673,8 +3030,9 @@ def test_rejects_reports_dir_linked_into_outputs_tree(
 
     The guard alone accepts that target, because it resolves strictly below the outputs tree;
     the policy refuses every fixed destination reached through a symlink, inside the write root
-    or outside it, so ``write_report`` must still raise ``OutputPathError``. The decoy directory
-    stays empty and the write root unchanged.
+    or outside it, so the report keeps its one fixed location, the port having no counterpart of
+    the SAS ``outputs_folder`` setting (ENV-03, ENV-04), and ``write_report`` must still raise
+    ``OutputPathError``. The decoy directory stays empty and the write root unchanged.
     """
     report_file = write_paths.report_file
     decoy = write_paths.outputs_dir / "decoy_reports"
@@ -2716,8 +3074,10 @@ def test_cli_accepts_only_sas_exports(tmp_path: Path, repo_paths: RepoPaths) -> 
 
     The top-level parser has only ``-h/--help``; the ``reproduce`` sub-parser adds only
     ``--sas-exports``, which defaults to ``None`` (the default export directory) and converts its
-    value to a path. ``build_paths`` is ``RepoPaths.checkout()``, so its write root is the
-    checkout and no option can move it.
+    value to a path, so no option changes a program's ``%let`` settings, which stay its driver's
+    defaults (S02-TRN-01, S07-TRN-01). ``build_paths`` is ``RepoPaths.checkout()``, so the ADVS
+    files are read from the checkout, not from a URL or a UNC share (ENV-02, ENV-04), and its
+    write root is the checkout and no option can move it.
     """
     parser = cli.build_parser()
     assert _option_strings(parser) == {"-h", "--help"}
@@ -2750,7 +3110,12 @@ def test_cli_accepts_only_sas_exports(tmp_path: Path, repo_paths: RepoPaths) -> 
 )
 def test_cli_rejects_other_arguments(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
     """Any other option, an option prefix, an empty export directory or a missing or unknown
-    subcommand is an ``argparse`` error with exit code 2, raised before anything runs."""
+    subcommand is an ``argparse`` error with exit code 2, raised before anything runs.
+
+    The refused ``--output``, ``--report``, ``--write-root`` and ``--outputs-dir`` would each set a
+    destination, as the SAS ``outputs_folder`` setting does; the port has no counterpart of that
+    setting (ENV-03, ENV-04).
+    """
     with pytest.raises(SystemExit) as excinfo:
         cli.build_parser().parse_args(argv)
 
@@ -2780,10 +3145,11 @@ def test_cli_logging_configuration(
     """``main``'s logging set-up writes warnings to stderr as ``WARNING: <logger>: <message>``.
 
     It acts only on a root logger without handlers, as in a fresh ``python -m wpct``, and then
-    passes WARNING records but not INFO ones. A root logger the host has configured keeps its
-    handlers and level, and nothing reaches stderr. The set-up is called alone, because ``main``
-    would write the checkout's outputs and report; pytest's own root handlers are set aside for the
-    call and restored afterwards.
+    passes WARNING records but not INFO ones. The warning logged is a synthetic one in the form of
+    the derivation's omission warnings (LMM-FLT-02), which SAS writes to its log as ``WARNING:``
+    lines. A root logger the host has configured keeps its handlers and level, and nothing reaches
+    stderr. The set-up is called alone, because ``main`` would write the checkout's outputs and
+    report; pytest's own root handlers are set aside for the call and restored afterwards.
     """
     root = logging.getLogger()
     saved_handlers, saved_level = root.handlers[:], root.level
