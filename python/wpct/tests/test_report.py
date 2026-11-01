@@ -13,19 +13,31 @@ merged ``CSS_STATS.pval`` cells (S02-TRN-05, S07-TRN-08) are their own group, se
 ParameterEstimates rows (S02-MOD-02, S07-MOD-02, S07-MOD-03). Every group against a rounded listing
 carries the fixed rounded-reference wording. Every quantity without a SAS reference, among them the
 PROC SUMMARY statistics (S02-MOD-01, S07-MOD-01), is listed with its reason under Not compared, and
-the text is deterministic.
+the text is deterministic. Each program section states its halt and lists every GLM fit with its
+NOBS, DFE and status under Models (Agent Action Plan 0.6.4): a GLM skipped by setting, a model not
+fitted (U-02, D-09), an empty population or empty derivation input (U-03) and a halted run
+(S07-FLT-04) each have their own wording, and what such a run lacks FAILs against the listing or is
+NOT COMPARED, never PASS. Source integrity says when git or the upstream commit is unavailable, so
+integrity was not verified, and counts and names the CHANGED inputs.
 
 Tolerances (Agent Action Plan 0.7.1): the table prints the ``compare.Tolerances`` snapshot the
 comparison groups were judged under, which ``write_report`` takes from the groups rather than
-re-reading ``tolerances.json``, and its field lists come from ``wpct.schemas``. An invalid tolerance
-file fails to load with its absolute path named.
+re-reading ``tolerances.json``, and its field lists come from ``wpct.schemas``. Its Settings column
+shows each class's remaining keys as the ``compare.Tolerances`` accessors apply them, a changed
+setting included. An invalid tolerance file fails to load with its absolute path named.
 
 Failure reasons (Agent Action Plan 0.9.2): every FAIL of a primitive rule of ``wpct.compare``
 carries a reason that names neither compared value, and a failed row's reason reaches the report's
 Reason column.
 
 Command line (Agent Action Plan 0.6.5): ``reproduce`` is the only subcommand and ``--sas-exports``
-its only option; exit code 0 means no comparison failed, 2 an input error.
+its only option. Exit code 0 means no comparison failed and no program halted. Exit code 1 means a
+comparison failed or a program halted (S07-FLT-04): the halted program exports nothing, while the
+other program's exports and the report recording the halt are still written. Exit code 2 means an
+input error or a rejected destination: a ``--sas-exports`` that is not an existing directory, a
+malformed SAS export or a missing input dataset writes nothing, because every input is read before
+any write; a destination the guard refuses stops the run at that writer call, which opens none of
+its targets, while files of earlier successful writer calls remain.
 
 Write policy (Agent Action Plan 0.8): every report this module writes goes through the
 ``write_paths`` fixture, whose write root lies under pytest's ``tmp_path``; ``reproduce`` is called
@@ -61,9 +73,16 @@ import pytest
 
 import wpct.__main__ as cli
 from wpct import compare, provenance, report
-from wpct.errors import OutputPathError
+from wpct.errors import AnalysisHalted, InputDataError, OutputPathError
 from wpct.paths import REPORT_RELATIVE, RepoPaths, check_write_destination
-from wpct.schemas import EXPORTS, PROGRAM_07_02, PROGRAM_07_07, PROGRAMS, STATISTICS
+from wpct.schemas import (
+    EXPORTS,
+    PROGRAM_07_02,
+    PROGRAM_07_07,
+    PROGRAMS,
+    STATISTICS,
+    export_spec,
+)
 
 #: The ``file_state`` fixture: ``(bytes, st_mtime_ns)`` of a file, or a directory's sorted listing.
 _FileState = Callable[[str | Path], object]
@@ -94,9 +113,38 @@ _LISTING_ROWS: Mapping[str, tuple[int, int]] = {PROGRAM_07_02: (40, 6), PROGRAM_
 #: The heading note of the merged-pval group, as Agent Action Plan 0.7.5 words it.
 _MERGED_PVAL_WORDING = "verifies the CSS_STATS cells filled by the merge, not the model rows"
 
-#: The fixed beginning and end of the rounded-reference wording (Agent Action Plan 0.7.5).
-_ROUNDED_START = "Rounded reference only: agreement is shown at the precision displayed in "
-_ROUNDED_END = "is not established for these quantities."
+#: The halt line of a program section whose run passed every halting check.
+_NO_HALT_LINE = "Halt: none; every halting check passed."
+
+#: The rounded-reference wording, word for word as Agent Action Plan 0.7.5 fixes it, with the
+#: listing, its displayed decimals and the full-precision rule as the ``{file}``, ``{decimals}``
+#: and ``{rule}`` fields.
+_ROUNDED_SENTENCE = (
+    "Rounded reference only: agreement is shown at the precision displayed in `{file}` "
+    "(`{decimals}` decimals; `<.0001` as a bound). Equivalence within the full-precision "
+    "tolerance `{rule}` is not established for these quantities."
+)
+#: The words before the listing name, with which every rounded-reference note opens.
+_ROUNDED_START = _ROUNDED_SENTENCE.partition("`")[0]
+
+#: Per rounded group: the decimals its listing displays, each paired with its statistics as Agent
+#: Action Plan 0.2.2.3 gives them, and the full-precision rule of 0.7.1 it cannot establish. In the
+#: rule, ``{<class>}`` stands where that tolerance class's limit is printed, after the class's rule
+#: kind and before the statistics it covers.
+_ROUNDED_GROUPS: Mapping[str, tuple[str, str]] = {
+    compare.GROUP_LISTING_PARAMETER_ESTIMATES: (
+        "8 (Estimate, StdErr), 2 (t Value), 4 (Pr > |t|)",
+        (
+            "relative ≤ {glm_estimates} for Estimate, StdErr and t Value; "
+            "absolute ≤ {p_values} for Pr > |t|"
+        ),
+    ),
+    compare.GROUP_LISTING_MERGED_PVAL: ("4", "absolute ≤ {p_values}"),
+}
+
+#: GLM-estimate and p-value limits no tolerance file holds, distinct from each other, so a rounded
+#: rule printing either limit in the other's place, or a limit other than the applied one, fails.
+_ROUNDED_SENTINEL_LIMITS: Mapping[str, float] = {"glm_estimates": 2.5e-5, "p_values": 7e-10}
 
 #: A summary-statistics limit no tolerance file holds, to show the table is rendered from its input.
 _SENTINEL_LIMIT = 3e-7
@@ -116,8 +164,6 @@ _ISO_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 _CELL_SEPARATOR = re.compile(r"(?<!\\)\|")
 #: A number as the report prints a limit, e.g. ``0``, ``0.5`` or ``1e-08``.
 _NUMBER = re.compile(r"\d+(?:\.\d+)?(?:e[-+]?\d+)?")
-#: A single-digit count of displayed decimals.
-_DECIMALS = re.compile(r"\b\d\b")
 #: A full git object id.
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}")
 
@@ -212,6 +258,11 @@ def _status_counts(row: Mapping[str, str]) -> dict[str, int]:
     return {status: int(row[status]) for status in compare.STATUSES}
 
 
+def _summary_rows(text: str) -> dict[str, dict[str, str]]:
+    """The rows of the report's Summary table, keyed by their Program cell."""
+    return {row["Program"]: row for row in _single_table(_section(text, "Summary"))}
+
+
 def _group(groups: Sequence[compare.ComparisonGroup], key: str) -> compare.ComparisonGroup:
     matches = [group for group in groups if group.key == key]
     assert len(matches) == 1, f"comparison group {key!r} appears {len(matches)} times"
@@ -264,6 +315,83 @@ def _with_sentinel_limit(tolerances: compare.Tolerances) -> compare.Tolerances:
     assert float(edited["classes"]["summary_statistics"]["limit"]) != _SENTINEL_LIMIT
     edited["classes"]["summary_statistics"]["limit"] = _SENTINEL_LIMIT
     return compare.Tolerances.from_mapping(edited)
+
+
+#: The keys of a tolerance class that have their own column in the table; every other key is a
+#: setting.
+_SETTINGS_COLUMN_KEYS = ("label", "rule", "limit", "applies_to")
+
+#: Per class, the settings it carries besides its columns, in file order, with the meaning Agent
+#: Action Plan 0.7.1 gives them: trailing blanks stripped from keys and categorical fields, a SAS
+#: GLM value of 0 matched only by an exact 0, the half unit and epsilon of a displayed-precision
+#: value and the ``<.0001`` bound, and the outcomes of both and of exactly one value missing. Each
+#: name is also the ``compare.Tolerances`` accessor that applies the setting.
+_SETTINGS_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "counts": (),
+        "categorical": ("strip_trailing_blanks",),
+        "summary_statistics": (),
+        "glm_estimates": ("zero_reference",),
+        "p_values": (),
+        "record_numeric": (),
+        "rounded_listing": ("half_unit", "epsilon", "bound_token", "bound_upper"),
+        "missing": ("both_missing", "one_missing"),
+    }
+)
+
+#: A rounded-listing epsilon no tolerance file holds, to show a changed setting is rendered.
+_SETTINGS_EPSILON = 3e-13
+
+
+def _settings_pairs(cell: str) -> list[tuple[str, str]]:
+    """The ``name = value`` settings of a Settings cell as ``(name, value text)``, in order.
+
+    ``—`` stands for no setting; any other cell must consist of ``; ``-separated pairs.
+    """
+    if cell == _NO_VALUE:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for part in cell.split("; "):
+        name, separator, text = part.partition(" = ")
+        assert separator and name and text, f"not a 'name = value' setting: {part!r} in {cell!r}"
+        pairs.append((name, text))
+    return pairs
+
+
+def _settings_read(text: str, like: object) -> object:
+    """The rendered setting ``text`` read back as the JSON type of ``like``.
+
+    A boolean must read ``true`` or ``false``, a number is compared as a float, and a string is
+    taken verbatim.
+    """
+    if isinstance(like, bool):
+        assert text in ("true", "false"), f"not a JSON boolean: {text!r}"
+        return text == "true"
+    if isinstance(like, (int, float)):
+        return float(text)
+    assert isinstance(like, str), f"unexpected setting type {type(like).__name__}"
+    return text
+
+
+def _settings_assert_rendered(
+    rows: Mapping[str, Mapping[str, str]], data: Mapping[str, Any], applied: compare.Tolerances
+) -> None:
+    """Every Settings cell of ``rows`` shows the settings of ``data``, which ``applied`` applies.
+
+    Per class, the setting names are the keys of the ``data`` entry other than its columns, in
+    file order, and they are those :data:`_SETTINGS_NAMES` pins. Each value reads back as its JSON
+    value and as the value the ``compare.Tolerances`` accessor of that name returns.
+    """
+    assert set(rows) == set(data["classes"]) == set(_SETTINGS_NAMES)
+    for class_key, entry in data["classes"].items():
+        settings = {key: value for key, value in entry.items() if key not in _SETTINGS_COLUMN_KEYS}
+        pairs = _settings_pairs(rows[class_key]["Settings"])
+        names = [name for name, _ in pairs]
+        assert names == list(settings) == list(_SETTINGS_NAMES[class_key]), class_key
+        for name, text in pairs:
+            value = _settings_read(text, settings[name])
+            assert value == settings[name], f"{class_key}.{name} renders {text!r}"
+            assert value == getattr(applied, name), f"{class_key}.{name} is not the applied value"
 
 
 def _tolerance_bytes(data: Mapping[str, Any]) -> bytes:
@@ -326,6 +454,34 @@ def _symlink(link: Path, target: Path) -> None:
 def _state_or_absent(path: Path, file_state: _FileState) -> object:
     """``file_state`` of ``path``, or ``None`` when nothing exists there."""
     return file_state(path) if path.exists() else None
+
+
+# --- Run-state helpers ----------------------------------------------------------------------------
+
+
+#: The halt of WPCT-F.07.07 on one missing ``CHG`` in CSS_SAFANA (S07-FLT-04), worded as Agent
+#: Action Plan 0.6.4 gives it.
+_HALT_MESSAGE = f"{PROGRAM_07_07}: assert_var_nonmissing failed: 1 missing CHG in CSS_SAFANA"
+
+
+def _css_safana_halt(result_07_07: Any) -> AnalysisHalted:
+    """The ``AnalysisHalted`` WPCT-F.07.07 raises when ``%assert_var_nonmissing`` fails.
+
+    It carries the checkpoints the driver records up to and including CSS_SAFANA, taken from the
+    default run ``result_07_07``, as the driver hands them to the halt; the checkpoints after
+    CSS_SAFANA are never reached.
+    """
+    checkpoints = tuple(result_07_07.checkpoints)
+    names = [checkpoint.SAS_DATASET for checkpoint in checkpoints]
+    assert "CSS_SAFANA" in names, "the default WPCT-F.07.07 run records no CSS_SAFANA checkpoint"
+    reached = checkpoints[: names.index("CSS_SAFANA") + 1]
+    assert len(reached) < len(checkpoints), "a halt at CSS_SAFANA must leave checkpoints unreached"
+    return AnalysisHalted(
+        _HALT_MESSAGE,
+        program_id=PROGRAM_07_07,
+        check="assert_var_nonmissing",
+        checkpoints=reached,
+    )
 
 
 # --- Fixtures -------------------------------------------------------------------------------------
@@ -462,7 +618,11 @@ def test_tolerance_table_rendered_from_file(
 
     ``compare.load_tolerances``, the file's only reader, gives the session tolerances. Each class
     appears in file order with its label, rule, limit (``—`` for a class without one), scope and
-    the fields ``wpct.schemas`` has it compare (``compare.compared_fields``, ``—`` for none).
+    the fields ``wpct.schemas`` has it compare (``compare.compared_fields``, ``—`` for none). Its
+    Settings cell lists its other keys as ``name = value`` in file order (``—`` for none): the
+    names :data:`_SETTINGS_NAMES` pins, each value its JSON value (``true``/``false``, a number,
+    a string) and the one its ``compare.Tolerances`` accessor applies, so every class, those
+    without a limit included, shows how it compares (Agent Action Plan 0.7.1, 0.9.5).
     Comparisons judged under a modified copy of the loaded tolerances, whose summary-statistics
     limit is a sentinel, render that sentinel and leave every other row unchanged, so the table is
     not written by hand. ``tolerances.json`` itself is not edited.
@@ -486,6 +646,7 @@ def test_tolerance_table_rendered_from_file(
         else:
             assert row["Limit"] == _NO_VALUE
         assert row["Fields"] == (" ".join(fields[class_key]) or _NO_VALUE)
+    _settings_assert_rendered(rows, loaded, tolerances)
 
     modified = _with_sentinel_limit(tolerances)
     modified_comparisons = _clean_comparisons_under(
@@ -498,6 +659,72 @@ def test_tolerance_table_rendered_from_file(
     assert {key: row for key, row in modified_rows.items() if key != "summary_statistics"} == {
         key: row for key, row in rows.items() if key != "summary_statistics"
     }
+    assert file_state(tolerance_file) == file_before
+
+
+def test_changed_tolerance_setting_rendered(
+    written: _Written,
+    results: Mapping[str, object],
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+    file_state: _FileState,
+) -> None:
+    """A changed configurable setting reaches its Settings cell; nothing else in the table moves.
+
+    A copy of the loaded tolerances takes a rounded-listing epsilon of :data:`_SETTINGS_EPSILON`
+    and the opposite trailing-blank rule for keys and categorical fields, settings a user changes
+    by editing ``tolerances.json`` alone (Agent Action Plan 0.7.1). The clean-checkout comparisons
+    judged under that copy render both new values, read back as the copy's accessors apply them,
+    and every other cell of every row as before, so the Settings column is rendered from the
+    applied tolerances and not written by hand (Agent Action Plan 0.9.5). Neither the session
+    tolerances nor ``tolerances.json`` itself changes.
+    """
+    tolerance_file = repo_paths.tolerances_file
+    file_before = file_state(tolerance_file)
+    loaded = compare.load_tolerances(tolerance_file).to_dict()
+    assert float(loaded["classes"]["rounded_listing"]["epsilon"]) != _SETTINGS_EPSILON
+    strip_trailing_blanks = not loaded["classes"]["categorical"]["strip_trailing_blanks"]
+    changed = {
+        ("rounded_listing", "epsilon"): _SETTINGS_EPSILON,
+        ("categorical", "strip_trailing_blanks"): strip_trailing_blanks,
+    }
+    edited = tolerances.to_dict()
+    for (class_key, name), value in changed.items():
+        edited["classes"][class_key][name] = value
+    modified = compare.Tolerances.from_mapping(edited)
+    assert modified.epsilon == _SETTINGS_EPSILON
+    assert modified.strip_trailing_blanks is strip_trailing_blanks
+
+    modified_comparisons = _clean_comparisons_under(
+        modified, results, listing_tables, sas_checkpoints
+    )
+    modified_text = report.render_report(results, modified_comparisons, written.facts, modified)
+    modified_rows = _tolerance_rows(modified_text)
+    rows = _tolerance_rows(written.text)
+
+    _settings_assert_rendered(modified_rows, edited, modified)
+    changed_classes = {class_key for class_key, _ in changed}
+    assert list(modified_rows) == list(rows)
+    for class_key, row in rows.items():
+        changed_columns = {"Settings"} if class_key in changed_classes else set()
+        kept = [column for column in row if column not in changed_columns]
+        assert list(modified_rows[class_key]) == list(row)
+        assert {column: modified_rows[class_key][column] for column in kept} == {
+            column: row[column] for column in kept
+        }, class_key
+    for (class_key, name), value in changed.items():
+        before = _settings_pairs(rows[class_key]["Settings"])
+        after = _settings_pairs(modified_rows[class_key]["Settings"])
+        assert [setting for setting, _ in after] == [setting for setting, _ in before]
+        for (setting, old_text), (_, new_text) in zip(before, after, strict=True):
+            if setting == name:
+                assert new_text != old_text, f"{class_key}.{name} still renders {old_text!r}"
+                assert _settings_read(new_text, value) == value
+            else:
+                assert new_text == old_text, f"{class_key}.{setting} changed with {name}"
+    assert tolerances.to_dict() == loaded
     assert file_state(tolerance_file) == file_before
 
 
@@ -1034,40 +1261,84 @@ def test_s02_trn_05_and_s07_trn_08_merged_pval_group_separate(
     assert {row["Result"] for row in (*estimate_rows, *merged_rows)} == {compare.PASS}
 
 
+def _rounded_with_sentinel_limits(tolerances: compare.Tolerances) -> compare.Tolerances:
+    """A copy of ``tolerances`` whose GLM-estimate and p-value limits are the rounded sentinels.
+
+    The sentinels must differ from each other and from both loaded limits, so neither can be
+    mistaken for the other class's limit or for a limit read from ``tolerances.json``.
+    """
+    sentinels = dict(_ROUNDED_SENTINEL_LIMITS)
+    loaded = {tolerances.limit(key) for key in sentinels}
+    assert len(set(sentinels.values())) == len(sentinels), f"sentinels coincide: {sentinels}"
+    assert loaded.isdisjoint(sentinels.values()), f"a sentinel equals a loaded limit: {loaded}"
+    edited = tolerances.to_dict()
+    for key, limit in sentinels.items():
+        edited["classes"][key]["limit"] = limit
+    modified = compare.Tolerances.from_mapping(edited)
+    assert {key: modified.limit(key) for key in sentinels} == sentinels
+    return modified
+
+
+def _rounded_note_pattern(listing: str, decimals: str, rule: str) -> re.Pattern[str]:
+    """:data:`_ROUNDED_SENTENCE` for one group, to be matched in full.
+
+    Every character is literal except each ``{<class>}`` field of ``rule``, which matches a number
+    as the report prints a limit and captures it, at its own position, under the class key.
+    """
+    pattern = re.escape(_ROUNDED_SENTENCE.format(file=listing, decimals=decimals, rule=rule))
+    for key in re.findall(r"\{(\w+)\}", rule):
+        pattern = pattern.replace(re.escape("{" + key + "}"), f"(?P<{key}>{_NUMBER.pattern})", 1)
+    return re.compile(pattern)
+
+
+@pytest.mark.parametrize("limits", ["loaded", "sentinel"])
 def test_rounded_reference_wording(
+    limits: str,
     written: _Written,
+    results: Mapping[str, object],
     clean_comparisons: _Comparisons,
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
     tolerances: compare.Tolerances,
     repo_paths: RepoPaths,
 ) -> None:
     """Every group against a rounded listing carries the rounded-reference wording, once.
 
-    The wording names the program's listing ``whitepapers/WPCT/outputs_sas/<program>.lst``, its
-    displayed decimals (8, 2 and 4 for ParameterEstimates; 4 for the merged ``pval``) and the
-    full-precision rule from ``tolerances.json`` it cannot establish. Groups against exact
-    references, such as the log checkpoints, carry no such wording.
-    """
-    template = report.ROUNDED_NOTE_TEMPLATE
-    assert template.startswith(_ROUNDED_START + "`{file}`")
-    assert template.endswith(_ROUNDED_END)
-    pattern = re.escape(template)
-    for name in ("file", "d", "rule"):
-        pattern = pattern.replace(re.escape("{" + name + "}"), f"(?P<{name}>.+?)")
-    note = re.compile(pattern)
+    The note is the sentence Agent Action Plan 0.7.5 fixes, word for word. It names the program's
+    listing ``whitepapers/WPCT/outputs_sas/<program>.lst`` and the decimals that listing displays
+    per statistic (Agent Action Plan 0.2.2.3): ``8 (Estimate, StdErr), 2 (t Value), 4 (Pr > |t|)``
+    for ParameterEstimates and ``4`` for the merged ``pval``. Its rule gives the relative
+    ``glm_estimates`` limit for Estimate, StdErr and t Value and the absolute ``p_values`` limit
+    for ``Pr > |t|`` (Agent Action Plan 0.7.1); each limit is read at its own position and must
+    equal its own class's applied limit. A swapped limit, rule kind or precision therefore fails.
 
-    glm_limit = tolerances.limit("glm_estimates")
-    p_limit = tolerances.limit("p_values")
-    expected = {
-        compare.GROUP_LISTING_PARAMETER_ESTIMATES: ({"8", "2", "4"}, {glm_limit, p_limit}),
-        compare.GROUP_LISTING_MERGED_PVAL: ({"4"}, {p_limit}),
+    - ``loaded``: the written report of the clean-checkout comparisons, under ``tolerances.json``.
+    - ``sentinel``: the report rendered for comparisons judged under a copy whose two limits are
+      distinct sentinels, which the rule must print in the same places.
+
+    Groups against exact references, such as the log checkpoints, carry no such wording, and the
+    report holds no note besides one per rounded group of each program.
+    """
+    if limits == "loaded":
+        applied, comparisons, text = tolerances, clean_comparisons, written.text
+    else:
+        applied = _rounded_with_sentinel_limits(tolerances)
+        comparisons = _clean_comparisons_under(applied, results, listing_tables, sas_checkpoints)
+        text = report.render_report(results, comparisons, written.facts, applied)
+    kinds = {
+        key: kind
+        for _, rule in _ROUNDED_GROUPS.values()
+        for kind, key in re.findall(r"(\w+) ≤ \{(\w+)\}", rule)
     }
+    assert kinds == {key: applied.entry(key)["rule"] for key in _ROUNDED_SENTINEL_LIMITS}
+
     notes_seen = 0
     for program in PROGRAMS:
         listing = repo_paths.listing_file(program).relative_to(repo_paths.repo_root).as_posix()
         assert listing == f"whitepapers/WPCT/outputs_sas/{program}.lst"
-        blocks = dict(_subsections(_section(written.text, program)))
-        groups = [g for g in clean_comparisons[program] if g.key != compare.GROUP_NOT_COMPARED]
-        assert {group.key for group in groups if group.rounded} == set(expected)
+        blocks = dict(_subsections(_section(text, program)))
+        groups = [g for g in comparisons[program] if g.key != compare.GROUP_NOT_COMPARED]
+        assert {group.key for group in groups if group.rounded} == set(_ROUNDED_GROUPS)
         for group in groups:
             block = blocks[_group_heading(group)]
             notes = [line for line in block if line.startswith(_ROUNDED_START)]
@@ -1075,15 +1346,20 @@ def test_rounded_reference_wording(
                 assert notes == [], f"{program} {group.key} is not rounded but carries the wording"
                 continue
             assert len(notes) == 1, f"{program} {group.key}: {len(notes)} rounded notes"
-            match = note.fullmatch(notes[0])
-            assert match, f"{program} {group.key}: wording differs from the template: {notes[0]!r}"
-            decimals, limits = expected[group.key]
-            assert match["file"] == listing
-            assert set(_DECIMALS.findall(match["d"])) == decimals
-            assert {float(number) for number in _NUMBER.findall(match["rule"])} == limits
+            decimals, rule = _ROUNDED_GROUPS[group.key]
+            match = _rounded_note_pattern(listing, decimals, rule).fullmatch(notes[0])
+            assert match, f"{program} {group.key}: not the required wording: {notes[0]!r}"
+            printed = match.groupdict()
+            assert {key: float(number) for key, number in printed.items()} == {
+                key: applied.limit(key) for key in printed
+            }, f"{program} {group.key}: a limit is printed in the wrong place: {notes[0]!r}"
+            # Secondary: the renderer's template, filled with the same fields, is the same sentence.
+            filled = {"file": listing, "rule": rule.format(**printed)}
+            expected = _ROUNDED_SENTENCE.format(decimals=decimals, **filled)
+            assert report.ROUNDED_NOTE_TEMPLATE.format(d=decimals, **filled) == expected
             notes_seen += 1
-    assert notes_seen == len(PROGRAMS) * len(expected)
-    assert sum(line.startswith(_ROUNDED_START) for line in written.text.split("\n")) == notes_seen
+    assert notes_seen == len(PROGRAMS) * len(_ROUNDED_GROUPS)
+    assert sum(line.startswith(_ROUNDED_START) for line in text.split("\n")) == notes_seen
 
 
 def test_s02_and_s07_mod_01_not_compared_section(
@@ -1148,6 +1424,561 @@ def test_source_integrity_rows(written: _Written) -> None:
         ):
             assert _code_text(cell) == (provenance.UNAVAILABLE if blob is None else blob)
         assert row["Result"] == fact.status
+
+
+# --- Report states (Agent Action Plan 0.6.4, 0.7.5) -----------------------------------------------
+
+
+#: The Models rows of each default run, ``(Model, Stratum, NOBS, DFE, Status)`` in fitting order.
+#: Each 07.02 endpoint fit uses 226 of its 227 records (S02-MOD-02, D-08). Each 07.07 timepoint has
+#: its per-study fits by ``studynum`` (S07-MOD-02), then the pooled fit at ``studynum = &stdyn = 3``
+#: over both studies' records (S07-MOD-03). Every fit estimates the Intercept, BASE and the two
+#: non-reference TRTPN levels, TRTPN 0 and the pooled ``studynum`` being aliased, so DFE = NOBS - 4.
+_STATE_DEFAULT_MODELS: Mapping[str, tuple[tuple[str, str, str, str, str], ...]] = {
+    PROGRAM_07_02: (
+        ("endpoint", "PARAMCD=DIABP ATPTN=815", "226", "222", "fitted"),
+        ("endpoint", "PARAMCD=SYSBP ATPTN=816", "226", "222", "fitted"),
+    ),
+    PROGRAM_07_07: (
+        ("study", "PARAMCD=DIABP ATPTN=815 studynum=1", "124", "120", "fitted"),
+        ("study", "PARAMCD=DIABP ATPTN=815 studynum=2", "126", "122", "fitted"),
+        ("pooled", "PARAMCD=DIABP ATPTN=815 studynum=3", "250", "246", "fitted"),
+        ("study", "PARAMCD=DIABP ATPTN=817 studynum=1", "122", "118", "fitted"),
+        ("study", "PARAMCD=DIABP ATPTN=817 studynum=2", "126", "122", "fitted"),
+        ("pooled", "PARAMCD=DIABP ATPTN=817 studynum=3", "248", "244", "fitted"),
+    ),
+}
+
+#: The columns of the Models table, in report order.
+_STATE_MODEL_COLUMNS = ("Model", "Stratum", "NOBS", "DFE", "Status")
+
+#: How the report marks the model quantities of a GLM skipped by setting (Agent Action Plan 0.6.4).
+_STATE_GLM_SKIPPED = "not produced: GLM skipped by setting"
+
+#: The status of a fit whose data lack reference level 0 (U-02) and of a fit without usable rows
+#: (D-09), as Agent Action Plan 0.6.4 words them.
+_STATE_REFERENCE_ABSENT = "not fitted: reference level 0 absent"
+_STATE_NO_OBSERVATIONS = "no observations"
+
+#: Per WPCT-F.07.02 stratum, the reason its listing rows and its Not compared entry give once the
+#: DIABP/815 fit lacks reference level 0 (U-02) and the SYSBP/816 fit has no observations (D-09).
+_STATE_UNFITTED_REASONS: Mapping[str, str] = {
+    "PARAMCD=DIABP ATPTN=815": "not fitted: reference level 0 absent",
+    "PARAMCD=SYSBP ATPTN=816": "model not fitted: no observations",
+}
+
+#: The listing rows of one 07.02 stratum: 5 ParameterEstimates rows × 4 values, and the 3 merged
+#: ``pval`` cells of its CLASS levels (Agent Action Plan 0.7.3).
+_STATE_STRATUM_LISTING_ROWS = (20, 3)
+
+#: The run note of an empty derivation input, worded as Agent Action Plan 0.6.4 gives it (U-03).
+_STATE_U03_NOTE = "SAS behaviour for empty derivation input not established (U-03)"
+
+#: The stratum of a Not compared entry that covers the whole program.
+_STATE_ALL_STRATA = "all strata"
+
+#: The listing groups of a program section, in report order.
+_STATE_LISTING_GROUPS = (
+    compare.GROUP_LISTING_PARAMETER_ESTIMATES,
+    compare.GROUP_LISTING_MERGED_PVAL,
+)
+
+#: Synthetic git object ids, so the integrity cases do not depend on this host's git: the blob of
+#: every read-only input at the upstream commit, the working blob of an edited input, a ``HEAD``.
+_STATE_BLOB = "0123456789abcdef" * 2 + "01234567"
+_STATE_EDITED_BLOB = "89abcdef01234567" * 2 + "89abcdef"
+_STATE_HEAD = "fedcba9876543210" * 2 + "fedcba98"
+
+#: The read-only inputs the ``changed`` integrity case alters: one edited in the working tree, the
+#: other missing from it, so it has no working blob.
+_STATE_EDITED_INPUT = "whitepapers/WPCT/WPCT-F.07.02.sas"
+_STATE_MISSING_INPUT = "data/adam/cdisc-split/README.md"
+
+#: The introduction of the Source integrity section, up to its integrity statement.
+_STATE_INTEGRITY_INTRO = (
+    "Each read-only input's working-tree blob (`git hash-object --no-filters`) against its blob at "
+    "the upstream commit `398a6d33ced9359ffb58c46650a6d488811176b1`: "
+)
+
+
+def _state_report(
+    runs: Mapping[str, Any],
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    facts: provenance.Provenance,
+) -> tuple[str, dict[str, tuple[compare.ComparisonGroup, ...]]]:
+    """The report of ``runs`` and, per program, the real comparisons of its run without exports."""
+    comparisons = {
+        program: compare.compare_program(
+            runs[program], listing_tables[program], sas_checkpoints[program], None, tolerances
+        )
+        for program in PROGRAMS
+    }
+    return report.render_report(runs, comparisons, facts, tolerances), comparisons
+
+
+def _state_models(text: str, program: str) -> list[str]:
+    """The non-blank lines of the Models subsection of ``program``'s section."""
+    return [line for line in _subsection(_section(text, program), "Models") if line]
+
+
+def _state_model_rows(text: str, program: str) -> list[tuple[str, ...]]:
+    """The one Models table of ``program``'s section, as rows of :data:`_STATE_MODEL_COLUMNS`."""
+    table = _single_table(_subsection(_section(text, program), "Models"))
+    return [tuple(row[column] for column in _STATE_MODEL_COLUMNS) for row in table]
+
+
+def _state_halt_lines(text: str, program: str) -> list[str]:
+    """The halt lines of ``program``'s section, ``Halt: …`` or ``Halted: …``."""
+    return [line for line in _section(text, program) if line.startswith(("Halt: ", "Halted: "))]
+
+
+def _state_not_compared(text: str, program: str) -> list[tuple[str, str, str, str]]:
+    """``program``'s Not compared rows as ``(Comparison, Quantity, Stratum, Reason)``."""
+    return [
+        (row["Comparison"], row["Quantity"], row["Stratum"], row["Reason"])
+        for row in _single_table(_section(text, "Not compared"))
+        if row["Program"] == program
+    ]
+
+
+def _state_listing_rows(
+    text: str, groups: Sequence[compare.ComparisonGroup]
+) -> dict[str, list[dict[str, str]]]:
+    """The rendered rows of the ParameterEstimates and merged-pval tables of one program, by key."""
+    section = _section(text, groups[0].program)
+    return {
+        key: _single_table(_subsection(section, _group_heading(_group(groups, key))))
+        for key in _STATE_LISTING_GROUPS
+    }
+
+
+def _state_integrity_rows(changed: bool) -> tuple[provenance.IntegrityRow, ...]:
+    """Synthetic Source integrity rows, one per read-only input, in ``READ_ONLY_INPUTS`` order.
+
+    Without ``changed`` nothing was verified, so every row is unavailable and has no blob. With
+    it, every input is unchanged except :data:`_STATE_EDITED_INPUT`, whose working blob differs,
+    and :data:`_STATE_MISSING_INPUT`, which has no working blob; both are CHANGED.
+    """
+    if not changed:
+        return tuple(
+            provenance.IntegrityRow(path, None, None, provenance.UNAVAILABLE)
+            for path in provenance.READ_ONLY_INPUTS
+        )
+    working = {_STATE_EDITED_INPUT: _STATE_EDITED_BLOB, _STATE_MISSING_INPUT: None}
+    return tuple(
+        provenance.IntegrityRow(
+            path,
+            _STATE_BLOB,
+            working.get(path, _STATE_BLOB),
+            provenance.STATUS_CHANGED if path in working else provenance.STATUS_UNCHANGED,
+        )
+        for path in provenance.READ_ONLY_INPUTS
+    )
+
+
+@pytest.mark.parametrize("program", PROGRAMS)
+def test_s02_mod_02_and_s07_mod_02_03_default_models(
+    program: str, written: _Written, results: Mapping[str, Any]
+) -> None:
+    """The Models subsection lists every GLM fit of the default run with its NOBS, DFE and status.
+
+    It is the program section's first subsection, after the halt line ``Halt: none; every halting
+    check passed.``, and its one table holds :data:`_STATE_DEFAULT_MODELS` in fitting order: the
+    07.02 endpoint fits on 226 of 227 records (S02-MOD-02, D-08); per 07.07 timepoint the fits for
+    ``studynum`` 1 and 2 (S07-MOD-02), then the pooled fit at ``studynum`` 3 (S07-MOD-03), whose
+    NOBS is their sum. Each row matches the run's ``ModelRecord`` at its position (Agent Action
+    Plan 0.6.4, 0.7.5).
+    """
+    expected = list(_STATE_DEFAULT_MODELS[program])
+    assert _state_halt_lines(written.text, program) == [_NO_HALT_LINE]
+    assert _subsections(_section(written.text, program))[0][0] == "Models"
+
+    rows = _state_model_rows(written.text, program)
+    assert rows == expected
+    for _model, _stratum, nobs, dfe, _status in rows:
+        assert int(dfe) == int(nobs) - 4
+    if program == PROGRAM_07_07:
+        for study_1, study_2, pooled in (rows[0:3], rows[3:6]):
+            assert int(pooled[2]) == int(study_1[2]) + int(study_2[2])
+        assert results[program].pooled_studynum == 3
+
+    records = results[program].models
+    assert len(records) == len(expected)
+    for record, (model, stratum, nobs, dfe, status) in zip(records, expected, strict=True):
+        record_stratum = f"PARAMCD={record.PARAMCD} ATPTN={record.ATPTN:g}"
+        if record.STUDYNUM is not None:
+            record_stratum += f" studynum={record.STUDYNUM}"
+        assert (record.MODEL, record_stratum, record.NOBS, record.DFE, record.STATUS) == (
+            model,
+            stratum,
+            int(nobs),
+            int(dfe),
+            status,
+        )
+
+
+@pytest.mark.parametrize("program", PROGRAMS)
+def test_glm_skipped_by_setting_state(
+    program: str,
+    results: Mapping[str, Any],
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+) -> None:
+    """A GLM skipped by setting is stated, and every model value of the listing FAILs, none passing.
+
+    The run gets the state its driver produces with the baseline variable or the reference
+    treatment unset (S02-MOD-02, S07-MOD-02, S07-MOD-03; Agent Action Plan 0.6.4): no model
+    records, an empty ``parameter_estimates`` and a ``css_stats`` without ``pval``. Its Models
+    subsection is the one line ``GLM: not produced: GLM skipped by setting.``, with no table. All
+    ParameterEstimates and merged-pval rows the listing holds FAIL with that reason and no Python
+    value; Not compared lists the GLM quantities once with it; the Summary counts those FAILs, so
+    its Result line reports the failure.
+    """
+    default = results[program]
+    stats = default.datasets["css_stats"]
+    assert "pval" in stats.columns
+    datasets = {
+        **default.datasets,
+        "parameter_estimates": default.datasets["parameter_estimates"].iloc[0:0],
+        "css_stats": stats.drop(columns="pval"),
+    }
+    skipped = dataclasses.replace(default, glm_skipped=True, models=(), datasets=datasets)
+    text, comparisons = _state_report(
+        {**results, program: skipped},
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+        provenance.collect(repo_paths),
+    )
+
+    assert _state_models(text, program) == [f"GLM: {_STATE_GLM_SKIPPED}."]
+    assert _tables(_subsection(_section(text, program), "Models")) == []
+    assert _state_halt_lines(text, program) == [_NO_HALT_LINE]
+
+    listing_rows = _state_listing_rows(text, comparisons[program])
+    assert tuple(len(listing_rows[key]) for key in _STATE_LISTING_GROUPS) == _LISTING_ROWS[program]
+    for key in _STATE_LISTING_GROUPS:
+        group = _group(comparisons[program], key)
+        assert (group.n_pass, group.n_not_compared, group.n_fail) == (0, 0, len(group.rows))
+        for row in listing_rows[key]:
+            assert row["Result"] == compare.FAIL
+            assert _STATE_GLM_SKIPPED in row["Reason"]
+            assert row["Python value"] == ""
+
+    entries = _state_not_compared(text, program)
+    assert [entry for entry in entries if entry[1].startswith("GLM ")] == [
+        (_NO_VALUE, "GLM ParameterEstimates and merged pval", _STATE_ALL_STRATA, _STATE_GLM_SKIPPED)
+    ]
+
+    failed = sum(_LISTING_ROWS[program])
+    summary = _summary_rows(text)[program]
+    assert _status_counts(summary)[compare.FAIL] == failed
+    assert _status_counts(summary)[compare.PASS] == _EXPECTED_PASS[program] - failed
+    assert summary["Halted"] == "no"
+    assert f"Result: FAIL: {failed} comparisons failed." in _section(text, "Summary")
+    assert "pval" in results[program].datasets["css_stats"].columns
+
+
+def test_u02_and_d09_unfitted_models_not_compared(
+    results: Mapping[str, Any],
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+) -> None:
+    """A model left unfitted shows its status, and its stratum is listed under Not compared.
+
+    The first WPCT-F.07.02 endpoint fit gets the status ``not fitted: reference level 0 absent``
+    (U-02) and the second ``no observations`` with NOBS 0 (D-09), neither with a DFE. The Models
+    table shows those statuses with DFE ``.``. Not compared lists each stratum's GLM quantities with
+    the reason :data:`_STATE_UNFITTED_REASONS` gives it, and the stratum's 20 ParameterEstimates
+    and 3 merged-pval rows FAIL with that reason, none passing or dropped (S02-MOD-02; Agent Action
+    Plan 0.6.4, 0.7.5).
+    """
+    default = results[PROGRAM_07_02]
+    absent, empty = default.models
+    unfitted = dataclasses.replace(
+        default,
+        models=(
+            dataclasses.replace(absent, STATUS=_STATE_REFERENCE_ABSENT, DFE=None),
+            dataclasses.replace(empty, STATUS=_STATE_NO_OBSERVATIONS, NOBS=0, DFE=None),
+        ),
+    )
+    text, comparisons = _state_report(
+        {**results, PROGRAM_07_02: unfitted},
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+        provenance.collect(repo_paths),
+    )
+
+    assert _state_model_rows(text, PROGRAM_07_02) == [
+        ("endpoint", "PARAMCD=DIABP ATPTN=815", "226", ".", "not fitted: reference level 0 absent"),
+        ("endpoint", "PARAMCD=SYSBP ATPTN=816", "0", ".", "no observations"),
+    ]
+    assert _state_halt_lines(text, PROGRAM_07_02) == [_NO_HALT_LINE]
+
+    quantity = "GLM ParameterEstimates and merged pval (endpoint model)"
+    unfitted_entries = [
+        entry for entry in _state_not_compared(text, PROGRAM_07_02) if entry[1] == quantity
+    ]
+    assert unfitted_entries == [
+        (_NO_VALUE, quantity, stratum, reason)
+        for stratum, reason in _STATE_UNFITTED_REASONS.items()
+    ]
+
+    listing_rows = _state_listing_rows(text, comparisons[PROGRAM_07_02])
+    for key, per_stratum in zip(_STATE_LISTING_GROUPS, _STATE_STRATUM_LISTING_ROWS, strict=True):
+        rows = listing_rows[key]
+        assert len(rows) == len(_STATE_UNFITTED_REASONS) * per_stratum
+        for stratum, reason in _STATE_UNFITTED_REASONS.items():
+            own = [row for row in rows if row["Stratum"].startswith(f"{stratum} ")]
+            assert len(own) == per_stratum, f"{key} {stratum}: {len(own)} rows"
+            assert {(row["Result"], row["Reason"]) for row in own} == {(compare.FAIL, reason)}
+
+    failed = sum(_LISTING_ROWS[PROGRAM_07_02])
+    summary = _summary_rows(text)[PROGRAM_07_02]
+    assert _status_counts(summary)[compare.FAIL] == failed
+    assert summary["Halted"] == "no"
+    assert f"Result: FAIL: {failed} comparisons failed." in _section(text, "Summary")
+    assert [record.STATUS for record in default.models] == ["fitted", "fitted"]
+
+
+@pytest.mark.parametrize(
+    "notes",
+    [
+        pytest.param((), id="empty_population"),
+        pytest.param((_STATE_U03_NOTE,), id="u03_empty_derivation_input"),
+    ],
+)
+def test_empty_population_and_u03_note(
+    notes: tuple[str, ...],
+    results: Mapping[str, Any],
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+) -> None:
+    """An empty analysis population is no halt and fits no model; only U-03 adds a run note.
+
+    The WPCT-F.07.07 run gets the state of a population with no stratum (Agent Action Plan 0.6.4):
+    no model records, header-only datasets and no pooled ``studynum``; the
+    ``u03_empty_derivation_input`` case adds the note of an empty derivation input (U-03). The
+    Models subsection reads ``No model was fitted: the analysis population holds no stratum.``,
+    the halt line and the Summary report no halt, and every listing value FAILs rather than passes.
+    Not compared lists the U-03 note as a ``run note`` with its wording; the plain empty population
+    has no ``run note`` row and no GLM entry.
+    """
+    default = results[PROGRAM_07_07]
+    datasets = {name: frame.iloc[0:0] for name, frame in default.datasets.items()}
+    empty = dataclasses.replace(
+        default, models=(), datasets=datasets, pooled_studynum=None, notes=notes
+    )
+    text, comparisons = _state_report(
+        {**results, PROGRAM_07_07: empty},
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+        provenance.collect(repo_paths),
+    )
+
+    assert _state_models(text, PROGRAM_07_07) == [
+        "No model was fitted: the analysis population holds no stratum."
+    ]
+    assert _tables(_subsection(_section(text, PROGRAM_07_07), "Models")) == []
+    assert _state_halt_lines(text, PROGRAM_07_07) == [_NO_HALT_LINE]
+    assert _summary_rows(text)[PROGRAM_07_07]["Halted"] == "no"
+    assert not any(line.startswith(f"{PROGRAM_07_07} halted") for line in _section(text, "Summary"))
+
+    listing_rows = _state_listing_rows(text, comparisons[PROGRAM_07_07])
+    counts = tuple(len(listing_rows[key]) for key in _STATE_LISTING_GROUPS)
+    assert counts == _LISTING_ROWS[PROGRAM_07_07]
+    assert {row["Result"] for key in _STATE_LISTING_GROUPS for row in listing_rows[key]} == {
+        compare.FAIL
+    }
+
+    entries = _state_not_compared(text, PROGRAM_07_07)
+    assert [entry for entry in entries if entry[1] == "run note"] == [
+        (_NO_VALUE, "run note", _STATE_ALL_STRATA, note) for note in notes
+    ]
+    assert not any(entry[1].startswith("GLM ") for entry in entries)
+    assert (_STATE_U03_NOTE in text) == bool(notes)
+
+
+def test_s07_flt_04_halt_rendered(
+    results: Mapping[str, Any],
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+) -> None:
+    """A halted run is reported as halted, and what it never reached is NOT COMPARED, never PASS.
+
+    WPCT-F.07.07 halts at CSS_SAFANA on a missing CHG (S07-FLT-04), as ``ProgramResult.from_halt``
+    records it. The Summary marks it halted, repeats the message and ends ``Result: FAIL: 1
+    comparison failed; WPCT-F.07.07 halted.``. Its section states ``Halted: <message>``, says no
+    model was fitted because the run halted before the GLM step, and has only the Models, Halt and
+    log-checkpoint subsections. The Halt table's one FAIL row is ``program run`` with SAS value
+    ``completed``, Python value ``halted`` and the message as reason; the 14 checkpoints reached
+    PASS and the 15 after the halt are NOT COMPARED. Not compared lists the listing
+    ParameterEstimates and merged pval as not compared because the program halted (Agent Action
+    Plan 0.6.4, 0.7.5).
+    """
+    halt = _css_safana_halt(results[PROGRAM_07_07])
+    assert len(halt.checkpoints) == 14
+    halted = type(results[PROGRAM_07_07]).from_halt(halt)
+    text, _ = _state_report(
+        {**results, PROGRAM_07_07: halted},
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+        provenance.collect(repo_paths),
+    )
+
+    summary_lines = _section(text, "Summary")
+    summary = _summary_rows(text)
+    assert (summary[PROGRAM_07_02]["Halted"], summary[PROGRAM_07_07]["Halted"]) == ("no", "yes")
+    counts = _status_counts(summary[PROGRAM_07_07])
+    assert (counts[compare.PASS], counts[compare.FAIL]) == (14, 1)
+    assert [line for line in summary_lines if " halted: " in line] == [
+        f"WPCT-F.07.07 halted: {_HALT_MESSAGE}"
+    ]
+    assert "Result: FAIL: 1 comparison failed; WPCT-F.07.07 halted." in summary_lines
+
+    section = _section(text, PROGRAM_07_07)
+    log_title = "Log checkpoints (WPCT-F.07.07.log)"
+    assert _state_halt_lines(text, PROGRAM_07_07) == [f"Halted: {_HALT_MESSAGE}"]
+    assert _state_halt_lines(text, PROGRAM_07_02) == [_NO_HALT_LINE]
+    assert _state_models(text, PROGRAM_07_07) == [
+        "No model was fitted: the run halted before the GLM step."
+    ]
+    assert [heading for heading, _ in _subsections(section)] == ["Models", "Halt", log_title]
+
+    halt_rows = _single_table(_subsection(section, "Halt"))
+    assert [
+        (r["Quantity"], r["Stratum"], r["SAS value"], r["Python value"], r["Result"], r["Reason"])
+        for r in halt_rows
+    ] == [("program run", _NO_VALUE, "completed", "halted", compare.FAIL, _HALT_MESSAGE)]
+
+    checkpoints = _single_table(_subsection(section, log_title))
+    reached = [f"{cp.SAS_DATASET} #{cp.OCCURRENCE}" for cp in halt.checkpoints]
+    assert [row["Quantity"] for row in checkpoints[:14]] == reached
+    statuses = [row["Result"] for row in checkpoints]
+    assert statuses == [compare.PASS] * 14 + [compare.NOT_COMPARED] * 15
+    assert {row["Reason"] for row in checkpoints[14:]} == {
+        "not reached: the run halted before this step"
+    }
+
+    entries = _state_not_compared(text, PROGRAM_07_07)
+    assert [entry[1] for entry in entries if entry[0] == log_title] == [
+        row["Quantity"] for row in checkpoints[14:]
+    ]
+    halted_reason = f"program halted: {_HALT_MESSAGE}"
+    assert [entry for entry in entries if entry[3] == halted_reason] == [
+        (_NO_VALUE, "ParameterEstimates against the listing", _STATE_ALL_STRATA, halted_reason),
+        (_NO_VALUE, "merged CSS_STATS.pval against the listing", _STATE_ALL_STRATA, halted_reason),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("git_available", "head", "head_shown", "changed", "statement"),
+    [
+        pytest.param(
+            False,
+            "unavailable",
+            "unavailable",
+            False,
+            "git is unavailable, so integrity was not verified.",
+            id="git_unavailable",
+        ),
+        pytest.param(
+            True,
+            _STATE_HEAD,
+            f"`{_STATE_HEAD}`",
+            False,
+            "the upstream commit 398a6d33ced9359ffb58c46650a6d488811176b1 is unavailable in this "
+            "checkout, so integrity was not verified.",
+            id="commit_unavailable",
+        ),
+        pytest.param(
+            True,
+            _STATE_HEAD,
+            f"`{_STATE_HEAD}`",
+            True,
+            "2 of 36 read-only inputs differ from their blobs at the upstream commit "
+            "(see Source integrity).",
+            id="changed",
+        ),
+    ],
+)
+def test_source_integrity_explanations(
+    git_available: bool,
+    head: str,
+    head_shown: str,
+    changed: bool,
+    statement: str,
+    results: Mapping[str, Any],
+    clean_comparisons: _Comparisons,
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+) -> None:
+    """The report says when integrity was not verified, and counts and names the changed inputs.
+
+    The provenance facts of the checkout get synthetic git facts, so no case depends on this
+    host's git (Agent Action Plan 0.1.1, 0.7.5, 0.11.2): git unavailable, with ``HEAD`` shown as
+    ``unavailable``; the upstream commit unavailable; or two CHANGED inputs, one edited and one
+    missing. The statement of each is the Provenance ``- Source integrity: `` line and ends the
+    Source integrity introduction. Only changed inputs add ``Changed inputs: <paths>.``. The table
+    shows every row's status, and ``unavailable`` for each missing blob.
+    """
+    assert {_STATE_EDITED_INPUT, _STATE_MISSING_INPUT} <= set(provenance.READ_ONLY_INPUTS)
+    facts = dataclasses.replace(
+        provenance.collect(repo_paths),
+        git_available=git_available,
+        head_commit=head,
+        integrity=_state_integrity_rows(changed),
+    )
+    text = report.render_report(results, clean_comparisons, facts, tolerances)
+
+    section = _section(text, "Provenance")
+    assert [line for line in section if line.startswith("- Source integrity: ")] == [
+        f"- Source integrity: {statement}"
+    ]
+    assert [line for line in section if "git rev-parse HEAD" in line] == [
+        f"- Checkout `HEAD` when the report was generated (`git rev-parse HEAD`): {head_shown}"
+    ]
+
+    integrity = _section(text, "Source integrity")
+    assert [line for line in integrity if line.startswith("Each read-only input")] == [
+        _STATE_INTEGRITY_INTRO + statement
+    ]
+    assert [line for line in integrity if line.startswith("Changed inputs")] == (
+        [f"Changed inputs: {_STATE_EDITED_INPUT}, {_STATE_MISSING_INPUT}."] if changed else []
+    )
+    assert "match their blobs" not in text
+
+    blob, edited = f"`{_STATE_BLOB}`", f"`{_STATE_EDITED_BLOB}`"
+    expected = {
+        path: ("unavailable", "unavailable", "unavailable") for path in provenance.READ_ONLY_INPUTS
+    }
+    if changed:
+        expected = {path: (blob, blob, "unchanged") for path in provenance.READ_ONLY_INPUTS}
+        expected[_STATE_EDITED_INPUT] = (blob, edited, "CHANGED")
+        expected[_STATE_MISSING_INPUT] = (blob, "unavailable", "CHANGED")
+    table = _single_table(integrity)
+    assert [
+        (
+            _code_text(row["Path"]),
+            row["Blob at upstream commit"],
+            row["Working-tree blob"],
+            row["Result"],
+        )
+        for row in table
+    ] == [(path, *cells) for path, cells in expected.items()]
 
 
 def test_report_deterministic(
@@ -1268,6 +2099,452 @@ def test_reproduce_rejects_missing_sas_exports_dir(
     assert str(missing) in err
     assert _tree(write_paths.write_root) == {}
     assert not missing.exists()
+
+
+#: The stderr prefix of every error ``reproduce`` reports before it returns exit code 2.
+_CLI_ERROR_PREFIX = f"{cli.PROG} reproduce: error: "
+
+#: The WPCT-F.07.02 ParameterEstimates export a user may supply (Agent Action Plan 0.7.3).
+_CLI_ESTIMATES_EXPORT = export_spec(PROGRAM_07_02, "parameter_estimates").sas_export_file
+
+#: The fabricated values of a synthetic stand-in for that export, by compared field. None is a SAS
+#: result, and each lies far outside every tolerance around the Python fit, so each must FAIL.
+_CLI_FABRICATED_VALUES: Mapping[str, str] = MappingProxyType(
+    {"ESTIMATE": "-999.5", "STDERR": "0.25", "TVALUE": "-3998", "PROBT": "0.5"}
+)
+
+#: The synthetic stand-in: one row on the real DIABP/815 Intercept key, carrying those values in
+#: the export's ``Estimate StdErr tValue Probt`` columns.
+_CLI_FABRICATED_EXPORT = (
+    "PARAMCD,ATPTN,Parameter,Estimate,StdErr,tValue,Probt\n"
+    f"DIABP,815,Intercept,{','.join(_CLI_FABRICATED_VALUES.values())}\n"
+).encode("latin-1")
+
+#: A stand-in for the same export whose header names ``Estimate`` twice in different case, which
+#: the export contract refuses (``python/wpct/reference/sas_exports/README.md``).
+_CLI_MALFORMED_EXPORT = (
+    b"PARAMCD,ATPTN,Parameter,Estimate,estimate\nDIABP,815,Intercept,-999.5,-999.5\n"
+)
+
+
+def _cli_watch_drivers(
+    monkeypatch: pytest.MonkeyPatch, raising: Mapping[str, Exception]
+) -> list[tuple[str, bool, str]]:
+    """Record every driver run ``reproduce`` starts; a program in ``raising`` raises instead.
+
+    ``reproduce`` calls ``driver.run(driver.Config(), paths)`` for each driver module in
+    ``cli._DRIVERS``, so replacing ``run`` on that module changes what it runs, and
+    ``monkeypatch`` restores it after the test. A program not in ``raising`` runs its real driver.
+    The returned list gains one ``(program, default Config, outcome)`` entry per run, in run order:
+    whether the run got its program's own ``%let`` settings (S02-TRN-01, S07-TRN-01), and
+    ``"returned"`` or the name of the exception the run raised.
+    """
+    assert set(raising) <= {program for program, _driver in cli._DRIVERS}
+    runs: list[tuple[str, bool, str]] = []
+    for program, driver in cli._DRIVERS:
+
+        def run(
+            config: Any,
+            paths: RepoPaths,
+            *,
+            _program: str = program,
+            _driver: Any = driver,
+            _real: Callable[..., Any] = driver.run,
+        ) -> Any:
+            default = config == _driver.Config()
+            if _program in raising:
+                runs.append((_program, default, type(raising[_program]).__name__))
+                raise raising[_program]
+            try:
+                result = _real(config, paths)
+            except Exception as exc:
+                runs.append((_program, default, type(exc).__name__))
+                raise
+            runs.append((_program, default, "returned"))
+            return result
+
+        monkeypatch.setattr(driver, "run", run)
+    return runs
+
+
+def _cli_exports_dir(tmp_path: Path, files: Mapping[str, bytes]) -> Path:
+    """A new ``--sas-exports`` directory under ``tmp_path`` holding exactly ``files``, by name."""
+    directory = tmp_path / "sas_exports"
+    directory.mkdir()
+    for name, data in files.items():
+        (directory / name).write_bytes(data)
+    return directory
+
+
+def _cli_export_files(paths: RepoPaths, programs: Sequence[str]) -> set[str]:
+    """Every ``schemas.EXPORTS`` file of ``programs``, relative to the write root."""
+    root = paths.write_root
+    return {
+        (paths.program_outputs_dir(program) / spec.file_name).relative_to(root).as_posix()
+        for program in programs
+        for spec in EXPORTS[program]
+    }
+
+
+def _cli_expected_tree(planted: Mapping[str, str], files: set[str]) -> dict[str, str]:
+    """``planted``, as :func:`_tree` lists it, plus ``files`` and the directories above each."""
+    tree = dict(planted)
+    for relative in files:
+        for parent in Path(relative).parents:
+            if parent != Path("."):
+                tree.setdefault(parent.as_posix(), "dir")
+        tree[relative] = "file"
+    return tree
+
+
+def _cli_shown_path(text: str, paths: RepoPaths) -> Path:
+    """The path ``reproduce`` printed as ``text``: checkout-relative, or absolute outside it."""
+    shown = Path(text)
+    return (shown if shown.is_absolute() else paths.repo_root / shown).resolve()
+
+
+def _cli_printed(out: str, paths: RepoPaths) -> dict[str, tuple[dict[str, int], str]]:
+    """The status lines of a ``reproduce`` run that wrote its report, keyed by program and Overall.
+
+    stdout must read one line per program in ``schemas.PROGRAMS`` order, ``<program>: PASS <a>,
+    FAIL <b>, NOT COMPARED <c>; <outcome>``, then ``Overall:`` with the same three counts, then
+    ``Report: <path>`` naming the report file under the write root. Each value is the counts and
+    the outcome, which is empty for Overall.
+    """
+    *lines, report_line, end = out.split("\n")
+    assert end == "", out
+    assert report_line.startswith("Report: "), out
+    shown_report = _cli_shown_path(report_line[len("Report: ") :], paths)
+    assert shown_report == paths.report_file.resolve()
+    printed: dict[str, tuple[dict[str, int], str]] = {}
+    for line in lines:
+        name, _, text = line.partition(": ")
+        counts_text, _, outcome = text.partition("; ")
+        counts: dict[str, int] = {}
+        for part in counts_text.split(", "):
+            status, _, number = part.rpartition(" ")
+            counts[status] = int(number)
+        assert tuple(counts) == compare.STATUSES, line
+        printed[name] = (counts, outcome)
+    assert list(printed) == [*PROGRAMS, "Overall"], out
+    assert printed["Overall"][1] == "", out
+    return printed
+
+
+def _cli_assert_outputs_line(outcome: str, program: str, paths: RepoPaths) -> None:
+    """``outcome`` is ``outputs in <dir>``, naming ``program``'s export directory."""
+    prefix = "outputs in "
+    assert outcome.startswith(prefix), outcome
+    shown = _cli_shown_path(outcome[len(prefix) :], paths)
+    assert shown == paths.program_outputs_dir(program).resolve()
+
+
+def _cli_errors(err: str) -> list[str]:
+    """The error lines ``reproduce`` wrote to stderr, skipping any logged warning line."""
+    return [line for line in err.split("\n") if line.startswith(_CLI_ERROR_PREFIX)]
+
+
+def test_reproduce_s07_flt_04_halt_exits_1(
+    write_paths: RepoPaths,
+    results: Mapping[str, Any],
+    clean_comparisons: _Comparisons,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A WPCT-F.07.07 halt (S07-FLT-04) makes ``reproduce`` exit 1 and is reported, not hidden.
+
+    The 07.07 driver raises the ``AnalysisHalted`` of ``%assert_var_nonmissing`` with the real
+    checkpoints up to CSS_SAFANA; 07.02 runs its real driver, and ``--sas-exports`` names an empty
+    directory. Agent Action Plan 0.6.4 and 0.6.7: the halted program exports nothing, while the
+    07.02 exports and the report are written; 0.6.5: the exit code is 1.
+
+    stdout gives 07.07's halt message and 07.02's export directory. The report records the halt in
+    the Summary (Halted ``yes``, one FAIL, the halt line and the Result line), in the WPCT-F.07.07
+    section (``Halted:``, the Halt group's FAIL row carrying the message, and no listing group) and
+    under Not compared (both listing groups, with the halt as reason). The checkpoints after
+    CSS_SAFANA are NOT COMPARED and listed there, never PASS (Agent Action Plan 0.7.4), and the
+    07.02 counts are those of a clean checkout.
+    """
+    exports_dir = _cli_exports_dir(tmp_path, {})
+    halt = _css_safana_halt(results[PROGRAM_07_07])
+    runs = _cli_watch_drivers(monkeypatch, {PROGRAM_07_07: halt})
+
+    code = cli.reproduce(write_paths, exports_dir)
+
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_FAILED == 1, out
+    assert runs == [(PROGRAM_07_02, True, "returned"), (PROGRAM_07_07, True, "AnalysisHalted")]
+    printed = _cli_printed(out, write_paths)
+    assert printed[PROGRAM_07_07][1] == f"halted, nothing exported: {_HALT_MESSAGE}"
+    _cli_assert_outputs_line(printed[PROGRAM_07_02][1], PROGRAM_07_02, write_paths)
+
+    assert not write_paths.program_outputs_dir(PROGRAM_07_07).exists()
+    files = {REPORT_RELATIVE.as_posix(), *_cli_export_files(write_paths, (PROGRAM_07_02,))}
+    assert _tree(write_paths.write_root) == _cli_expected_tree({}, files)
+
+    text = write_paths.report_file.read_bytes().decode("utf-8")
+    rows = _summary_rows(text)
+    assert {name: rows[name]["Halted"] for name in PROGRAMS} == {
+        PROGRAM_07_02: "no",
+        PROGRAM_07_07: "yes",
+    }
+    for name, (counts, _outcome) in printed.items():
+        assert _status_counts(rows[name]) == counts, name
+    clean_not_compared = _rows_with_status(clean_comparisons, PROGRAM_07_02, compare.NOT_COMPARED)
+    assert _status_counts(rows[PROGRAM_07_02]) == {
+        compare.PASS: _EXPECTED_PASS[PROGRAM_07_02],
+        compare.FAIL: 0,
+        compare.NOT_COMPARED: clean_not_compared,
+    }
+    assert _status_counts(rows[PROGRAM_07_07])[compare.FAIL] == 1
+    summary = _section(text, "Summary")
+    assert summary.count(f"{PROGRAM_07_07} halted: {_HALT_MESSAGE}") == 1
+    assert [line for line in summary if line.startswith("Result: ")] == [
+        f"Result: FAIL: 1 comparison failed; {PROGRAM_07_07} halted."
+    ]
+
+    section_02 = _section(text, PROGRAM_07_02)
+    assert _NO_HALT_LINE in section_02
+    assert not any(line.startswith("Halted: ") for line in section_02)
+    section_07 = _section(text, PROGRAM_07_07)
+    assert f"Halted: {_HALT_MESSAGE}" in section_07
+    assert not any(line.startswith("Halt: none") for line in section_07)
+    blocks = dict(_subsections(section_07))
+    halt_rows = _single_table(blocks["Halt"])
+    assert [(row["Result"], row["Reason"]) for row in halt_rows] == [(compare.FAIL, _HALT_MESSAGE)]
+    clean_07 = clean_comparisons[PROGRAM_07_07]
+    for key in (compare.GROUP_LISTING_PARAMETER_ESTIMATES, compare.GROUP_LISTING_MERGED_PVAL):
+        assert _group_heading(_group(clean_07, key)) not in blocks, key
+
+    checkpoint_title = _group(clean_07, compare.GROUP_LOG_CHECKPOINTS).title
+    checkpoints = _single_table(blocks[checkpoint_title])
+    assert len(checkpoints) == 29
+    quantities = [row["Quantity"] for row in checkpoints]
+    last = next(index for index, quantity in enumerate(quantities) if quantity == "CSS_SAFANA #1")
+    reached, unreached = checkpoints[: last + 1], checkpoints[last + 1 :]
+    assert unreached, "a halt at CSS_SAFANA must leave checkpoints unreached"
+    assert {row["Result"] for row in reached} == {compare.PASS}
+    assert {row["Result"] for row in unreached} == {compare.NOT_COMPARED}
+    assert all(row["Reason"] and row["Reason"] != _NO_VALUE for row in unreached)
+    assert _status_counts(rows[PROGRAM_07_07])[compare.PASS] == len(reached)
+
+    not_compared = _single_table(_section(text, "Not compared"))
+    listed = [
+        row["Quantity"]
+        for row in not_compared
+        if (row["Program"], row["Comparison"]) == (PROGRAM_07_07, checkpoint_title)
+    ]
+    assert listed == [row["Quantity"] for row in unreached]
+    halted = [
+        (row["Program"], row["Quantity"])
+        for row in not_compared
+        if row["Reason"] == f"program halted: {_HALT_MESSAGE}"
+    ]
+    assert len(halted) == 2, halted
+    (estimates_program, estimates), (pval_program, pval) = halted
+    assert estimates_program == pval_program == PROGRAM_07_07
+    assert "ParameterEstimates" in estimates
+    assert "merged CSS_STATS.pval" in pval
+
+
+def test_reproduce_failed_export_comparison_exits_1(
+    write_paths: RepoPaths,
+    clean_comparisons: _Comparisons,
+    tmp_path: Path,
+    file_state: _FileState,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A comparison that FAILs makes ``reproduce`` exit 1, with every output still written.
+
+    ``--sas-exports`` names a directory under ``tmp_path`` holding only a synthetic stand-in for
+    ``WPCT-F.07.02_parameter_estimates.csv``: one row on the real DIABP/815 Intercept key with
+    fabricated values. The real loader and comparison judge it (Agent Action Plan 0.7.3), so its
+    ``Export <file>`` group in the WPCT-F.07.02 section FAILs on every row, each with a reason,
+    the fabricated SAS values among them, while every listing and log comparison still passes. No
+    program halted, so both programs' exports and the report are written, and the exit code is 1
+    (Agent Action Plan 0.6.5). The export directory is a read-only input (0.8): the stand-in's
+    bytes and ``st_mtime_ns`` and the directory's listing are unchanged.
+    """
+    exports_dir = _cli_exports_dir(tmp_path, {_CLI_ESTIMATES_EXPORT: _CLI_FABRICATED_EXPORT})
+    standin = exports_dir / _CLI_ESTIMATES_EXPORT
+    before = (file_state(standin), file_state(exports_dir))
+    assert before[1] == [_CLI_ESTIMATES_EXPORT]
+
+    code = cli.reproduce(write_paths, exports_dir)
+
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_FAILED == 1, out
+    printed = _cli_printed(out, write_paths)
+    failed = printed["Overall"][0][compare.FAIL]
+    assert failed > 0
+    for program in PROGRAMS:
+        _cli_assert_outputs_line(printed[program][1], program, write_paths)
+    files = {REPORT_RELATIVE.as_posix(), *_cli_export_files(write_paths, PROGRAMS)}
+    assert _tree(write_paths.write_root) == _cli_expected_tree({}, files)
+    assert (file_state(standin), file_state(exports_dir)) == before
+
+    text = write_paths.report_file.read_bytes().decode("utf-8")
+    rows = _summary_rows(text)
+    assert {rows[name]["Halted"] for name in PROGRAMS} == {"no"}
+    for name, (counts, _outcome) in printed.items():
+        assert _status_counts(rows[name]) == counts, name
+    assert _status_counts(rows[PROGRAM_07_02])[compare.PASS] == _EXPECTED_PASS[PROGRAM_07_02]
+    assert _status_counts(rows[PROGRAM_07_02])[compare.FAIL] == failed
+    assert _status_counts(rows[PROGRAM_07_07]) == {
+        compare.PASS: _EXPECTED_PASS[PROGRAM_07_07],
+        compare.FAIL: 0,
+        compare.NOT_COMPARED: _rows_with_status(
+            clean_comparisons, PROGRAM_07_07, compare.NOT_COMPARED
+        ),
+    }
+    summary = _section(text, "Summary")
+    assert not any(" halted: " in line for line in summary)
+    noun = "comparison" if failed == 1 else "comparisons"
+    assert [line for line in summary if line.startswith("Result: ")] == [
+        f"Result: FAIL: {failed} {noun} failed."
+    ]
+
+    section = _section(text, PROGRAM_07_02)
+    assert _NO_HALT_LINE in section
+    block = _subsection(section, f"Export {_CLI_ESTIMATES_EXPORT}")
+    table = _single_table(block)
+    assert len(table) == failed
+    assert f"{compare.PASS} 0, {compare.FAIL} {failed}, {compare.NOT_COMPARED} 0." in block
+    assert {row["Result"] for row in table} == {compare.FAIL}
+    assert all(row["Reason"] and row["Reason"] != _NO_VALUE for row in table)
+    judged = [row for row in table if row["Quantity"] in _CLI_FABRICATED_VALUES]
+    assert [row["Quantity"] for row in judged] == list(_CLI_FABRICATED_VALUES)
+    for row in judged:
+        assert row["SAS value"] == _CLI_FABRICATED_VALUES[row["Quantity"]]
+        assert all(part in row["Stratum"] for part in ("DIABP", "815", "INTERCEPT")), row
+
+    not_compared = _single_table(_section(text, "Not compared"))
+    glm_programs = [
+        row["Program"] for row in not_compared if "full-precision GLM values" in row["Quantity"]
+    ]
+    assert glm_programs == [PROGRAM_07_07]
+
+
+@pytest.mark.parametrize("failure", ["malformed_sas_export", "missing_07_07_input"])
+def test_reproduce_input_error_exits_2_writing_nothing(
+    failure: str,
+    write_paths: RepoPaths,
+    tmp_path: Path,
+    file_state: _FileState,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An input error makes ``reproduce`` exit 2 and write nothing (Agent Action Plan 0.6.4, 0.6.5).
+
+    - ``malformed_sas_export``: ``--sas-exports`` holds a ParameterEstimates export whose header
+      names ``Estimate`` twice in different case. ``load_sas_exports`` raises ``InputDataError``
+      naming the file and the column, never a value, before either driver runs; the file and its
+      directory are unchanged.
+    - ``missing_07_07_input``: the WPCT-F.07.07 driver raises the ``InputDataError`` of an ADVS
+      file missing from ``tmp_path``. WPCT-F.07.02 has run by then, yet its exports are not
+      written, because every input is read before any write (Agent Action Plan 0.6.7).
+
+    stdout stays empty, stderr carries one ``python -m wpct reproduce: error:`` line with the
+    message, and the write root stays empty.
+    """
+    message: str | None = None
+    if failure == "malformed_sas_export":
+        exports_dir = _cli_exports_dir(tmp_path, {_CLI_ESTIMATES_EXPORT: _CLI_MALFORMED_EXPORT})
+        runs = _cli_watch_drivers(monkeypatch, {})
+        expected_runs: list[tuple[str, bool, str]] = []
+    else:
+        exports_dir = _cli_exports_dir(tmp_path, {})
+        missing = tmp_path / "missing_input" / "advs.xpt"
+        message = f"{PROGRAM_07_07}: input dataset not found: {missing}"
+        runs = _cli_watch_drivers(monkeypatch, {PROGRAM_07_07: InputDataError(message)})
+        expected_runs = [
+            (PROGRAM_07_02, True, "returned"),
+            (PROGRAM_07_07, True, "InputDataError"),
+        ]
+    exports_before = {path: file_state(path) for path in (exports_dir, *exports_dir.iterdir())}
+
+    code = cli.reproduce(write_paths, exports_dir)
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_INPUT_ERROR == 2, captured.err
+    assert captured.out == ""
+    assert runs == expected_runs
+    assert _tree(write_paths.write_root) == {}
+    assert {path: file_state(path) for path in exports_before} == exports_before
+    errors = _cli_errors(captured.err)
+    if message is not None:
+        assert errors == [_CLI_ERROR_PREFIX + message]
+    else:
+        assert len(errors) == 1, captured.err
+        assert str(exports_dir / _CLI_ESTIMATES_EXPORT) in errors[0]
+        assert "ESTIMATE" in errors[0]
+        assert "-999.5" not in errors[0]
+
+
+@pytest.mark.parametrize("link", ["outputs_dir", "program_outputs_dir", "reports_dir"])
+def test_reproduce_rejected_destination_exits_2(
+    link: str,
+    write_paths: RepoPaths,
+    tmp_path: Path,
+    file_state: _FileState,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A destination the write guard refuses makes ``reproduce`` exit 2 (AAP 0.6.5, 0.8).
+
+    The write root's ``link`` is a symlink to an external directory under ``tmp_path`` that already
+    holds ``sentinel.csv``:
+
+    - ``outputs_dir``: ``python/wpct/outputs``. The first export call, WPCT-F.07.02's, refuses its
+      first target, so nothing is written.
+    - ``program_outputs_dir``: ``python/wpct/outputs/WPCT-F.07.07``. The WPCT-F.07.02 export call
+      has written its files, which remain; the WPCT-F.07.07 call refuses its first target and
+      writes none of its files.
+    - ``reports_dir``: ``python/wpct/reports``. Both export calls have written their files, which
+      remain; ``write_report`` refuses the report path.
+
+    Each writer call vets every target before it opens any, and an earlier call is not undone.
+    The run stops at the refusal: stderr carries the ``OutputPathError`` message naming the refused
+    target and its resolved path, stdout stays empty, so no ``Report:`` line is printed, and no
+    report exists. The external directory's listing and the sentinel's bytes and ``st_mtime_ns``
+    are unchanged, and the write root holds only the planted link and the earlier calls' files.
+    """
+    exports_dir = _cli_exports_dir(tmp_path, {})
+    external_dir = tmp_path / "external_dir"
+    external_dir.mkdir()
+    sentinel = external_dir / "sentinel.csv"
+    sentinel.write_bytes(_SAS_EXPORT_STANDIN)
+    if link == "outputs_dir":
+        link_path, kept = write_paths.outputs_dir, ()
+        first_export = EXPORTS[PROGRAM_07_02][0].file_name
+        target = write_paths.program_outputs_dir(PROGRAM_07_02) / first_export
+    elif link == "program_outputs_dir":
+        link_path, kept = write_paths.program_outputs_dir(PROGRAM_07_07), (PROGRAM_07_02,)
+        target = link_path / EXPORTS[PROGRAM_07_07][0].file_name
+    else:
+        link_path, kept = write_paths.report_file.parent, PROGRAMS
+        target = write_paths.report_file
+    link_path.parent.mkdir(parents=True)
+    _symlink(link_path, external_dir)
+    resolved = external_dir.resolve() / target.relative_to(link_path)
+    planted = _tree(write_paths.write_root)
+    assert planted[link_path.relative_to(write_paths.write_root).as_posix()] == "symlink"
+    sentinel_before = file_state(sentinel)
+    external_before = file_state(external_dir)
+
+    code = cli.reproduce(write_paths, exports_dir)
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_INPUT_ERROR == 2, captured.err
+    assert captured.out == ""
+    errors = _cli_errors(captured.err)
+    assert errors == [_CLI_ERROR_PREFIX + str(OutputPathError(target, resolved))]
+    assert str(target) in errors[0] and str(resolved) in errors[0]
+    assert file_state(sentinel) == sentinel_before
+    assert file_state(external_dir) == external_before == ["sentinel.csv"]
+    assert not write_paths.report_file.exists()
+    expected = _cli_expected_tree(planted, _cli_export_files(write_paths, kept))
+    assert _tree(write_paths.write_root) == expected
 
 
 # --- Write-destination guard (Agent Action Plan 0.8) ----------------------------------------------
