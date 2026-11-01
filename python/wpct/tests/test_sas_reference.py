@@ -21,8 +21,10 @@ from typing import NamedTuple
 
 import pytest
 
+from wpct import compare
 from wpct.errors import InputDataError
 from wpct.paths import RepoPaths
+from wpct.programs import ProgramResult
 from wpct.sas_reference import (
     GLM_TABLE_MAP,
     KIND_DATASET,
@@ -346,6 +348,330 @@ def test_listing_mismatch_reported(
     assert problem in edited.problems[0]
     assert [table.problems for table in tables if table.index != table_index] == [()] * 5
     assert parse_glm_listing(copy) == tables
+    assert file_state(reference) == before
+
+
+def _assert_listing_failure_propagates(
+    program_id: str,
+    tables: tuple[ListingTable, ...],
+    table_index: int,
+    clean: tuple[ListingTable, ...],
+    result: ProgramResult,
+    tolerances: compare.Tolerances,
+) -> None:
+    """Keep all expected quantities and fail exactly the damaged table in both listing groups.
+
+    The clean table's rendered comparison keys identify its stratum, including pooled study
+    numbering and the merged cells' TRTPN levels, without duplicating comparison formatting.
+    """
+    counts = {PROGRAM_07_02: (40, 6), PROGRAM_07_07: (128, 18)}[program_id]
+    table = tables[table_index]
+    unexpected = table.spec is None
+    reason = "; ".join(table.problems)
+    assert reason
+    for compare_group, count in zip(
+        (compare.compare_listing, compare.compare_merged_pval), counts, strict=True
+    ):
+        baseline = compare_group(program_id, clean, result, tolerances)
+        group = compare_group(program_id, tables, result, tolerances)
+        assert len(baseline.rows) == baseline.n_pass == count
+        assert baseline.n_not_compared == 0
+        baseline_by_key = {(row.quantity, row.stratum): row for row in baseline.rows}
+        assert len(baseline_by_key) == count
+        expected_keys = list(baseline_by_key)
+        if unexpected:
+            affected_keys = {(f"listing table {table_index}", "—")}
+            expected_keys.append((f"listing table {table_index}", "—"))
+        else:
+            affected = compare_group(program_id, (clean[table_index],), result, tolerances)
+            affected_keys = {(row.quantity, row.stratum) for row in affected.rows}
+            expected_affected = (
+                4 * len(clean[table_index].rows) if compare_group is compare.compare_listing else 3
+            )
+            assert len(affected_keys) == expected_affected
+            assert affected_keys <= baseline_by_key.keys()
+        assert len(group.rows) == count + int(unexpected)
+        assert [(row.quantity, row.stratum) for row in group.rows] == expected_keys
+        assert group.n_not_compared == 0
+        assert group.n_fail == len(affected_keys)
+        assert group.n_pass == len(group.rows) - len(affected_keys)
+        for row in group.rows:
+            key = (row.quantity, row.stratum)
+            if key in affected_keys:
+                assert row.status == compare.FAIL
+                assert row.reason == reason
+            else:
+                assert row.status == compare.PASS
+                assert row == baseline_by_key[key]
+
+
+@pytest.mark.parametrize(
+    "program_id, last_line, table_index",
+    [
+        pytest.param(PROGRAM_07_02, 22, 1, id="07.02-missing-endpoint-table"),
+        pytest.param(PROGRAM_07_07, 139, 5, id="07.07-missing-pooled-table"),
+    ],
+)
+def test_s02_mod_02_s07_mod_03_missing_listing_table_fails(
+    program_id: str,
+    last_line: int,
+    table_index: int,
+    tmp_path: Path,
+    repo_paths: RepoPaths,
+    file_state: Callable[[Path], object],
+    listing_tables: Mapping[str, tuple[ListingTable, ...]],
+    results: Mapping[str, ProgramResult],
+    tolerances: compare.Tolerances,
+) -> None:
+    """A missing final table retains its expected model and merged-pval quantities as FAIL.
+
+    Cut before the header [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst:23-29] or
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.lst:140-147] (S02-MOD-02, S07-MOD-03,
+    S02-TRN-05, S07-TRN-08); the preceding complete tables remain valid.
+    """
+    reference = repo_paths.listing_file(program_id)
+    before = file_state(reference)
+    lines = reference.read_bytes().split(b"\n")
+    copy = tmp_path / reference.name
+    copy.write_bytes(b"\n".join(lines[:last_line]) + b"\n")
+
+    tables = parse_glm_listing(copy)
+
+    assert len(tables) == table_index + 1
+    assert sum(table.first_line is not None for table in tables) == table_index
+    missing = tables[table_index]
+    assert missing.index == table_index
+    assert (missing.by_line, missing.dependent, missing.first_line, missing.last_line) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert missing.rows == ()
+    assert missing.spec is GLM_TABLE_MAP[program_id][table_index]
+    assert missing.problems == (f"table {table_index} missing from listing",)
+    assert tables[:table_index] == listing_tables[program_id][:table_index]
+    assert all(table.problems == () for table in tables[:table_index])
+    _assert_listing_failure_propagates(
+        program_id, tables, table_index, listing_tables[program_id], results[program_id], tolerances
+    )
+    assert file_state(reference) == before
+
+
+@pytest.mark.parametrize(
+    "program_id, last_line, table_index, header_line, pinned_last_line, parameters",
+    [
+        pytest.param(
+            PROGRAM_07_02,
+            27,
+            1,
+            23,
+            29,
+            "(INTERCEPT, BASE, TRTPN 54, TRTPN 81, TRTPN 0)",
+            id="07.02-truncated-endpoint-table",
+        ),
+        pytest.param(
+            PROGRAM_07_07,
+            144,
+            5,
+            140,
+            147,
+            "(INTERCEPT, BASE, TRTPN 54, TRTPN 81, TRTPN 0, STUDYNUM)",
+            id="07.07-truncated-pooled-table",
+        ),
+    ],
+)
+def test_s02_mod_02_s07_mod_03_truncated_listing_table_fails(
+    program_id: str,
+    last_line: int,
+    table_index: int,
+    header_line: int,
+    pinned_last_line: int,
+    parameters: str,
+    tmp_path: Path,
+    repo_paths: RepoPaths,
+    file_state: Callable[[Path], object],
+    listing_tables: Mapping[str, tuple[ListingTable, ...]],
+    results: Mapping[str, ProgramResult],
+    tolerances: compare.Tolerances,
+) -> None:
+    """EOF after TRTPN 54 fails both the parameter sequence and pinned line range.
+
+    Only three rows survive [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst:25-29] or
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.lst:142-147] (S02-MOD-02, S07-MOD-03);
+    all model and merge quantities still appear (S02-TRN-05, S07-TRN-08).
+    """
+    reference = repo_paths.listing_file(program_id)
+    before = file_state(reference)
+    lines = reference.read_bytes().split(b"\n")
+    copy = tmp_path / reference.name
+    copy.write_bytes(b"\n".join(lines[:last_line]) + b"\n")
+
+    tables = parse_glm_listing(copy)
+
+    assert len(tables) == table_index + 1
+    truncated = tables[table_index]
+    assert truncated.index == table_index
+    assert truncated.spec is GLM_TABLE_MAP[program_id][table_index]
+    clean = listing_tables[program_id][table_index]
+    assert (truncated.by_line, truncated.dependent) == (clean.by_line, clean.dependent)
+    assert (truncated.first_line, truncated.last_line) == (header_line, last_line)
+    assert len(truncated.rows) == 3
+    assert truncated.rows == clean.rows[:3]
+    assert truncated.problems == (
+        (
+            f"table {table_index}: parameter rows (INTERCEPT, BASE, TRTPN 54) "
+            f"differ from the expected {parameters}"
+        ),
+        (
+            f"table {table_index}: lines {header_line}-{last_line} differ from the pinned lines "
+            f"{header_line}-{pinned_last_line}"
+        ),
+    )
+    assert tables[:table_index] == listing_tables[program_id][:table_index]
+    assert all(table.problems == () for table in tables[:table_index])
+    _assert_listing_failure_propagates(
+        program_id, tables, table_index, listing_tables[program_id], results[program_id], tolerances
+    )
+    assert file_state(reference) == before
+
+
+@pytest.mark.parametrize(
+    "program_id, page_end, header_line, table_index",
+    [
+        pytest.param(PROGRAM_07_02, 14, 8, 2, id="07.02-unexpected-third-table"),
+        pytest.param(PROGRAM_07_07, 16, 10, 6, id="07.07-unexpected-seventh-table"),
+    ],
+)
+def test_s02_mod_02_s07_mod_02_unexpected_listing_table_fails(
+    program_id: str,
+    page_end: int,
+    header_line: int,
+    table_index: int,
+    tmp_path: Path,
+    repo_paths: RepoPaths,
+    file_state: Callable[[Path], object],
+    listing_tables: Mapping[str, tuple[ListingTable, ...]],
+    results: Mapping[str, ProgramResult],
+    tolerances: compare.Tolerances,
+) -> None:
+    """An extra complete table adds one unstratified FAIL to each comparison group.
+
+    Append the first page [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst:1-14] or
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.lst:1-16] (S02-MOD-02, S07-MOD-02,
+    S02-TRN-05, S07-TRN-08), leaving every mapped table clean.
+    """
+    reference = repo_paths.listing_file(program_id)
+    before = file_state(reference)
+    content = reference.read_bytes()
+    assert content.endswith(b"\n")
+    lines = content.split(b"\n")[:-1]
+    copy = tmp_path / reference.name
+    copy.write_bytes(content + b"\n".join(lines[:page_end]) + b"\n")
+
+    tables = parse_glm_listing(copy)
+
+    assert len(tables) == table_index + 1
+    extra = tables[table_index]
+    assert extra.index == table_index
+    assert extra.spec is None
+    clean = listing_tables[program_id][0]
+    assert (extra.by_line, extra.dependent) == (clean.by_line, clean.dependent)
+    assert (extra.first_line, extra.last_line) == (
+        len(lines) + header_line,
+        len(lines) + page_end,
+    )
+    assert len(extra.rows) == 5
+    assert tuple((row.EFFECT, row.LEVEL) for row in extra.rows) == _PARAMETERS
+    assert extra.problems == (
+        (
+            f"table {table_index} at line {len(lines) + header_line}: unexpected table "
+            f"(the map expects {table_index})"
+        ),
+    )
+    assert tables[:table_index] == listing_tables[program_id]
+    assert all(table.problems == () for table in tables[:table_index])
+    _assert_listing_failure_propagates(
+        program_id, tables, table_index, listing_tables[program_id], results[program_id], tolerances
+    )
+    assert file_state(reference) == before
+
+
+@pytest.mark.parametrize(
+    "old, new, problem",
+    [
+        pytest.param(
+            "3.90872985",
+            "3.9O872985",
+            "unrecognised displayed values 3.9O872985",
+            id="invalid-stderr-token",
+        ),
+        pytest.param(
+            "8.53",
+            "8.O3",
+            "unrecognised displayed values 8.O3",
+            id="invalid-tvalue-token",
+        ),
+        pytest.param(
+            "<.0001",
+            "<0.0001",
+            "unrecognised displayed values <0.0001",
+            id="invalid-pvalue-bound",
+        ),
+        pytest.param(
+            "8.53",
+            "",
+            "expected 3 values or none after the estimate, found 2",
+            id="missing-tvalue-token",
+        ),
+    ],
+)
+def test_s02_mod_02_rejected_listing_tokens_fail(
+    old: str,
+    new: str,
+    problem: str,
+    tmp_path: Path,
+    repo_paths: RepoPaths,
+    file_state: Callable[[Path], object],
+    listing_tables: Mapping[str, tuple[ListingTable, ...]],
+    results: Mapping[str, ProgramResult],
+    tolerances: compare.Tolerances,
+) -> None:
+    """Reject malformed SE, t or p tokens, retaining all expected comparisons as FAIL.
+
+    Edit only the Intercept [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst:10]; the row is
+    rejected, so S02-MOD-02's parameter sequence also differs, and S02-TRN-05's three merged
+    cells fail even though their own TRTPN listing rows are unchanged.
+    """
+    reference = repo_paths.listing_file(PROGRAM_07_02)
+    before = file_state(reference)
+    original = reference.read_bytes().split(b"\n")[9].decode("latin-1").rstrip(" ")
+    edited_line = original.replace(old, new, 1)
+    copy = _edited_line_copy(reference, tmp_path, 10, old, new)
+
+    tables = parse_glm_listing(copy)
+
+    assert len(tables) == 2
+    rejected = tables[0]
+    assert rejected.index == 0
+    assert rejected.spec is GLM_TABLE_MAP[PROGRAM_07_02][0]
+    assert (rejected.by_line, rejected.dependent) == (None, "CHG")
+    assert (rejected.first_line, rejected.last_line) == (8, 14)
+    assert len(rejected.rows) == 4
+    assert all(row.line != 10 and row.PARAMETER != "Intercept" for row in rejected.rows)
+    assert rejected.rows == listing_tables[PROGRAM_07_02][0].rows[1:]
+    assert rejected.problems == (
+        f"table 0: line 10: {problem}: {edited_line}",
+        (
+            "table 0: parameter rows (BASE, TRTPN 54, TRTPN 81, TRTPN 0) differ from the expected "
+            "(INTERCEPT, BASE, TRTPN 54, TRTPN 81, TRTPN 0)"
+        ),
+    )
+    assert tables[1] == listing_tables[PROGRAM_07_02][1]
+    assert tables[1].problems == ()
+    _assert_listing_failure_propagates(
+        PROGRAM_07_02, tables, 0, listing_tables[PROGRAM_07_02], results[PROGRAM_07_02], tolerances
+    )
     assert file_state(reference) == before
 
 
