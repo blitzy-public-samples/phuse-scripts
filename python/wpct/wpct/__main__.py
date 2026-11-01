@@ -46,7 +46,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from wpct import compare, export, provenance, report, sas_reference
-from wpct.errors import AnalysisHalted, InputDataError, OutputPathError
+from wpct.errors import AnalysisHalted, InputDataError, OutputPathError, message_path
 from wpct.paths import RepoPaths
 from wpct.programs import ProgramResult, wpct_f_07_02, wpct_f_07_07
 from wpct.schemas import PROGRAM_07_02, PROGRAM_07_07
@@ -195,12 +195,13 @@ def reproduce(paths: RepoPaths, sas_exports_dir: str | os.PathLike[str] | None =
 
     exports_dir = paths.sas_exports_dir if sas_exports_dir is None else Path(sas_exports_dir)
     if sas_exports_dir is not None:
+        shown = message_path(exports_dir.absolute())
         try:
             is_directory = exports_dir.is_dir()
         except OSError as exc:
-            return _error(f"--sas-exports: cannot access {exports_dir.absolute()}: {exc}")
+            return _error(f"--sas-exports: cannot access {shown}: {exc}")
         if not is_directory:
-            return _error(f"--sas-exports: not an existing directory: {exports_dir.absolute()}")
+            return _error(f"--sas-exports: not an existing directory: {shown}")
 
     try:
         tolerances = compare.load_tolerances(paths.tolerances_file)

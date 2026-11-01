@@ -52,6 +52,7 @@ import json
 import math
 import os
 import re
+import stat
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,8 +218,10 @@ def _validate_tolerances(raw: Mapping[str, Any]) -> None:
 
     Each class holds only the keys this module reads, so the report's tolerance table cannot show
     a value no comparison applies; the field lists come from ``wpct.schemas``, never from the file.
-    An object of the wrong JSON type (a class that is not an object, a flag that is not a boolean)
-    raises ``TypeError`` instead; :func:`load_tolerances` reports both as ``ValueError``.
+    A fixed rule takes only its one value: ``counts.limit`` 0 and ``true`` for
+    ``categorical.strip_trailing_blanks``. An object of the wrong JSON type (a class that is not
+    an object, a flag that is not a boolean) raises ``TypeError`` instead; :func:`load_tolerances`
+    reports both as ``ValueError``.
     """
     where = "tolerances.json"
     if not isinstance(raw, Mapping):
@@ -304,6 +307,12 @@ def _validate_tolerances(raw: Mapping[str, Any]) -> None:
             f"{where}: classes.counts.limit must be 0, got {counts_limit!r}; counts are compared "
             "by exact integer equality"
         )
+    if classes["categorical"]["strip_trailing_blanks"] is not True:
+        raise ValueError(
+            f"{where}: classes.categorical.strip_trailing_blanks must be true, got false; SAS "
+            "character comparisons ignore trailing blanks (D-11) and the SAS export loader strips "
+            "them, so keys and categorical fields always compare without them"
+        )
     missing_rule = classes["missing"]
     for key in ("both_missing", "one_missing"):
         if missing_rule[key] not in (PASS, FAIL):
@@ -379,7 +388,11 @@ class Tolerances:
 
     @property
     def strip_trailing_blanks(self) -> bool:
-        """``categorical.strip_trailing_blanks``: whether text compares without trailing blanks."""
+        """``categorical.strip_trailing_blanks``: text compares without trailing blanks.
+
+        It is always true; construction rejects false, because SAS character comparisons ignore
+        trailing blanks (D-11) and the SAS export loader strips them.
+        """
         return bool(self.entry("categorical")["strip_trailing_blanks"])
 
     @property
@@ -447,22 +460,74 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+#: The most bytes :func:`load_tolerances` accepts. The shipped ``tolerances.json`` is about 2.5 KB;
+#: the cap keeps a huge or sparse regular file from exhausting memory.
+_MAX_TOLERANCE_FILE_BYTES = 1 << 20
+
+#: ``os.open`` flags of the tolerance file, which follow symlinks: read-only and binary, without
+#: waiting on a FIFO's writer, closed in child processes, never made the controlling terminal.
+_TOLERANCE_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOCTTY", 0)
+)
+
+
+def _read_tolerance_bytes(abs_path: Path) -> bytes:
+    """Return the bytes of the regular file at ``abs_path``, reached through any symlinks.
+
+    The file type is checked on the opened descriptor, so the file read is the file checked. The
+    open never waits on a FIFO's writer, and at most one byte beyond
+    :data:`_MAX_TOLERANCE_FILE_BYTES` is read, so a FIFO, a device or a huge file fails at once.
+    The descriptor is closed on every path.
+
+    Raises:
+        OSError: The file cannot be opened, examined or read; the message names ``abs_path``.
+        ValueError: The opened file is not a regular file, or it is larger than the cap. The
+            message gives the reason alone; :func:`load_tolerances` adds the path.
+    """
+    descriptor = os.open(abs_path, _TOLERANCE_OPEN_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("not a regular file")
+        if getattr(os, "O_NONBLOCK", 0):
+            # O_NONBLOCK only kept the open from waiting on a FIFO; a regular file is read as usual.
+            os.set_blocking(descriptor, True)
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            data = stream.read(_MAX_TOLERANCE_FILE_BYTES + 1)
+    except OSError as exc:
+        # Errors on an open descriptor carry no file name; give the one the open was made with.
+        raise OSError(exc.errno, exc.strerror or str(exc), str(abs_path)) from exc
+    finally:
+        os.close(descriptor)
+    if len(data) > _MAX_TOLERANCE_FILE_BYTES:
+        raise ValueError(f"larger than {_MAX_TOLERANCE_FILE_BYTES} bytes")
+    return data
+
+
 def load_tolerances(path: str | os.PathLike[str]) -> Tolerances:
     """Read and validate ``tolerances.json``, the single tolerance source (AAP 0.7.1).
 
+    A symlink is followed to the file it names. A file that is not a regular file, or is larger than
+    1 MiB, fails at once without being read in full.
+
     Raises:
         OSError: The file cannot be opened or read; the message names the absolute path.
-        ValueError: The file is not UTF-8, is not valid JSON, nests too deeply to parse, repeats a
-            key, or lacks, mistypes or adds a class or key; the message names the absolute path
-            and, where one applies, the key.
+        ValueError: The file is not a regular file (a FIFO, a device or a directory, after
+            following symlinks), is larger than 1 MiB, is not UTF-8, is not valid JSON, nests too
+            deeply to parse, repeats a key, or lacks, mistypes or adds a class or key; the message
+            names the absolute path and, where one applies, the key.
     """
     abs_path = Path(path).absolute()
     try:
-        text = abs_path.read_text(encoding="utf-8")
+        text = _read_tolerance_bytes(abs_path).decode("utf-8")
         raw = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
         return Tolerances(raw=raw)
-    # UnicodeDecodeError and json.JSONDecodeError are ValueErrors; a value nested deeper than the
-    # interpreter's recursion limit makes the parser raise RecursionError. OSError passes through.
+    # The reader's refusals, UnicodeDecodeError and json.JSONDecodeError are ValueErrors; a value
+    # nested deeper than the interpreter's recursion limit makes the parser raise RecursionError.
+    # OSError passes through.
     except (RecursionError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid tolerance file {abs_path}: {exc}") from exc
 
@@ -569,7 +634,9 @@ def _exact_outcome(equal: bool, tolerance: str) -> RuleOutcome:
 
 
 def check_categorical(py: object, sas: object, tolerances: Tolerances) -> RuleOutcome:
-    """``categorical`` class: exact equality, trailing blanks stripped when the file says so.
+    """``categorical`` class: exact equality, trailing blanks always stripped.
+
+    The file's ``strip_trailing_blanks`` must be true, as :class:`Tolerances` enforces.
 
     Two numbers compare exactly as numbers (``815`` equals ``815.0``); anything else compares as
     text. A blank string is the SAS character missing value.

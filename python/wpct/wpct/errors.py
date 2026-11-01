@@ -32,20 +32,57 @@ so any module may depend on it.
   a single hard link, is refused before it is opened. A destination that
   becomes one of those after that check is refused as it is opened, before it
   is truncated.
+
+``message_path`` renders a path for an error message on one line; the
+``InputDataError`` messages of ``sas_reference`` and the command line's
+``--sas-exports`` checks show their paths through it.
 """
 
 from __future__ import annotations
 
 import functools
 import os
+import unicodedata
 from pathlib import Path
 
-__all__ = ["AnalysisHalted", "InputDataError", "OutputPathError", "WpctError"]
+__all__ = ["AnalysisHalted", "InputDataError", "OutputPathError", "WpctError", "message_path"]
 
 _PERMITTED_DESTINATIONS = (
     "only python/wpct/outputs/** and python/wpct/reports/equivalence_report.md "
     "under the write root are permitted"
 )
+
+#: Unicode categories ``message_path`` escapes: control characters, which hold
+#: every line break but U+2028 and U+2029; those two separators; and the lone
+#: surrogates that stand for undecodable file-name bytes.
+_ESCAPED_CATEGORIES = frozenset({"Cc", "Cs", "Zl", "Zp"})
+
+
+def message_path(path: str | os.PathLike[str]) -> str:
+    """Return ``path`` as text for a one-line message, control characters escaped.
+
+    Each character of Unicode category Cc, Cs, Zl or Zp is replaced by its Python
+    escape: a line break becomes ``\\n``, a carriage return ``\\r``, a tab
+    ``\\t``, ESC ``\\x1b``, U+2028 ``\\u2028`` and an undecodable file-name byte
+    ``\\udcff``. No character is left that ``str.splitlines`` splits on, and no
+    control character a terminal would act on. Every other character, the
+    backslash included, is kept, so an ordinary path renders exactly as
+    ``str(path)`` and a Windows path stays readable; a path that already holds a
+    backslash and an ``n`` therefore reads like one holding a line break.
+
+    Raises:
+        TypeError: When ``path`` is not a ``str`` or a path-like object giving a
+            ``str``.
+    """
+    text = os.fspath(path)
+    if not isinstance(text, str):
+        raise TypeError(f"path must be a str or str path-like, got {type(text).__name__}")
+    return "".join(
+        char.encode("unicode_escape").decode("ascii")
+        if unicodedata.category(char) in _ESCAPED_CATEGORIES
+        else char
+        for char in text
+    )
 
 
 class WpctError(Exception):
@@ -88,6 +125,10 @@ class InputDataError(WpctError):
     * ``"WPCT-F.07.02: <absolute path> has required variables of the wrong
       type: SAFFL (numeric; character expected)"``
     * ``"SAS export directory is not a directory: <absolute path>"``
+
+    ``sas_reference`` renders each path in its messages with
+    :func:`message_path`, so a control character in a path, such as a line break,
+    is shown escaped and the message stays one line.
 
     SAS counterparts: ``ERROR: (UTIL_ACCESS_TEST_DATA) Please confirm that data
     set ADVS exists in transport file ADVS.``

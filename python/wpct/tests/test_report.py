@@ -24,7 +24,8 @@ Tolerances (Agent Action Plan 0.7.1): the table prints the ``compare.Tolerances`
 comparison groups were judged under, which ``write_report`` takes from the groups rather than
 re-reading ``tolerances.json``, and its field lists come from ``wpct.schemas``. Its Settings column
 shows each class's remaining keys as the ``compare.Tolerances`` accessors apply them, a changed
-setting included. An invalid tolerance file fails to load with its absolute path named.
+setting included. An invalid tolerance file, one that is not a regular file or is larger than
+1 MiB included, fails to load with its absolute path named; a symlink to a regular file loads.
 
 Failure reasons (Agent Action Plan 0.9.2): every FAIL of a primitive rule of ``wpct.compare``
 carries a reason that names neither compared value, and a failed row's reason reaches the report's
@@ -35,9 +36,10 @@ its only option. Exit code 0 means no comparison failed and no program halted. E
 comparison failed or a program halted (S07-FLT-04): the halted program exports nothing, while the
 other program's exports and the report recording the halt are still written. Exit code 2 means an
 input error or a rejected destination: a ``--sas-exports`` that is not an existing directory, a
-malformed SAS export or a missing input dataset writes nothing, because every input is read before
-any write; a destination the guard refuses stops the run at that writer call, which opens none of
-its targets, while files of earlier successful writer calls remain.
+tolerance file that is a FIFO, a malformed SAS export or a missing input dataset writes nothing,
+because every input is read before any write; a destination the guard refuses stops the run at
+that writer call, which opens none of its targets, while files of earlier successful writer calls
+remain.
 
 Write policy (Agent Action Plan 0.8): every report this module writes goes through the
 ``write_paths`` fixture, whose write root lies under pytest's ``tmp_path``; ``reproduce`` is called
@@ -711,7 +713,7 @@ def test_s02_and_s07_mod_01_tolerance_table_rendered_from_file(
     assert file_state(tolerance_file) == file_before
 
 
-def test_d11_changed_tolerance_setting_rendered(
+def test_s02_mod_02_and_d06_changed_tolerance_setting_rendered(
     written: _Written,
     results: Mapping[str, object],
     listing_tables: Mapping[str, Sequence[object]],
@@ -722,30 +724,32 @@ def test_d11_changed_tolerance_setting_rendered(
 ) -> None:
     """A changed configurable setting reaches its Settings cell; nothing else in the table moves.
 
-    A copy of the loaded tolerances takes a rounded-listing epsilon of :data:`_SETTINGS_EPSILON`
-    and the opposite of the trailing-blank rule for keys and categorical fields, which by default
-    strips trailing blanks because SAS character comparisons ignore them (D-11). Both are settings
-    a user changes by editing ``tolerances.json`` alone (Agent Action Plan 0.7.1). The
-    clean-checkout comparisons judged under that copy render both new values, read back as the
-    copy's accessors apply them, and every other cell of every row as before, so the Settings
-    column is rendered from the applied tolerances and not written by hand (Agent Action Plan
-    0.9.5). Neither the session tolerances nor ``tolerances.json`` itself changes.
+    A copy of the loaded tolerances takes a rounded-listing epsilon of :data:`_SETTINGS_EPSILON`,
+    part of the allowance of the listing ParameterEstimates values (S02-MOD-02), and the opposite
+    ``missing.both_missing`` outcome, which decides the listing cells SAS leaves missing for an
+    aliased column such as ``TRTPN 0`` (D-06). Both are settings a user changes by editing
+    ``tolerances.json`` alone (Agent Action Plan 0.7.1). The clean-checkout comparisons judged
+    under that copy render both new values, read back as the copy's accessors apply them, and
+    every other cell of every row as before, so the Settings column is rendered from the applied
+    tolerances and not written by hand (Agent Action Plan 0.9.5). Neither the session tolerances
+    nor ``tolerances.json`` itself changes.
     """
     tolerance_file = repo_paths.tolerances_file
     file_before = file_state(tolerance_file)
     loaded = compare.load_tolerances(tolerance_file).to_dict()
     assert float(loaded["classes"]["rounded_listing"]["epsilon"]) != _SETTINGS_EPSILON
-    strip_trailing_blanks = not loaded["classes"]["categorical"]["strip_trailing_blanks"]
+    opposite = {compare.PASS: compare.FAIL, compare.FAIL: compare.PASS}
+    both_missing = opposite[loaded["classes"]["missing"]["both_missing"]]
     changed = {
         ("rounded_listing", "epsilon"): _SETTINGS_EPSILON,
-        ("categorical", "strip_trailing_blanks"): strip_trailing_blanks,
+        ("missing", "both_missing"): both_missing,
     }
     edited = tolerances.to_dict()
     for (class_key, name), value in changed.items():
         edited["classes"][class_key][name] = value
     modified = compare.Tolerances.from_mapping(edited)
     assert modified.epsilon == _SETTINGS_EPSILON
-    assert modified.strip_trailing_blanks is strip_trailing_blanks
+    assert modified.both_missing == both_missing
 
     modified_comparisons = _clean_comparisons_under(
         modified, results, listing_tables, sas_checkpoints
@@ -808,6 +812,11 @@ def test_d11_changed_tolerance_setting_rendered(
             id="fields_in_file",
         ),
         pytest.param(_setting("counts", "limit", 1), "classes.counts.limit", id="counts_limit_1"),
+        pytest.param(
+            _setting("categorical", "strip_trailing_blanks", False),
+            "classes.categorical.strip_trailing_blanks",
+            id="strip_trailing_blanks_false",
+        ),
         pytest.param(_setting(None, "comment", "extra"), "'comment'", id="unknown_top_level_key"),
         pytest.param(
             _setting(None, "description", ["not", "text"]), "description", id="description_list"
@@ -827,10 +836,12 @@ def test_s02_and_s07_mod_01_load_tolerances_rejects_invalid_file(
     nesting beyond the parser's recursion limit, a key the class does not read (a ``limit`` of
     ``categorical`` or ``rounded_listing``, or a field list, which only ``wpct.schemas`` holds,
     here the summary-statistics fields, the S02-MOD-01 and S07-MOD-01 statistics ``mean`` to
-    ``q3``), a counts limit other than 0 (counts compare by exact integer equality), an unknown
-    top-level key, and a description that is not a string. Loading raises ``ValueError``, which
-    the command line reports with exit code 2, and the message names the absolute file path and
-    the offending key where there is one; it never repeats the 401-digit integer.
+    ``q3``), a counts limit other than 0 (counts compare by exact integer equality), a
+    trailing-blank rule other than stripping (SAS character comparisons ignore trailing blanks,
+    D-11, and the SAS export loader strips them), an unknown top-level key, and a description that
+    is not a string. Loading raises ``ValueError``, which the command line reports with exit code
+    2, and the message names the absolute file path and the offending key where there is one; it
+    never repeats the 401-digit integer.
     """
     target = tmp_path / "tolerances.json"
     target.write_bytes(edit(compare.load_tolerances(repo_paths.tolerances_file).to_dict()))
@@ -843,6 +854,70 @@ def test_s02_and_s07_mod_01_load_tolerances_rejects_invalid_file(
     if named is not None:
         assert named in message
     assert str(_HUGE_INTEGER) not in message
+
+
+@pytest.mark.parametrize("entry", ["fifo", "char_device_symlink", "directory", "oversized"])
+def test_s02_and_s07_mod_01_load_tolerances_rejects_non_regular_file(
+    entry: str, repo_paths: RepoPaths, tmp_path: Path
+) -> None:
+    """A tolerance file that is not a regular file, or is too large, fails at once.
+
+    ``tolerances.json`` under ``tmp_path`` is a FIFO that no process writes (``fifo``), a symlink
+    to the null character device (``char_device_symlink``), a directory (``directory``), or the
+    repository file padded with blanks, still valid JSON, to one byte beyond the loader's 1 MiB
+    cap (``oversized``). ``compare.load_tolerances`` checks the file it opened before reading it
+    and reads at most one byte beyond the cap, so it neither waits for a FIFO's writer nor reads a
+    device or a huge file in full. It raises ``ValueError``, which the command line reports with
+    exit code 2, and the message names the absolute file path and the reason.
+    """
+    target = tmp_path / "tolerances.json"
+    cap = compare._MAX_TOLERANCE_FILE_BYTES
+    reason = "not a regular file"
+    if entry == "fifo":
+        _fifo(target)
+    elif entry == "char_device_symlink":
+        if not Path(os.devnull).is_char_device():
+            pytest.skip(f"{os.devnull} is not a character device on this platform")
+        _symlink(target, Path(os.devnull))
+    elif entry == "directory":
+        target.mkdir()
+    else:
+        source = repo_paths.tolerances_file.read_bytes()
+        target.write_bytes(source + b" " * (cap + 1 - len(source)))
+        reason = f"larger than {cap} bytes"
+
+    with pytest.raises(ValueError) as excinfo:
+        compare.load_tolerances(target)
+
+    assert str(excinfo.value) == f"invalid tolerance file {target.absolute()}: {reason}"
+
+
+@pytest.mark.parametrize("entry", ["symlink_to_regular_file", "regular_file_at_cap"])
+def test_s02_and_s07_mod_01_load_tolerances_reads_regular_file(
+    entry: str, repo_paths: RepoPaths, tolerances: compare.Tolerances, tmp_path: Path
+) -> None:
+    """A regular tolerance file within the size cap loads, also when a symlink leads to it.
+
+    - ``symlink_to_regular_file``: ``tolerances.json`` under ``tmp_path`` is a symlink to a byte
+      copy of the repository file, and the loader follows it.
+    - ``regular_file_at_cap``: ``tolerances.json`` is the repository file padded with blanks to
+      exactly the loader's 1 MiB cap.
+
+    Either loads to the session ``tolerances``.
+    """
+    target = tmp_path / "tolerances.json"
+    source = repo_paths.tolerances_file.read_bytes()
+    if entry == "symlink_to_regular_file":
+        copy = tmp_path / "copy" / "tolerances.json"
+        copy.parent.mkdir()
+        copy.write_bytes(source)
+        _symlink(target, copy)
+    else:
+        cap = compare._MAX_TOLERANCE_FILE_BYTES
+        target.write_bytes(source + b" " * (cap - len(source)))
+        assert target.stat().st_size == cap
+
+    assert compare.load_tolerances(target).to_dict() == tolerances.to_dict()
 
 
 def test_s02_and_s07_mod_01_write_report_renders_applied_tolerances(
@@ -2479,26 +2554,79 @@ def test_env03_reproduce_under_write_root(
         assert list(exports_dir.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    "name, shown",
+    [("no_such_exports", "no_such_exports"), ("missing\ndir", "missing\\ndir")],
+    ids=["plain-path", "newline-in-path"],
+)
 def test_s02_and_s07_dep_assert_continue_reproduce_rejects_missing_sas_exports_dir(
-    write_paths: RepoPaths, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    name: str,
+    shown: str,
+    write_paths: RepoPaths,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A ``--sas-exports`` that is not an existing directory is an input error: exit 2, no writes.
 
     The check runs before anything is read or written, so the write root stays empty and the named
     directory is not created. That is the outcome the specification gives an input error after a
     failed dependency assertion (S02-DEP-assert_continue, S07-DEP-assert_continue): the error on
-    stderr, exit code 2 and nothing written.
+    stderr, exit code 2 and nothing written. The error is one stderr line naming the absolute
+    path, a line break in it shown as ``\\n``.
     """
-    missing = tmp_path / "no_such_exports"
+    missing = tmp_path / name
 
     code = cli.reproduce(write_paths, missing)
 
     assert code == cli.EXIT_INPUT_ERROR == 2
-    err = capsys.readouterr().err
-    assert "not an existing directory" in err
-    assert str(missing) in err
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        f"{_CLI_ERROR_PREFIX}--sas-exports: not an existing directory: "
+        f"{(tmp_path / shown).absolute()}\n"
+    )
     assert _tree(write_paths.write_root) == {}
     assert not missing.exists()
+
+
+def test_s02_and_s07_mod_01_reproduce_rejects_fifo_tolerance_file(
+    write_paths: RepoPaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A FIFO tolerance file makes ``reproduce`` exit 2 at once and write nothing (AAP 0.6.5).
+
+    ``reproduce`` loads ``write_paths.tolerances_file``, which lies in the checkout, so the test
+    leaves that file alone: the real ``compare.load_tolerances`` gets a FIFO under ``tmp_path``
+    that no process writes in its place. Loading fails without waiting for a writer, before either
+    driver runs. stdout stays empty, stderr carries one error line naming the FIFO's absolute path
+    as not a regular file, and the write root stays empty.
+    """
+    fifo = tmp_path / "tolerances.json"
+    _fifo(fifo)
+    load = compare.load_tolerances
+    requested: list[Path] = []
+
+    def load_fifo(path: str | os.PathLike[str]) -> compare.Tolerances:
+        requested.append(Path(path))
+        return load(fifo)
+
+    monkeypatch.setattr(compare, "load_tolerances", load_fifo)
+    runs = _cli_watch_drivers(monkeypatch, {})
+
+    code = cli.reproduce(write_paths)
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_INPUT_ERROR == 2, captured.err
+    assert captured.out == ""
+    assert requested == [write_paths.tolerances_file]
+    assert runs == []
+    refusal = f"invalid tolerance file {fifo.absolute()}: not a regular file"
+    assert _cli_errors(captured.err) == [
+        f"{_CLI_ERROR_PREFIX}cannot load the tolerances: {refusal}"
+    ]
+    assert _tree(write_paths.write_root) == {}
 
 
 #: The stderr prefix of every error ``reproduce`` reports before it returns exit code 2.

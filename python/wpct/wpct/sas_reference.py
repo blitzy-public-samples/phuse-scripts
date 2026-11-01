@@ -52,7 +52,7 @@ from types import MappingProxyType
 import numpy as np
 import pandas as pd
 
-from wpct.errors import InputDataError
+from wpct.errors import InputDataError, message_path
 from wpct.sas_semantics import is_char_missing
 from wpct.schemas import (
     INT,
@@ -127,26 +127,22 @@ def _read_reference_lines(path: str | os.PathLike[str], what: str) -> tuple[str,
     line; a final LF does not start another line.
     """
     abs_path = Path(path).absolute()
+    shown = message_path(abs_path)
     try:
         is_file = abs_path.is_file()
     except OSError as exc:
         # pathlib reports a missing path as False but raises for other stat failures.
-        raise InputDataError(f"cannot read {what} {abs_path}: {exc}") from exc
+        raise InputDataError(f"cannot read {what} {shown}: {exc}") from exc
     if not is_file:
-        raise InputDataError(f"{what} not found: {abs_path}")
+        raise InputDataError(f"{what} not found: {shown}")
     try:
         text = abs_path.read_bytes().decode("latin-1")
     except OSError as exc:
-        raise InputDataError(f"cannot read {what} {abs_path}: {exc}") from exc
+        raise InputDataError(f"cannot read {what} {shown}: {exc}") from exc
     lines = text.split("\n")
     if lines[-1] == "":
         lines.pop()
     return tuple(line.rstrip("\r").rstrip(" ") for line in lines)
-
-
-def _shown(text: str) -> str:
-    """Render a log or listing line inside a problem message."""
-    return text if text else "(blank line)"
 
 
 # --- Log checkpoints ------------------------------------------------------------------------------
@@ -180,6 +176,33 @@ _TABLE_NOTE = re.compile(
     r"and (?P<nvars>\d+) columns\.$"
 )
 _NOTE_PATTERNS = MappingProxyType({KIND_DATASET: _DATASET_NOTE, KIND_TABLE: _TABLE_NOTE})
+
+# The SAS message tag that starts a log line, with the parenthesised macro tag that may follow it,
+# such as ``WARNING: (DERIVE_LASTMINMAX_MEASURES)``. Each part must end at a blank or the line
+# end, so no part of a ``name=value`` token is ever matched.
+_LOG_TAG = re.compile(r"^(?:NOTE|WARNING|ERROR|INFO):(?: \([A-Za-z_][A-Za-z0-9_]{0,31}\))?(?= |$)")
+
+
+def _described_line(text: str) -> str:
+    """Describe a log line inside a problem message without echoing a value the line prints.
+
+    A problem becomes a FAIL reason of the committed equivalence report, which holds only
+    aggregates, estimates, counts and record keys (AAP 0.11.2), yet a log line can print
+    subject-level values: ``put _all_`` writes ``name=value`` pairs such as ``USUBJID=`` and
+    ``AVAL=`` on a WARNING line and its continuation lines, and SAS prints ERROR put lists and
+    invalid-data dumps the same way. A line is therefore quoted in full only when it is wholly a
+    dataset or table NOTE of ``_NOTE_PATTERNS``, whose only variable parts are a WORK dataset name
+    and two counts. Any other line is shown by the SAS message and macro tags it starts with
+    (``_LOG_TAG``), or else as a line of another form, and its text is not shown.
+    """
+    if not text:
+        return "(blank line)"
+    if any(pattern.fullmatch(text) for pattern in _NOTE_PATTERNS.values()):
+        return text
+    tag = _LOG_TAG.match(text)
+    if tag:
+        return f"a {tag[0]!r} line (text not shown)"
+    return "a line of another form (text not shown)"
 
 
 @dataclass(frozen=True)
@@ -258,10 +281,14 @@ class SasCheckpoint:
         NOBS: The observation (or row, or WARNING) count read from the log; ``None`` unless ``ok``.
         NVARS: The variable count, filled only where ``spec.has_nvars`` and ``ok``.
         line_text: The pinned line as read, without trailing blanks; ``""`` beyond the end of the
-            log. For a ``warning_count``, the first line of the range.
+            log. For a ``warning_count``, the first line of the range. It can hold the
+            subject-level values a log line prints, so no message or report shows it.
         ok: True when the line names ``WORK.<SAS_DATASET>`` in the expected NOTE form, or, for a
             ``warning_count``, when both ends of the range are counted WARNING lines.
         problem: Why ``ok`` is False, otherwise ``None``; ``wpct.compare`` reports it as a FAIL.
+            It names the line and the expected ``WORK.<SAS_DATASET>`` or WARNING prefix, and
+            quotes the line found there only when it is a dataset or table NOTE: any other line is
+            shown by its SAS message tag or its form, never its text.
     """
 
     spec: LogCheckpointSpec
@@ -448,7 +475,12 @@ def parse_log_checkpoints(
     Returns:
         One :class:`SasCheckpoint` per entry, in map order. A ``dataset`` or ``table`` line is
         ``ok`` only when it is a NOTE of that kind naming ``WORK.<SAS_DATASET>``; otherwise it
-        carries ``"line <n> does not name WORK.<X>: <text>"`` and no counts.
+        carries ``"line <n> does not name WORK.<X>: <line>"`` and no counts. A ``warning_count``
+        is ``ok`` only when both ends of its range start its WARNING prefix; otherwise it carries
+        ``"line <n> does not start the warning '<prefix>': <line>"`` for each end that does not,
+        and no count. ``<line>`` is the line in full when it is a dataset or table NOTE,
+        ``(blank line)``, or its SAS message tag or form with its text not shown, since a log line
+        can print subject-level values.
 
     Raises:
         InputDataError: ``"reference log not found: <absolute path>"`` when the path is not a
@@ -496,7 +528,7 @@ def _read_checkpoint(spec: LogCheckpointSpec, lines: tuple[str, ...]) -> SasChec
             NVARS=None,
             line_text=text,
             ok=False,
-            problem=f"line {spec.line} does not name {expected}: {_shown(text)}",
+            problem=f"line {spec.line} does not name {expected}: {_described_line(text)}",
         )
     return SasCheckpoint(
         spec=spec,
@@ -514,7 +546,9 @@ def _count_warnings(spec: LogCheckpointSpec, lines: tuple[str, ...]) -> SasCheck
 
     Both ends of the range must themselves be counted WARNING lines, not merely hold at least one
     between them: that pins the range as tightly as a NOTE line is pinned, so a shifted log is
-    reported as a FAIL rather than counted over the wrong lines.
+    reported as a FAIL rather than counted over the wrong lines. Each end that fails is named with
+    the prefix it lacks and described by ``_described_line``, which never echoes a ``name=value``
+    pair that ``put _all_`` printed on it.
     """
     prefix = WARNING_COUNT_PREFIXES[spec.SAS_DATASET]
     if spec.end_line > len(lines):
@@ -532,7 +566,7 @@ def _count_warnings(spec: LogCheckpointSpec, lines: tuple[str, ...]) -> SasCheck
         )
     first, last = lines[spec.line - 1], lines[spec.end_line - 1]
     problems = [
-        f"line {number} does not start the warning {prefix!r}: {_shown(text)}"
+        f"line {number} does not start the warning {prefix!r}: {_described_line(text)}"
         for number, text in ((spec.line, first), (spec.end_line, last))
         if not text.startswith(prefix)
     ]
@@ -1170,36 +1204,39 @@ def load_sas_exports(
             precision (``1E999`` overflowing to infinity, or a nonzero ``1E-999`` underflowing
             to zero); or is a parameter-estimates export without a usable ``Parameter`` column.
             Every message is one line naming the directory or file at fault, and the header
-            field, column or data row where there is one, never a value from the file.
+            field, column or data row where there is one, never a value from the file. A
+            control character in the path, such as a line break, is shown escaped (``\\n``).
     """
     root = Path(dir).absolute()
+    shown_root = message_path(root)
     exports: dict[str, pd.DataFrame | None] = dict.fromkeys(SAS_EXPORT_FILES)
     # ``exists`` follows symlinks and is False for a dangling or looping one, while ``lexists``
     # sees the entry itself: only an entry that is not there at all is an absent export.
     try:
         exists, is_dir = root.exists(), root.is_dir()
     except OSError as exc:
-        raise InputDataError(f"cannot read SAS export directory {root}: {exc}") from exc
+        raise InputDataError(f"cannot read SAS export directory {shown_root}: {exc}") from exc
     if not exists:
         if os.path.lexists(root):
             raise InputDataError(
-                f"cannot read SAS export directory {root}: broken or looping symlink"
+                f"cannot read SAS export directory {shown_root}: broken or looping symlink"
             )
         return exports
     if not is_dir:
-        raise InputDataError(f"SAS export directory is not a directory: {root}")
+        raise InputDataError(f"SAS export directory is not a directory: {shown_root}")
     for file_name in SAS_EXPORT_FILES:
         path = root / file_name
+        shown = message_path(path)
         try:
             exists, is_file = path.exists(), path.is_file()
         except OSError as exc:
-            raise InputDataError(f"cannot read SAS export {path}: {exc}") from exc
+            raise InputDataError(f"cannot read SAS export {shown}: {exc}") from exc
         if not exists:
             if os.path.lexists(path):
-                raise InputDataError(f"cannot read SAS export {path}: broken or looping symlink")
+                raise InputDataError(f"cannot read SAS export {shown}: broken or looping symlink")
             continue
         if not is_file:
-            raise InputDataError(f"SAS export is not a regular file: {path}")
+            raise InputDataError(f"SAS export is not a regular file: {shown}")
         exports[file_name] = _load_export(path, file_name)
     return exports
 
@@ -1251,8 +1288,8 @@ def _read_records(path: Path) -> tuple[list[str], list[list[str]]]:
                     _check_header(header, path)
                 elif len(record) != len(header):
                     raise InputDataError(
-                        f"SAS export {path}: data row {len(records) + 1}, ending at line "
-                        f"{reader.line_num}, has {len(record)} fields but the header has "
+                        f"SAS export {message_path(path)}: data row {len(records) + 1}, ending "
+                        f"at line {reader.line_num}, has {len(record)} fields but the header has "
                         f"{len(header)}"
                     )
                 else:
@@ -1261,9 +1298,11 @@ def _read_records(path: Path) -> tuple[list[str], list[list[str]]]:
         # csv and OS messages carry no field contents; folding whitespace keeps them on one line.
         where = f"line {reader.line_num}: " if reader is not None else ""
         reason = " ".join(str(exc).split())
-        raise InputDataError(f"cannot read SAS export {path}: {where}{reason}") from exc
+        raise InputDataError(
+            f"cannot read SAS export {message_path(path)}: {where}{reason}"
+        ) from exc
     if header is None:
-        raise InputDataError(f"SAS export {path} has no header row")
+        raise InputDataError(f"SAS export {message_path(path)} has no header row")
     return header, records
 
 
@@ -1276,7 +1315,9 @@ def _check_header(header: Sequence[str], path: Path) -> None:
     unnamed = [position for position, name in enumerate(header, start=1) if not name]
     if unnamed:
         columns = "a header column" if len(unnamed) == 1 else "header columns"
-        raise InputDataError(f"SAS export {path} has {columns} without a name: {_fields(unnamed)}")
+        raise InputDataError(
+            f"SAS export {message_path(path)} has {columns} without a name: {_fields(unnamed)}"
+        )
     positions: dict[str, list[int]] = {}
     for position, name in enumerate(upper_columns(header), start=1):
         positions.setdefault(name, []).append(position)
@@ -1287,7 +1328,7 @@ def _check_header(header: Sequence[str], path: Path) -> None:
     ]
     if duplicated:
         raise InputDataError(
-            f"SAS export {path} has columns with the same name ignoring case: "
+            f"SAS export {message_path(path)} has columns with the same name ignoring case: "
             f"{'; '.join(duplicated)}"
         )
 
@@ -1329,7 +1370,7 @@ def _sas_numbers(values: pd.Series, path: Path, column: str) -> pd.Series:
             numbers_out[position] = number
             continue
         raise InputDataError(
-            f"SAS export {path}: column {column}, data row {position + 1}: {reason}"
+            f"SAS export {message_path(path)}: column {column}, data row {position + 1}: {reason}"
         )
     return pd.Series(numbers_out, index=values.index, name=column)
 
@@ -1338,7 +1379,8 @@ def _with_effect_level(frame: pd.DataFrame, path: Path) -> pd.DataFrame:
     """Insert ``EFFECT`` and ``LEVEL``, derived from ``PARAMETER``, before ``PARAMETER``."""
     if "PARAMETER" not in frame.columns:
         raise InputDataError(
-            f"SAS export {path} lacks the Parameter column that EFFECT and LEVEL derive from"
+            f"SAS export {message_path(path)} lacks the Parameter column that EFFECT and LEVEL "
+            "derive from"
         )
     pairs = []
     for position, label in enumerate(frame["PARAMETER"]):
@@ -1346,7 +1388,8 @@ def _with_effect_level(frame: pd.DataFrame, path: Path) -> pd.DataFrame:
             pairs.append(split_parameter(label))
         except ValueError as exc:  # split_parameter's message never quotes the label.
             raise InputDataError(
-                f"SAS export {path}: column PARAMETER, data row {position + 1}: {exc}"
+                f"SAS export {message_path(path)}: column PARAMETER, data row {position + 1}: "
+                f"{exc}"
             ) from exc
     frame = frame.drop(columns=[name for name in ("EFFECT", "LEVEL") if name in frame.columns])
     at = frame.columns.get_loc("PARAMETER")

@@ -101,7 +101,7 @@ The shipped programs overwrite `CSS_STATS` and the ODS ParameterEstimates output
   * a numeric column holds a number beyond double precision: one that overflows to infinity (`1E999`), or a nonzero one that underflows to zero (`1E-999`). Zero written in any form, `-0` or `0E999` for example, still loads as zero;
   * a ParameterEstimates file has no usable `Parameter` column.
 
-  The one-line message names the folder or file at fault, and the header field, column or data row where there is one, never a value from the file.
+  The one-line message names the folder or file at fault, and the header field, column or data row where there is one, never a value from the file. A control character in a path, such as a line break, is shown as an escape (`\n`), so the message stays one line.
 * **Comparisons.** Each present file is compared on its record key with the in-memory Python result:
   * Key sets must be equal. Each key present on one side only is listed individually in the report and counted as FAIL, and so is each repeated key.
   * Record counts must match exactly, and so must the per-stratum record counts of `css_anadata` and `advs_min`.

@@ -32,7 +32,7 @@ from typing import NamedTuple
 import pytest
 
 from wpct import compare
-from wpct.errors import InputDataError
+from wpct.errors import InputDataError, message_path
 from wpct.paths import RepoPaths
 from wpct.programs import ProgramResult
 from wpct.sas_reference import (
@@ -1169,6 +1169,155 @@ def test_s02_pop_01_log_mismatch_reported(
 
 
 @pytest.mark.parametrize(
+    "text, shown",
+    [
+        (
+            "NOTE: The data set WORK.BETA has 12 observations and 3 variables.",
+            "NOTE: The data set WORK.BETA has 12 observations and 3 variables.",
+        ),
+        (
+            "NOTE: Table WORK.BETA created, with 12 rows and 3 columns.",
+            "NOTE: Table WORK.BETA created, with 12 rows and 3 columns.",
+        ),
+        ("", "(blank line)"),
+        (
+            "NOTE: The data set WORK.BETA has 12 observations and 3 variables. USUBJID=A-001",
+            "a 'NOTE:' line (text not shown)",
+        ),
+        ("NOTE: Deleting WORK.BETA (memtype=DATA).", "a 'NOTE:' line (text not shown)"),
+        (
+            f"{_OMITTED_WARNING}, such as in_base=1 in_post=0 AVAL=70 USUBJID=A-001",
+            "a 'WARNING: (DERIVE_LASTMINMAX_MEASURES)' line (text not shown)",
+        ),
+        ("ERROR: (CHECK)=1 USUBJID=A-001", "a 'ERROR:' line (text not shown)"),
+        ("INFO: USUBJID=A-001 AVAL=70", "a 'INFO:' line (text not shown)"),
+        ("NOTE:USUBJID=A-001", "a line of another form (text not shown)"),
+        (
+            "in_base=1 in_post=0 AVAL=70 ADT=01JAN2001 USUBJID=A-001",
+            "a line of another form (text not shown)",
+        ),
+    ],
+    ids=[
+        "dataset-note",
+        "table-note",
+        "blank",
+        "note-with-trailing-pair",
+        "note-with-pair",
+        "warning-with-macro-tag",
+        "error-macro-tag-with-pair",
+        "info",
+        "tag-joined-to-pair",
+        "put-continuation",
+    ],
+)
+def test_lmm_flt_02_log_problem_shows_no_line_values(
+    text: str, shown: str, tmp_path: Path
+) -> None:
+    """A problem quotes a found line only when it is a dataset or table NOTE.
+
+    The LMM-FLT-02 omitted-baseline WARNINGs print subject-level ``name=value`` pairs with
+    ``put _all_``, and a problem reaches the report as a FAIL reason, so any other line is shown by
+    its SAS message tag and macro tag, or as a line of another form, and never by its text. The
+    synthetic lines hold hand-chosen values, not SAS output.
+    """
+    log = _write_log(tmp_path, [text])
+    spec = _synthetic_spec("ALPHA", 1, KIND_DATASET, True)
+
+    (checkpoint,) = parse_log_checkpoints(log, [spec])
+
+    assert not checkpoint.ok
+    assert (checkpoint.NOBS, checkpoint.NVARS) == (None, None)
+    assert checkpoint.problem == f"line 1 does not name WORK.ALPHA: {shown}"
+    assert "=" not in checkpoint.problem
+    assert checkpoint.line_text == text
+
+
+_OMITTED_PROBLEM = f"does not start the warning {_OMITTED_WARNING!r}"
+
+
+@pytest.mark.parametrize(
+    "removed, inserted, pinned",
+    [
+        # Log line 125, a put _all_ continuation, moves to the pinned start 124 of the LMM-FLT-02
+        # range and line 179 to its pinned end 178.
+        (
+            1,
+            0,
+            {
+                8: (
+                    f"line 124 {_OMITTED_PROBLEM}: a line of another form (text not shown); "
+                    f"line 178 {_OMITTED_PROBLEM}: a line of another form (text not shown)"
+                ),
+                9: "line 186 does not name WORK.LMM_BASE_ANL: a 'NOTE:' line (text not shown)",
+            },
+        ),
+        # Log line 180, a put _all_ continuation, moves to the pinned line 186; line 118, a NOTE,
+        # to the pinned range start 124, and line 172, a counted WARNING, to its end 178.
+        (
+            0,
+            6,
+            {
+                8: f"line 124 {_OMITTED_PROBLEM}: a 'NOTE:' line (text not shown)",
+                9: (
+                    "line 186 does not name WORK.LMM_BASE_ANL: a line of another form "
+                    "(text not shown)"
+                ),
+            },
+        ),
+    ],
+    ids=["07.07-line-1-deleted", "07.07-6-lines-inserted"],
+)
+def test_lmm_flt_02_shifted_log_problems_show_no_record_values(
+    removed: int,
+    inserted: int,
+    pinned: Mapping[int, str],
+    tmp_path: Path,
+    repo_paths: RepoPaths,
+    file_state: Callable[[Path], object],
+) -> None:
+    """A shifted WPCT-F.07.07.log fails every checkpoint without echoing a printed record value.
+
+    Shifting the log moves the ``put _all_`` continuation lines of the LMM-FLT-02 omitted-baseline
+    WARNINGs [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:124-183] onto pinned lines. Each
+    problem still names its line and the expected ``WORK.<X>`` or WARNING prefix, while no
+    ``name=value`` pair, subject identifier or date that the original log prints with those
+    WARNINGs appears in any problem, which reaches the report as a FAIL reason.
+    """
+    reference = repo_paths.log_file(PROGRAM_07_07)
+    before = file_state(reference)
+    shifted = [b""] * inserted + reference.read_bytes().split(b"\n")[removed:]
+    copy = tmp_path / reference.name
+    copy.write_bytes(b"\n".join(shifted))
+    checkpoint_map = LOG_CHECKPOINT_MAP[PROGRAM_07_07]
+    (warning_spec,) = [spec for spec in checkpoint_map if spec.kind == KIND_WARNING_COUNT]
+    records = parse_log_warning_records(reference, warning_spec)
+    printed = {record.values[name] for record in records for name in ("USUBJID", "ADT")}
+
+    checkpoints = parse_log_checkpoints(copy, checkpoint_map)
+
+    assert len(records) == 10
+    assert len(checkpoints) == len(checkpoint_map) == 29
+    assert any("=" in checkpoint.line_text for checkpoint in checkpoints)
+    for checkpoint in checkpoints:
+        spec = checkpoint.spec
+        assert not checkpoint.ok
+        assert (checkpoint.NOBS, checkpoint.NVARS) == (None, None)
+        assert checkpoint.line_text == shifted[spec.line - 1].decode("latin-1").rstrip(" ")
+        if spec.kind == KIND_WARNING_COUNT:
+            assert checkpoint.problem.startswith(
+                tuple(f"line {end} {_OMITTED_PROBLEM}: " for end in (spec.line, spec.end_line))
+            )
+        else:
+            assert checkpoint.problem.startswith(
+                f"line {spec.line} does not name WORK.{spec.SAS_DATASET}: "
+            )
+        assert "=" not in checkpoint.problem
+        assert not [value for value in printed if value in checkpoint.problem]
+    assert {position: checkpoints[position].problem for position in pinned} == pinned
+    assert file_state(reference) == before
+
+
+@pytest.mark.parametrize(
     "parse, file_name, message",
     [
         (
@@ -1184,20 +1333,29 @@ def test_s02_pop_01_log_mismatch_reported(
     ],
     ids=["listing", "log"],
 )
+@pytest.mark.parametrize(
+    "directory, shown", [("", ""), ("a\nb", "a\\nb")], ids=["plain-path", "newline-in-path"]
+)
 def test_s02_mod_02_missing_reference_raises(
-    parse: Callable[[Path], object], file_name: str, message: str, tmp_path: Path
+    parse: Callable[[Path], object],
+    file_name: str,
+    message: str,
+    directory: str,
+    shown: str,
+    tmp_path: Path,
 ) -> None:
     """Only a missing or unreadable reference raises, naming its absolute path.
 
     Without the listing no S02-MOD-02 table can be compared, and without the log no record count
-    from S02-DEP-util_access_test_data to S02-TRN-05; neither absence is skipped.
+    from S02-DEP-util_access_test_data to S02-TRN-05; neither absence is skipped. A line break in
+    the path is shown as ``\\n``, so the message stays one line.
     """
-    missing = tmp_path / file_name
+    missing = tmp_path / directory / file_name
 
     with pytest.raises(InputDataError) as raised:
         parse(missing)
 
-    assert str(raised.value) == f"{message}{missing.absolute()}"
+    assert str(raised.value) == f"{message}{(tmp_path / shown / file_name).absolute()}"
 
 
 def _synthetic_warning_spec(line: int, end_line: int) -> LogCheckpointSpec:
@@ -1702,6 +1860,185 @@ def test_s07_trn_06_load_sas_exports_rejects(content: bytes, message: str, tmp_p
     assert str(export.absolute()) in text
     assert "\n" not in text
     assert "01-701-1015" not in text
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("/data/sas_exports", "/data/sas_exports"),
+        (Path("/data/sas exports/caf\u00e9\u00a0x"), "/data/sas exports/caf\u00e9\u00a0x"),
+        ("\\\\quintiles.net\\share\\sas_exports", "\\\\quintiles.net\\share\\sas_exports"),
+        ("a\nb", "a\\nb"),
+        ("a\r\nb\tc", "a\\r\\nb\\tc"),
+        ("a\x1b[2Jb\x00c\x7f", "a\\x1b[2Jb\\x00c\\x7f"),
+        ("a\x0bb\x0cc\x1cd\x85e", "a\\x0bb\\x0cc\\x1cd\\x85e"),
+        ("a\u2028b\u2029c", "a\\u2028b\\u2029c"),
+        ("a\udcffb", "a\\udcffb"),
+    ],
+    ids=[
+        "ordinary",
+        "non-ascii-and-no-break-space",
+        "unc-backslashes",
+        "line-feed",
+        "crlf-and-tab",
+        "esc-nul-and-del",
+        "other-line-breaks",
+        "unicode-separators",
+        "undecodable-byte",
+    ],
+)
+def test_env04_message_path_escapes_control_characters(path: str | Path, expected: str) -> None:
+    """A path is rendered on one line, with only its control characters escaped.
+
+    The 07.07 program names its inputs by UNC paths (ENV-04); the port reads from the checkout,
+    yet any path it names in a message, such as a ``--sas-exports`` directory, keeps its
+    backslashes, spaces and non-ASCII letters exactly as ``str`` shows them. A line break, a
+    terminal escape, a Unicode line or paragraph separator and an undecodable file-name byte
+    become Python escapes, so the message has nothing ``str.splitlines`` splits on.
+    """
+    shown = message_path(path)
+
+    assert shown == expected
+    assert len(shown.splitlines()) == 1
+
+
+def test_env04_message_path_rejects_bytes() -> None:
+    """A bytes path is refused, not rendered character code by character code."""
+    with pytest.raises(TypeError, match="^path must be a str or str path-like, got bytes$"):
+        message_path(b"a\nb")  # type: ignore[arg-type]
+
+
+_ANADATA_07_07 = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
+_ESTIMATES_07_02 = export_spec(PROGRAM_07_02, "parameter_estimates").sas_export_file
+
+
+def _plant_export(file_name: str, content: bytes, directory: Path) -> Path:
+    """Create ``directory`` holding the export ``file_name`` with ``content``; return it."""
+    directory.mkdir()
+    (directory / file_name).write_bytes(content)
+    return directory
+
+
+def _plant_export_directory(directory: Path) -> Path:
+    """Create ``directory`` with a directory under the ``css_anadata`` export's name."""
+    (directory / _ANADATA_07_07).mkdir(parents=True)
+    return directory
+
+
+def _plant_dangling_export(directory: Path) -> Path:
+    """Create ``directory`` with a dangling symlink under the ``css_anadata`` export's name."""
+    directory.mkdir()
+    (directory / _ANADATA_07_07).symlink_to(directory / "missing")
+    return directory
+
+
+def _plant_file_as_directory(directory: Path) -> Path:
+    """Create a regular file where the export directory should be."""
+    directory.write_bytes(b"")
+    return directory
+
+
+def _plant_dangling_directory(directory: Path) -> Path:
+    """Create a dangling symlink where the export directory should be."""
+    directory.symlink_to(directory.parent / "missing")
+    return directory
+
+
+@pytest.mark.parametrize(
+    "plant, message",
+    [
+        pytest.param(
+            functools.partial(_plant_export, _ANADATA_07_07, b"x,y\n1,2,3\n"),
+            "SAS export {export}: data row 1, ending at line 2, has 3 fields but the header has 2",
+            id="record-width",
+        ),
+        pytest.param(
+            functools.partial(_plant_export, _ANADATA_07_07, b'x\n"1\n'),
+            "cannot read SAS export {export}: line 2: unexpected end of data",
+            id="unterminated-quote",
+        ),
+        pytest.param(
+            functools.partial(_plant_export, _ANADATA_07_07, b""),
+            "SAS export {export} has no header row",
+            id="no-header-row",
+        ),
+        pytest.param(
+            functools.partial(_plant_export, _ANADATA_07_07, b"x,,y\n"),
+            "SAS export {export} has a header column without a name: field 2",
+            id="unnamed-header-column",
+        ),
+        pytest.param(
+            functools.partial(_plant_export, _ANADATA_07_07, b"chg,CHG\n"),
+            "SAS export {export} has columns with the same name ignoring case: CHG at fields 1, 2",
+            id="duplicate-columns",
+        ),
+        pytest.param(
+            functools.partial(_plant_export, _ANADATA_07_07, b"chg\nabc\n"),
+            "SAS export {export}: column CHG, data row 1: the value is not a SAS numeric value",
+            id="non-sas-number",
+        ),
+        pytest.param(
+            functools.partial(_plant_export, _ESTIMATES_07_02, b"estimate\n1\n"),
+            "SAS export {estimates} lacks the Parameter column that EFFECT and LEVEL derive from",
+            id="no-parameter-column",
+        ),
+        pytest.param(
+            functools.partial(_plant_export, _ESTIMATES_07_02, b"parameter\nTRTPN 54 extra\n"),
+            "SAS export {estimates}: column PARAMETER, data row 1: parameter label of 3 words "
+            "cannot be split into an effect and a CLASS level",
+            id="unsplittable-parameter",
+        ),
+        pytest.param(
+            _plant_export_directory,
+            "SAS export is not a regular file: {export}",
+            id="export-not-a-regular-file",
+        ),
+        pytest.param(
+            _plant_dangling_export,
+            "cannot read SAS export {export}: broken or looping symlink",
+            id="export-broken-symlink",
+        ),
+        pytest.param(
+            _plant_file_as_directory,
+            "SAS export directory is not a directory: {root}",
+            id="directory-not-a-directory",
+        ),
+        pytest.param(
+            _plant_dangling_directory,
+            "cannot read SAS export directory {root}: broken or looping symlink",
+            id="directory-broken-symlink",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "name, shown", [("a\nb", "a\\nb"), ("a\tb\rc", "a\\tb\\rc")], ids=["newline", "tab-and-cr"]
+)
+def test_s07_trn_06_load_sas_exports_escapes_control_characters_in_path(
+    plant: Callable[[Path], Path], message: str, name: str, shown: str, tmp_path: Path
+) -> None:
+    """A control character in the export directory's name is escaped, keeping the message one line.
+
+    The export contract (``python/wpct/reference/sas_exports/README.md``) promises a one-line
+    message naming the folder or file at fault, which the command line prints on stderr. A line
+    break, a tab or a carriage return in the directory's name, under which the S07-TRN-06
+    ``css_anadata`` or the S02-MOD-02 ParameterEstimates export stands, is shown as ``\\n``,
+    ``\\t`` or ``\\r`` in every load error that names the directory or the file, and the rest of
+    the absolute path is shown unchanged.
+    """
+    root = plant(tmp_path / name)
+    shown_root = tmp_path.absolute() / shown
+    expected = message.format(
+        root=shown_root,
+        export=shown_root / _ANADATA_07_07,
+        estimates=shown_root / _ESTIMATES_07_02,
+    )
+
+    with pytest.raises(InputDataError) as raised:
+        load_sas_exports(root)
+
+    text = str(raised.value)
+    assert text == expected
+    assert len(text.splitlines()) == 1
 
 
 _ANADATA_HEAD = b"studyid,usubjid,base,chg\nCDISCPILOT01,01-701-1023,80,-4\n"
