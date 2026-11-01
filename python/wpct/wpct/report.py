@@ -1,10 +1,11 @@
 """Equivalence report of the WPCT Python port: the Markdown renderer and its guarded writer.
 
 :func:`render_report` turns the program runs, their comparison groups (``wpct.compare``), the
-provenance facts (``wpct.provenance``) and the tolerances (``python/wpct/tolerances.json``) into
-the text of ``python/wpct/reports/equivalence_report.md`` (Agent Action Plan 0.7.5). The sections
-follow :data:`SECTION_TITLES`: Provenance, with the tolerance table before any result; Summary;
-one section per program, WPCT-F.07.02 then WPCT-F.07.07; Not compared; Source integrity.
+provenance facts (``wpct.provenance``) and the tolerances the comparisons applied (loaded from
+``python/wpct/tolerances.json``) into the text of ``python/wpct/reports/equivalence_report.md``
+(Agent Action Plan 0.7.5). The sections follow :data:`SECTION_TITLES`: Provenance, with the
+tolerance table before any result; Summary; one section per program, WPCT-F.07.02 then
+WPCT-F.07.07; Not compared; Source integrity.
 :func:`write_report` writes that text to the single fixed report destination under the write
 root, once the write-destination guard has accepted it (Agent Action Plan 0.8). The report is
 committed as produced and never edited by hand.
@@ -12,10 +13,11 @@ committed as produced and never edited by hand.
 The text is deterministic for a given checkout and environment. It has no timestamp and no
 absolute path, rows keep the order ``wpct.compare`` gave them, and every count comes from
 :func:`wpct.compare.count_statuses`, which keeps PASS, FAIL and NOT COMPARED apart, so a NOT
-COMPARED row is never counted as PASS. The tolerance table is rendered from the loaded tolerance
-file, so this module states no tolerance of its own. The report claims no equivalence for a NOT
-COMPARED quantity, and where only rounded SAS listings exist it says so in the wording
-:data:`ROUNDED_NOTE_TEMPLATE` fixes.
+COMPARED row is never counted as PASS. The tolerance table is rendered from the ``Tolerances``
+snapshot the comparison groups carry, the limits that produced their verdicts, and its field lists
+from ``wpct.schemas``; this module states no tolerance of its own and never reads the tolerance
+file. The report claims no equivalence for a NOT COMPARED quantity, and where only rounded SAS
+listings exist it says so in the wording :data:`ROUNDED_NOTE_TEMPLATE` fixes.
 """
 
 from __future__ import annotations
@@ -37,8 +39,8 @@ from wpct.compare import (
     ComparisonGroup,
     ComparisonRow,
     Tolerances,
+    compared_fields,
     count_statuses,
-    load_tolerances,
 )
 from wpct.errors import OutputPathError
 from wpct.paths import RepoPaths, check_write_destination
@@ -98,9 +100,7 @@ _ROW_COLUMNS = (
 _REASON_COLUMN = "Reason"
 
 #: Keys of a tolerance class that have their own table column; every other key is a setting.
-_TOLERANCE_COLUMN_KEYS = ("label", "rule", "limit", "fields", "applies_to")
-#: Top-level keys of the tolerance file rendered on their own lines rather than as extra keys.
-_TOLERANCE_TOP_KEYS = ("schema_version", "description", "classes")
+_TOLERANCE_COLUMN_KEYS = ("label", "rule", "limit", "applies_to")
 
 _NONE = "—"
 _MISSING = "."
@@ -183,22 +183,16 @@ def _repo_relative(path: Path, paths: RepoPaths) -> str:
 # --- Input checks ---------------------------------------------------------------------------------
 
 
-def _checked_inputs(
+def _checked_groups(
     results: Mapping[str, ProgramResult],
     comparisons: Mapping[str, Sequence[ComparisonGroup]],
-    provenance: Provenance,
-    tolerances: Tolerances,
 ) -> dict[str, tuple[ComparisonGroup, ...]]:
-    """Validate the inputs of :func:`render_report`; return each program's groups as a tuple.
+    """Validate the program runs and their comparison groups; return each program's groups.
 
     Both mappings must hold exactly the programs of ``wpct.schemas.PROGRAMS``, each result must
     belong to its key and each group to its program, so no program section can be left out or
-    filled with another program's rows.
+    filled with another program's rows. Each program's groups are returned as a tuple.
     """
-    if not isinstance(provenance, Provenance):
-        raise TypeError(f"provenance must be a Provenance, got {type(provenance).__name__}")
-    if not isinstance(tolerances, Tolerances):
-        raise TypeError(f"tolerances must be a Tolerances, got {type(tolerances).__name__}")
     for name, mapping in (("results", results), ("comparisons", comparisons)):
         if not isinstance(mapping, Mapping):
             raise TypeError(
@@ -235,6 +229,59 @@ def _checked_inputs(
     return groups_by_program
 
 
+def _checked_inputs(
+    results: Mapping[str, ProgramResult],
+    comparisons: Mapping[str, Sequence[ComparisonGroup]],
+    provenance: Provenance,
+    tolerances: Tolerances,
+) -> dict[str, tuple[ComparisonGroup, ...]]:
+    """Validate the inputs of :func:`render_report`; return each program's groups as a tuple.
+
+    Besides the checks of :func:`_checked_groups`, every group that carries the tolerances its
+    rows were judged under must carry ``tolerances`` itself, so the table the report prints is the
+    one that produced the verdicts.
+    """
+    if not isinstance(provenance, Provenance):
+        raise TypeError(f"provenance must be a Provenance, got {type(provenance).__name__}")
+    if not isinstance(tolerances, Tolerances):
+        raise TypeError(f"tolerances must be a Tolerances, got {type(tolerances).__name__}")
+    groups_by_program = _checked_groups(results, comparisons)
+    for program in PROGRAMS:
+        for position, group in enumerate(groups_by_program[program]):
+            if group.tolerances is not None and group.tolerances != tolerances:
+                raise ValueError(
+                    f"comparisons[{program!r}][{position}] ({group.key}) was judged under "
+                    "tolerances other than those the report would print"
+                )
+    return groups_by_program
+
+
+def _applied_tolerances(
+    groups_by_program: Mapping[str, Sequence[ComparisonGroup]],
+) -> Tolerances:
+    """The one tolerance snapshot the comparison groups were judged under.
+
+    ``wpct.compare`` stamps it on every group that applies a tolerance. Groups that carry none, or
+    that carry snapshots with different values, have no single table that matches every verdict.
+    """
+    snapshots: list[Tolerances] = []
+    for program in PROGRAMS:
+        for group in groups_by_program[program]:
+            if group.tolerances is not None and group.tolerances not in snapshots:
+                snapshots.append(group.tolerances)
+    if not snapshots:
+        raise ValueError(
+            "no comparison group carries the tolerances it was judged under, so the tolerance "
+            "table cannot be rendered"
+        )
+    if len(snapshots) > 1:
+        raise ValueError(
+            f"the comparison groups were judged under {len(snapshots)} different tolerance "
+            "snapshots; one report prints a single tolerance table"
+        )
+    return snapshots[0]
+
+
 # --- Provenance -----------------------------------------------------------------------------------
 
 
@@ -258,23 +305,25 @@ def _integrity_statement(provenance: Provenance) -> str:
 
 
 def _tolerance_lines(tolerances: Tolerances, paths: RepoPaths) -> list[str]:
-    """The tolerance table, rendered from the loaded file so the report cannot restate a limit."""
+    """The tolerance table, rendered from the tolerances the comparisons applied and the field
+    lists of ``wpct.schemas``, so the report restates neither a limit nor a field list."""
     raw = tolerances.raw
+    fields = compared_fields()
+    schemas_file = paths.project_dir / "wpct" / "schemas.py"
     lines = [
         "### Tolerances",
         "",
         (
             f"Rendered from {_code(_repo_relative(paths.tolerances_file, paths))} "
             f"(schema version {_format_setting(raw['schema_version'])}), the single tolerance "
-            "source; every comparison below applies these values."
+            "source; every comparison below applies these values. The Fields column lists the "
+            "export variables each class compares, as "
+            f"{_code(_repo_relative(schemas_file, paths))} defines them."
         ),
         "",
     ]
     if raw.get("description"):
         lines.extend([f"File description: {_flatten(raw['description'])}", ""])
-    for key, value in raw.items():
-        if key not in _TOLERANCE_TOP_KEYS:
-            lines.extend([f"{_cell(key)}: {_cell(_format_setting(value))}", ""])
     rows = []
     for class_key in tolerances.classes:
         entry = tolerances.entry(class_key)
@@ -290,7 +339,7 @@ def _tolerance_lines(tolerances: Tolerances, paths: RepoPaths) -> list[str]:
                 _cell(entry["rule"]),
                 _cell(_format_setting(entry["limit"])) if "limit" in entry else _NONE,
                 _cell(settings) if settings else _NONE,
-                _cell(_format_setting(entry["fields"])) if "fields" in entry else _NONE,
+                _cell(_format_setting(fields[class_key])) if fields[class_key] else _NONE,
                 _cell(entry["applies_to"]),
             )
         )
@@ -645,8 +694,8 @@ def render_report(
             run is ``ProgramResult.from_halt``.
         comparisons: ``wpct.compare.compare_program`` of each run, keyed by program.
         provenance: ``wpct.provenance.collect`` of the checkout.
-        tolerances: ``wpct.compare.load_tolerances`` of ``python/wpct/tolerances.json``; its table
-            is printed before any result.
+        tolerances: ``wpct.compare.load_tolerances`` of ``python/wpct/tolerances.json``, the
+            snapshot the comparisons applied; its table is printed before any result.
 
     Returns:
         The report text with ``\\n`` line ends and one trailing newline. Equal inputs give equal
@@ -654,8 +703,9 @@ def render_report(
 
     Raises:
         TypeError, ValueError: An input of the wrong type, a program missing from or unknown to
-            either mapping, a result or group filed under another program, or a rounded group whose
-            displayed precision is not defined here.
+            either mapping, a result or group filed under another program, a group whose
+            ``tolerances`` differ from ``tolerances``, or a rounded group whose displayed precision
+            is not defined here.
     """
     groups_by_program = _checked_inputs(results, comparisons, provenance, tolerances)
     # Repository-relative names only; the checkout paths are never opened while rendering.
@@ -682,26 +732,39 @@ def write_report(
 ) -> Path:
     """Render the report and write it to ``paths.report_file``; return the resolved path written.
 
-    The destination is fixed: this function takes none (Agent Action Plan 0.8). The tolerances are
-    read from ``paths.tolerances_file`` and the text is rendered in memory first. The target then
-    passes :func:`~wpct.paths.check_write_destination`, and its resolved form must be the report
-    path under the resolved write root, before any directory is created or the file opened.
+    The destination is fixed: this function takes none (Agent Action Plan 0.8). The tolerance table
+    is the ``Tolerances`` snapshot the comparison groups carry (``ComparisonGroup.tolerances``),
+    the limits that produced their verdicts; ``tolerances.json`` is not read again, so an edit to
+    it after the comparisons ran cannot relabel them. The text is rendered in memory first. The
+    target then passes :func:`~wpct.paths.check_write_destination`, and its resolved form must be
+    the report path under the resolved write root, before any directory is created or the file
+    opened.
 
     Raises:
-        OutputPathError: The report path, or a directory above it, is a symlink leading anywhere
-            else, inside or outside the checkout; nothing is created or modified.
-        TypeError, ValueError: As :func:`render_report`, or ``paths`` is not a ``RepoPaths``;
-            nothing is written.
+        OSError: The reports directory cannot be created, or the report file cannot be opened or
+            written.
+        OutputPathError: :func:`~wpct.paths.check_write_destination` refuses the report path
+            (it resolves outside the permitted destinations or cannot be resolved), or the path is
+            reached through a symlink below the write root: the report path itself or a directory
+            between it and the write root, leading anywhere else, inside or outside the checkout.
+            Symlinks at or above the write root itself are followed. Nothing is created or
+            modified.
+        TypeError, ValueError: As :func:`render_report`, ``paths`` is not a ``RepoPaths``, or no
+            group carries a tolerance snapshot or the groups carry different ones; nothing is
+            written.
     """
     if not isinstance(paths, RepoPaths):
         raise TypeError(f"paths must be a RepoPaths, got {type(paths).__name__}")
-    tolerances = load_tolerances(paths.tolerances_file)
-    text = render_report(results, comparisons, provenance, tolerances)
+    groups_by_program = _checked_groups(results, comparisons)
+    tolerances = _applied_tolerances(groups_by_program)
+    text = render_report(results, groups_by_program, provenance, tolerances)
     target = paths.report_file
     resolved = check_write_destination(target, paths)
     # The guard also accepts any path strictly below the outputs tree, so a reports directory
     # symlinked into python/wpct/outputs would pass it. The write policy refuses a fixed destination
-    # reached through any symlink, so the resolved path must be the report path itself.
+    # reached through a symlink below the write root, so the resolved path must be the report path
+    # re-rooted at the resolved write root. Only symlinks at or above the write root itself are
+    # followed.
     expected = paths.write_root.resolve() / target.relative_to(paths.write_root)
     if resolved != expected:
         raise OutputPathError(

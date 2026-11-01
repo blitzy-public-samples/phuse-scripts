@@ -226,7 +226,9 @@ def test_require_variables_rejects_invalid_names(
         pytest.param(("SafFL", "usubjID"), id="mixed-case"),
     ],
 )
-def test_require_variables_returns_given_spelling(stored: tuple[str, str]) -> None:
+def test_s02_and_s07_dep_assert_var_exist_require_variables_returns_given_spelling(
+    stored: tuple[str, str]
+) -> None:
     """Each required column comes back under its spelling in ``names``; ``df`` is not modified.
 
     Verifies S02-DEP-assert_var_exist and S07-DEP-assert_var_exist: SAS finds a variable whatever
@@ -245,8 +247,8 @@ def test_require_variables_returns_given_spelling(stored: tuple[str, str]) -> No
 
     assert (result is frame) == (stored == ("SAFFL", "USUBJID"))
     expected = original.set_axis(["SAFFL", "trtp_short", "USUBJID"], axis="columns")
-    pd.testing.assert_frame_equal(result, expected)
-    pd.testing.assert_frame_equal(frame, original)
+    pd.testing.assert_frame_equal(result, expected, check_exact=True)
+    pd.testing.assert_frame_equal(frame, original, check_exact=True)
 
 
 def test_require_variables_rejects_case_duplicates(
@@ -279,7 +281,7 @@ def test_require_variables_rejects_case_duplicates(
 
 
 @pytest.mark.parametrize("program_id", PROGRAMS)
-def test_reads_advs(
+def test_s02_and_s07_dep_util_access_test_data_reads_advs(
     program_id: str,
     advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
     repo_paths: RepoPaths,
@@ -308,7 +310,7 @@ def test_reads_advs(
 
 
 @pytest.mark.parametrize("program_id", PROGRAMS)
-def test_dates_kept_as_sas_day_numbers(
+def test_d10_dates_kept_as_sas_day_numbers(
     program_id: str,
     advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
     repo_paths: RepoPaths,
@@ -338,7 +340,7 @@ def test_dates_kept_as_sas_day_numbers(
         ), name
 
 
-def test_baseline_date_matches_sas_log(
+def test_d10_baseline_date_matches_sas_log(
     advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
 ) -> None:
     """The record SAS prints as ``AVAL=70 ADT=13MAY2013`` holds day number 19491 (D-10).
@@ -362,7 +364,7 @@ def test_baseline_date_matches_sas_log(
 
 
 @pytest.mark.parametrize("program_id", PROGRAMS)
-def test_blank_character_is_missing(
+def test_d11_blank_character_is_missing(
     program_id: str,
     advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
 ) -> None:
@@ -389,7 +391,7 @@ def test_blank_character_is_missing(
     assert (~missing).equals(flag == "Y")
 
 
-def test_flag_test_matches_only_y() -> None:
+def test_d11_flag_test_matches_only_y() -> None:
     """``''``, an all-blank value and ``None`` are character-missing; ``'Y'`` is not (D-11)."""
     mask = char_missing_mask(pd.Series(["Y", "", "   ", None]))
 

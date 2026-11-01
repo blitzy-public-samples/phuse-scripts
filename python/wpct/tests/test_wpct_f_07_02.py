@@ -11,13 +11,19 @@ No silent pass: every equivalence test asserts the exact number of comparison ro
 each one is PASS, so neither a FAIL nor a NOT COMPARED row can satisfy it.
 
 The edge-state tests run the driver again with other settings or on an altered private copy of
-ADVS. Nothing here writes a file: the driver never writes, and no export or report is produced.
+ADVS, and the comparison tests give ``wpct.compare`` an altered copy of the run or of the listing.
+The settings tests only build ``Config``: SAS spellings fold to the schema spelling, and a
+setting the export schemas cannot carry is refused (S02-TRN-01). Nothing here writes into the
+checkout: the driver never writes, no export or report is produced, and the one altered listing
+is a copy under ``tmp_path``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -122,7 +128,7 @@ def groups_07_02(
 # --- Equivalence against the repository SAS references --------------------------------------------
 
 
-def test_log_checkpoints_all_pass(
+def test_s02_flt_01_to_trn_05_log_checkpoints_all_pass(
     result_07_02: ProgramResult,
     groups_07_02: tuple[compare.ComparisonGroup, ...],
     sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
@@ -149,7 +155,7 @@ def test_log_checkpoints_all_pass(
     ] == [(spec.SAS_DATASET, spec.OCCURRENCE, spec.PARAMCD, spec.ATPTN) for spec in pinned]
 
 
-def test_parameter_estimates_match_listing(
+def test_s02_mod_02_parameter_estimates_match_listing(
     groups_07_02: tuple[compare.ComparisonGroup, ...],
     listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
 ) -> None:
@@ -169,7 +175,7 @@ def test_parameter_estimates_match_listing(
     assert_all_pass(group, 40)
 
 
-def test_merged_pval_matches_listing(
+def test_s02_trn_05_merged_pval_matches_listing(
     groups_07_02: tuple[compare.ComparisonGroup, ...],
     listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
 ) -> None:
@@ -191,7 +197,9 @@ def test_merged_pval_matches_listing(
     assert [row.python_value for row in group.rows].count(".") == 2
 
 
-def test_listing_based_total_46(groups_07_02: tuple[compare.ComparisonGroup, ...]) -> None:
+def test_s02_mod_02_and_trn_05_listing_based_total_46(
+    groups_07_02: tuple[compare.ComparisonGroup, ...]
+) -> None:
     """S02-MOD-02 and S02-TRN-05: 40 + 6 = 46 listing-based values, none NOT COMPARED."""
     listing = [_group(groups_07_02, key) for key in _MODEL_GROUPS]
     assert compare.count_statuses(listing) == {
@@ -231,7 +239,7 @@ def test_endpoint_models_use_226(result_07_02: ProgramResult) -> None:
         assert len(records) - len(incomplete) == models[(paramcd, atptn)].NOBS
 
 
-def test_missing_chg_rows_excluded_from_summary(result_07_02: ProgramResult) -> None:
+def test_d03_missing_chg_rows_excluded_from_summary(result_07_02: ProgramResult) -> None:
     """D-03, S02-MOD-01: a missing CHG is left out of ``n``, and its BY group still forms.
 
     The 20 analysis records of subject 01-718-1150 (every post-baseline visit of both parameters)
@@ -260,7 +268,7 @@ def test_missing_chg_rows_excluded_from_summary(result_07_02: ProgramResult) -> 
     by = ["PARAMCD", "ATPTN", "AVISITN", "TRTPN"]
     expected = anadata.groupby(by, sort=True)["CHG"].count()
     actual = stats.set_index(by)["n"].sort_index()
-    pd.testing.assert_series_equal(actual, expected, check_names=False)
+    pd.testing.assert_series_equal(actual, expected, check_names=False, check_exact=True)
 
 
 def test_pval_merge_mapping(result_07_02: ProgramResult) -> None:
@@ -326,7 +334,7 @@ def test_s02_trn_04_strata_order(result_07_02: ProgramResult) -> None:
         assert len(set(keys)) == 30, (paramcd, atptn)
 
 
-def test_css_anadata_shape(result_07_02: ProgramResult) -> None:
+def test_s02_trn_03_css_anadata_shape(result_07_02: ProgramResult) -> None:
     """S02-TRN-03 and the selections S02-FLT-01, S02-POP-01, S02-FLT-02, S02-FLT-03.
 
     3548 records of the 14 analysis variables, unique on ``STUDYID USUBJID PARAMCD ATPTN AVISITN``,
@@ -370,7 +378,9 @@ def test_unset_reference_skips_glm(
     assert list(estimates.columns) == list(export_spec(PROGRAM, "parameter_estimates").columns)
     stats = result.dataset("css_stats")
     assert "pval" not in stats.columns
-    pd.testing.assert_frame_equal(stats, result_07_02.dataset("css_stats").drop(columns="pval"))
+    pd.testing.assert_frame_equal(
+        stats, result_07_02.dataset("css_stats").drop(columns="pval"), check_exact=True
+    )
     assert all(cp.SAS_DATASET != "CSS_PVALUES" for cp in result.checkpoints)
 
     # No SAS exports are passed, so the groups do not depend on files a user may have supplied.
@@ -430,12 +440,168 @@ def test_absent_param_timepoint(
 
     assert _strata_in_order(result.dataset("css_stats")) == list(_STRATA)
     for name in ("css_stats", "parameter_estimates"):
-        pd.testing.assert_frame_equal(result.dataset(name), result_07_02.dataset(name))
+        pd.testing.assert_frame_equal(
+            result.dataset(name), result_07_02.dataset(name), check_exact=True
+        )
     assert result.models == result_07_02.models
     assert result.checkpoints == result_07_02.checkpoints
 
 
-def test_lower_case_variable_names(
+def test_u02_reference_level_absent(
+    advs_07_02: pd.DataFrame,
+    repo_paths,
+    listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """U-02: without a reference-level record no model is fitted, and the reason is its status.
+
+    With every ``TRTPN 0`` record removed, both endpoint models carry the status
+    ``not fitted: reference level 0 absent``. Each listing ParameterEstimates and merged-pval value
+    is a FAIL whose reason is that status, stated once, with no Python value, and each stratum is
+    listed under not compared with the same reason.
+    """
+    advs = advs_07_02.loc[(advs_07_02["TRTPN"] != _REF_TRTPN).to_numpy(dtype=bool)]
+    result = wpct_f_07_02.run(_DEFAULT, repo_paths, advs=advs)
+    status = model.status_reference_absent(_DEFAULT.ref_trtn)
+    assert [(record.PARAMCD, record.ATPTN, record.STATUS) for record in result.models] == [
+        (paramcd, atptn, status) for paramcd, atptn in _STRATA
+    ]
+
+    groups = compare.compare_program(
+        result, listing_tables[PROGRAM], sas_checkpoints[PROGRAM], None, tolerances
+    )
+    for key, count in zip(_MODEL_GROUPS, (40, 6), strict=True):
+        group = _group(groups, key)
+        assert len(group.rows) == count
+        wrong = [
+            row
+            for row in group.rows
+            if (row.status, row.reason, row.python_value) != (compare.FAIL, status, "")
+        ]
+        assert not wrong, _describe(wrong)
+    not_fitted = [
+        row
+        for row in _group(groups, compare.GROUP_NOT_COMPARED).rows
+        if row.quantity == f"GLM ParameterEstimates and merged pval ({MODEL_ENDPOINT} model)"
+    ]
+    assert [(row.stratum, row.status, row.reason) for row in not_fitted] == [
+        (f"PARAMCD={paramcd} ATPTN={atptn:g}", compare.NOT_COMPARED, status)
+        for paramcd, atptn in _STRATA
+    ]
+
+
+# --- Comparison of unusable Python data and drifted listings --------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("dataset", "column", "failing", "passing"),
+    [
+        (
+            "parameter_estimates",
+            "ESTIMATE",
+            compare.GROUP_LISTING_PARAMETER_ESTIMATES,
+            compare.GROUP_LISTING_MERGED_PVAL,
+        ),
+        (
+            "css_stats",
+            "pval",
+            compare.GROUP_LISTING_MERGED_PVAL,
+            compare.GROUP_LISTING_PARAMETER_ESTIMATES,
+        ),
+    ],
+    ids=["parameter_estimates", "css_stats"],
+)
+def test_python_columns_colliding_in_case_fail_every_value(
+    dataset: str,
+    column: str,
+    failing: str,
+    passing: str,
+    result_07_02: ProgramResult,
+    groups_07_02: tuple[compare.ComparisonGroup, ...],
+    listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """A Python dataset whose columns collide in case fails every value compared against it.
+
+    SAS names are case-insensitive, so a second ``column`` spelled in the other case makes the
+    dataset ambiguous. The comparison does not abort: every quantity and stratum of the clean group
+    is still reported, each a FAIL naming the dataset and the column with no Python value shown,
+    while the group that does not read the dataset keeps passing in full.
+    """
+    frame = result_07_02.dataset(dataset)
+    colliding = frame.assign(**{column.swapcase(): frame[column]})
+    malformed = dataclasses.replace(
+        result_07_02, datasets={**result_07_02.datasets, dataset: colliding}
+    )
+    groups = compare.compare_program(
+        malformed, listing_tables[PROGRAM], sas_checkpoints[PROGRAM], None, tolerances
+    )
+
+    group = _group(groups, failing)
+    clean = _group(groups_07_02, failing)
+    assert [(row.quantity, row.stratum) for row in group.rows] == [
+        (row.quantity, row.stratum) for row in clean.rows
+    ]
+    assert group.n_fail == len(group.rows), _describe(group.rows)
+    unexplained = [
+        row
+        for row in group.rows
+        if not row.reason.startswith(f"Python {dataset}: ") or column.upper() not in row.reason
+    ]
+    assert not unexplained, _describe(unexplained)
+    assert {row.python_value for row in group.rows} == {""}
+    other = _group(groups, passing)
+    assert_all_pass(other, len(_group(groups_07_02, passing).rows))
+
+
+def test_listing_problem_keeps_python_values(
+    tmp_path: Path,
+    repo_paths,
+    groups_07_02: tuple[compare.ComparisonGroup, ...],
+    result_07_02: ProgramResult,
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """A table the listing parser flags fails its values but still shows the fitted Python values.
+
+    A copy of the listing prints the DIABP/815 ``TRTPN 54`` row as ``TRTPN 55``, so the parser
+    reports a problem for that table only. The Python models are fitted, so every row of the
+    ParameterEstimates and merged-pval groups carries the same Python value as in the clean
+    comparison: the reference level's missing estimates stay ``.``, and no row is left without one.
+    The flagged table's rows are FAIL with the listing problem; the other table's still pass.
+    """
+    lines = repo_paths.listing_file(PROGRAM).read_bytes().split(b"\n")
+    printed, drifted = b"TRTPN     54", b"TRTPN     55"
+    assert lines[11].startswith(printed)
+    lines[11] = drifted + lines[11][len(printed) :]
+    listing = tmp_path / f"{PROGRAM}.lst"
+    listing.write_bytes(b"\n".join(lines))
+    tables = sas_reference.parse_glm_listing(listing, sas_reference.GLM_TABLE_MAP[PROGRAM])
+    assert [bool(table.problems) for table in tables] == [True, False]
+    (problem,) = tables[0].problems
+    flagged = f"PARAMCD={tables[0].spec.PARAMCD} "
+
+    groups = compare.compare_program(
+        result_07_02, tables, sas_checkpoints[PROGRAM], None, tolerances
+    )
+    for key in _MODEL_GROUPS:
+        rows = _group(groups, key).rows
+        clean = _group(groups_07_02, key).rows
+        assert [(row.quantity, row.stratum, row.python_value) for row in rows] == [
+            (row.quantity, row.stratum, row.python_value) for row in clean
+        ]
+        assert "" not in {row.python_value for row in rows}
+        assert sum(row.stratum.startswith(flagged) for row in rows) == len(rows) // 2
+        for row in rows:
+            if row.stratum.startswith(flagged):
+                assert (row.status, row.reason) == (compare.FAIL, problem), _describe([row])
+            else:
+                assert row.status == compare.PASS, _describe([row])
+
+
+def test_s02_dep_assert_var_exist_lower_case_variable_names(
     advs_07_02: pd.DataFrame, result_07_02: ProgramResult, repo_paths
 ) -> None:
     """S02-DEP-assert_var_exist: lower-case variable names in ADVS give the default run.
@@ -453,6 +619,105 @@ def test_lower_case_variable_names(
     assert list(lower.columns) == lower_names
     assert list(result.datasets) == list(result_07_02.datasets)
     for name, frame in result.datasets.items():
-        pd.testing.assert_frame_equal(frame, result_07_02.dataset(name))
+        pd.testing.assert_frame_equal(frame, result_07_02.dataset(name), check_exact=True)
     assert result.checkpoints == result_07_02.checkpoints
     assert result.models == result_07_02.models
+
+
+# --- Settings (S02-TRN-01) ------------------------------------------------------------------------
+
+#: The variable settings as the SAS program writes them [whitepapers/WPCT/WPCT-F.07.02.sas:108-124],
+#: with ``t_var`` upper-cased: each differs from the frames' spelling only in case.
+_SAS_SPELLINGS = {
+    "t_var": "TRTP_SHORT",
+    "tn_var": "trtpn",
+    "c_var": "chg",
+    "b_var": "base",
+    "p_fl": "saffl",
+    "a_fl": "anl01fl",
+}
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        *({name: value} for name, value in _SAS_SPELLINGS.items()),
+        _SAS_SPELLINGS,
+        {"c_var": "  chg  ", "b_var": " Base"},
+    ],
+    ids=[*_SAS_SPELLINGS, "all", "blank-padded"],
+)
+def test_s02_trn_01_sas_spellings_fold_to_schema(settings: dict[str, str]) -> None:
+    """S02-TRN-01: a SAS spelling of a variable setting is stored as the frames spell it.
+
+    SAS matches variable names ignoring case and ``%let`` drops surrounding blanks, so the
+    program's own ``%let`` values give the program's settings, spelled as ``wpct.schemas`` spells
+    the analysis variables.
+    """
+    config = wpct_f_07_02.Config(**settings)
+    assert config == _DEFAULT
+    for name in settings:
+        assert getattr(config, name) == getattr(_DEFAULT, name)
+        assert getattr(config, name) in ANA_VARIABLES[PROGRAM]
+
+
+@pytest.mark.parametrize(
+    ("settings", "error", "match"),
+    [
+        ({"t_var": "PARAM"}, ValueError, "Config.t_var must name trtp_short"),
+        ({"t_var": "avisit"}, ValueError, "Config.t_var must name trtp_short"),
+        ({"tn_var": "BASE"}, ValueError, "Config.tn_var must name TRTPN"),
+        ({"tn_var": "AVISITN"}, ValueError, "Config.tn_var must name TRTPN"),
+        ({"c_var": "PARAM"}, ValueError, "Config.c_var must name a numeric analysis variable"),
+        ({"b_var": "param"}, ValueError, "Config.b_var must name a numeric analysis variable"),
+        ({"p_fl": "CHG"}, ValueError, "Config.p_fl must name a character analysis variable"),
+        ({"a_fl": "avisitn"}, ValueError, "Config.a_fl must name a character analysis variable"),
+        ({"b_var": "TRTPN"}, ValueError, "Config.b_var must not name tn_var"),
+        ({"b_var": "trtpn"}, ValueError, "Config.b_var must not name tn_var"),
+        ({"c_var": "NOPE"}, ValueError, "'c_var': 'NOPE'"),
+        ({"t_var": None}, ValueError, "'t_var': None"),
+        ({"p_fl": "\u017faffl"}, ValueError, "'p_fl'"),
+        ({"b_visn": "0"}, TypeError, "Config.b_visn must be a number or None, got '0'"),
+        ({"b_visn": True}, TypeError, "Config.b_visn must be a number or None, got True"),
+    ],
+    ids=[
+        "t_var-PARAM",
+        "t_var-avisit",
+        "tn_var-BASE",
+        "tn_var-AVISITN",
+        "c_var-character",
+        "b_var-character",
+        "p_fl-numeric",
+        "a_fl-numeric",
+        "b_var-tn_var",
+        "b_var-tn_var-lower",
+        "unknown-name",
+        "not-a-string",
+        "non-ascii-name",
+        "b_visn-string",
+        "b_visn-bool",
+    ],
+)
+def test_s02_trn_01_rejects_settings_at_construction(
+    settings: dict[str, object], error: type[Exception], match: str
+) -> None:
+    """S02-TRN-01: a setting the fixed export schemas cannot carry is refused when built.
+
+    ``t_var`` and ``tn_var`` name the ``css_stats`` BY columns and key and the CLASS effect, so
+    only ``trtp_short`` and ``TRTPN`` keep those shapes. The analysis and baseline variables are
+    numeric, the flags character, the baseline covariate is not the CLASS variable, and
+    ``b_visn`` is a number or ``None``. Each refusal names the setting before any input is read.
+    """
+    with pytest.raises(error, match=match):
+        wpct_f_07_02.Config(**settings)
+
+
+def test_s02_flt_03_missing_baseline_visit_accepted() -> None:
+    """S02-FLT-03, S02-TRN-01: ``b_visn=None`` is the SAS missing value ``.`` and is accepted.
+
+    ``where also avisitn ne .`` then drops the records with a missing ``AVISITN``
+    (``selection.exclude_visit``), so ``None`` is kept as given and the GLM still runs.
+    """
+    config = wpct_f_07_02.Config(b_visn=None)
+    assert config.b_visn is None
+    assert config.glm_enabled

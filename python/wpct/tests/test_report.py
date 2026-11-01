@@ -1,7 +1,8 @@
 """Tests of the equivalence report and of the ``python -m wpct`` command line.
 
 Units under test: ``wpct.report`` (``SECTION_TITLES``, ``ROUNDED_NOTE_TEMPLATE``, ``render_report``
-and ``write_report``) and ``wpct.__main__`` (``build_parser``, ``build_paths`` and ``reproduce``).
+and ``write_report``) and ``wpct.__main__`` (``build_parser``, ``build_paths``, ``reproduce`` and
+the logging set-up of ``main``).
 
 Report contract (Agent Action Plan 0.7.5): the sections Provenance, Summary, WPCT-F.07.02,
 WPCT-F.07.07, Not compared and Source integrity, in that order. Provenance names the upstream
@@ -14,15 +15,27 @@ carries the fixed rounded-reference wording. Every quantity without a SAS refere
 PROC SUMMARY statistics (S02-MOD-01, S07-MOD-01), is listed with its reason under Not compared, and
 the text is deterministic.
 
+Tolerances (Agent Action Plan 0.7.1): the table prints the ``compare.Tolerances`` snapshot the
+comparison groups were judged under, which ``write_report`` takes from the groups rather than
+re-reading ``tolerances.json``, and its field lists come from ``wpct.schemas``. An invalid tolerance
+file fails to load with its absolute path named.
+
+Failure reasons (Agent Action Plan 0.9.2): every FAIL of a primitive rule of ``wpct.compare``
+carries a reason that names neither compared value, and a failed row's reason reaches the report's
+Reason column.
+
 Command line (Agent Action Plan 0.6.5): ``reproduce`` is the only subcommand and ``--sas-exports``
 its only option; exit code 0 means no comparison failed, 2 an input error.
 
 Write policy (Agent Action Plan 0.8): every report this module writes goes through the
 ``write_paths`` fixture, whose write root lies under pytest's ``tmp_path``; ``reproduce`` is called
 only with those paths and ``main`` never, so no test here writes into the checkout. The
-checkout-rooted ``repo_paths`` reaches only ``check_write_destination``, which writes nothing. The
-guard applies one rule to every write root, so the symlink cases on a ``tmp_path`` write root also
-cover the checkout's fixed report destination.
+checkout-rooted ``repo_paths`` never reaches a writer: it and the paths it names go only to code
+that writes nothing, namely the readers ``provenance.collect`` (git metadata and input hashes),
+``compare.load_tolerances`` and ``file_state``, and the guard ``check_write_destination``. The
+``conftest.py`` session fixtures built on it only read. The guard applies one rule to every write
+root, so the symlink cases on a ``tmp_path`` write root also cover the checkout's fixed report
+destination.
 
 The content tests render the comparisons of a clean checkout, in which no full-precision SAS export
 is supplied (``clean_comparisons``). The report they check therefore does not depend on files a
@@ -32,14 +45,17 @@ user drops into ``python/wpct/reference/sas_exports/``; ``test_sas_exports.py`` 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
+import logging
+import math
 import os
 import platform
 import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -84,6 +100,9 @@ _ROUNDED_END = "is not established for these quantities."
 
 #: A summary-statistics limit no tolerance file holds, to show the table is rendered from its input.
 _SENTINEL_LIMIT = 3e-7
+
+#: An integer of 401 digits: a JSON number with no finite floating-point value.
+_HUGE_INTEGER = 10**400
 
 #: Stand-in for an external SAS-export CSV that a symlinked report destination could overwrite.
 _SAS_EXPORT_STANDIN = b"STUDYID,USUBJID\nCDISCPILOT01,01-701-1015\n"
@@ -211,6 +230,68 @@ def _rows_with_status(comparisons: _Comparisons, program: str, status: str) -> i
     return sum(1 for group in comparisons[program] for row in group.rows if row.status == status)
 
 
+def _tolerance_rows(text: str) -> dict[str, dict[str, str]]:
+    """The rows of the report's tolerance table, keyed by class."""
+    table = _single_table(_subsection(_section(text, "Provenance"), "Tolerances"))
+    return {_code_text(row["Class"]): row for row in table}
+
+
+# --- Tolerance helpers ----------------------------------------------------------------------------
+
+
+def _clean_comparisons_under(
+    tolerances: compare.Tolerances,
+    results: Mapping[str, object],
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+) -> dict[str, tuple[compare.ComparisonGroup, ...]]:
+    """Per program, the clean-checkout comparison groups judged under ``tolerances``."""
+    return {
+        program: compare.compare_program(
+            results[program],
+            listing_tables[program],
+            sas_checkpoints[program],
+            None,
+            tolerances,
+        )
+        for program in PROGRAMS
+    }
+
+
+def _with_sentinel_limit(tolerances: compare.Tolerances) -> compare.Tolerances:
+    """A copy of ``tolerances`` whose summary-statistics limit is :data:`_SENTINEL_LIMIT`."""
+    edited = tolerances.to_dict()
+    assert float(edited["classes"]["summary_statistics"]["limit"]) != _SENTINEL_LIMIT
+    edited["classes"]["summary_statistics"]["limit"] = _SENTINEL_LIMIT
+    return compare.Tolerances.from_mapping(edited)
+
+
+def _tolerance_bytes(data: Mapping[str, Any]) -> bytes:
+    """``data`` written as a UTF-8 tolerance file."""
+    return json.dumps(data, indent=2).encode("utf-8")
+
+
+def _setting(class_key: str | None, key: str, value: object) -> Callable[[dict[str, Any]], bytes]:
+    """An edit setting ``key`` to ``value`` in class ``class_key``, or at the top for ``None``."""
+
+    def edit(data: dict[str, Any]) -> bytes:
+        (data if class_key is None else data["classes"][class_key])[key] = value
+        return _tolerance_bytes(data)
+
+    return edit
+
+
+def _latin1_label(data: dict[str, Any]) -> bytes:
+    """The file with a non-ASCII counts label, encoded as Latin-1 rather than UTF-8."""
+    data["classes"]["counts"]["label"] = "Comptés"
+    return json.dumps(data, indent=2, ensure_ascii=False).encode("latin-1")
+
+
+def _deeply_nested(data: dict[str, Any]) -> bytes:
+    """The file with a first key whose value nests 5000 arrays, beyond the parser's recursion."""
+    return b'{"deep": ' + b"[" * 5000 + b"]" * 5000 + b", " + _tolerance_bytes(data)[1:]
+
+
 # --- File-system helpers --------------------------------------------------------------------------
 
 
@@ -271,16 +352,7 @@ def clean_comparisons(
     here is the same whatever a user has placed in ``python/wpct/reference/sas_exports/``.
     """
     return MappingProxyType(
-        {
-            program: compare.compare_program(
-                results[program],
-                listing_tables[program],
-                sas_checkpoints[program],
-                None,
-                tolerances,
-            )
-            for program in PROGRAMS
-        }
+        _clean_comparisons_under(tolerances, results, listing_tables, sas_checkpoints)
     )
 
 
@@ -380,30 +452,31 @@ def test_report_provenance(written: _Written) -> None:
 def test_tolerance_table_rendered_from_file(
     written: _Written,
     results: Mapping[str, object],
-    clean_comparisons: _Comparisons,
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
     tolerances: compare.Tolerances,
     repo_paths: RepoPaths,
     file_state: _FileState,
 ) -> None:
     """The tolerance table shows every class of ``tolerances.json`` with its limit, from its input.
 
-    Each class appears in file order with its label, rule, limit (``—`` for a class without one)
-    and scope. A modified copy of the loaded tolerances, whose summary-statistics limit is a
-    sentinel, renders that sentinel, so the table is not written by hand. ``tolerances.json``
-    itself is not edited.
+    ``compare.load_tolerances``, the file's only reader, gives the session tolerances. Each class
+    appears in file order with its label, rule, limit (``—`` for a class without one), scope and
+    the fields ``wpct.schemas`` has it compare (``compare.compared_fields``, ``—`` for none).
+    Comparisons judged under a modified copy of the loaded tolerances, whose summary-statistics
+    limit is a sentinel, render that sentinel and leave every other row unchanged, so the table is
+    not written by hand. ``tolerances.json`` itself is not edited.
     """
     tolerance_file = repo_paths.tolerances_file
     file_before = file_state(tolerance_file)
-    raw = json.loads(tolerance_file.read_text(encoding="utf-8"))
-    assert tolerances.to_dict() == raw
+    loaded = compare.load_tolerances(tolerance_file).to_dict()
+    assert loaded == tolerances.to_dict()
+    fields = compare.compared_fields()
+    assert list(fields) == list(compare.TOLERANCE_CLASSES)
 
-    def rows_of(text: str) -> dict[str, dict[str, str]]:
-        table = _single_table(_subsection(_section(text, "Provenance"), "Tolerances"))
-        return {_code_text(row["Class"]): row for row in table}
-
-    rows = rows_of(written.text)
-    assert list(rows) == list(raw["classes"])
-    for class_key, entry in raw["classes"].items():
+    rows = _tolerance_rows(written.text)
+    assert list(rows) == list(loaded["classes"])
+    for class_key, entry in loaded["classes"].items():
         row = rows[class_key]
         assert row["Label"] == entry["label"]
         assert row["Rule"] == entry["rule"]
@@ -412,19 +485,182 @@ def test_tolerance_table_rendered_from_file(
             assert float(row["Limit"]) == float(entry["limit"])
         else:
             assert row["Limit"] == _NO_VALUE
+        assert row["Fields"] == (" ".join(fields[class_key]) or _NO_VALUE)
 
-    edited = tolerances.to_dict()
-    assert float(edited["classes"]["summary_statistics"]["limit"]) != _SENTINEL_LIMIT
-    edited["classes"]["summary_statistics"]["limit"] = _SENTINEL_LIMIT
-    modified = compare.Tolerances.from_mapping(edited)
-    modified_text = report.render_report(results, clean_comparisons, written.facts, modified)
-    modified_rows = rows_of(modified_text)
+    modified = _with_sentinel_limit(tolerances)
+    modified_comparisons = _clean_comparisons_under(
+        modified, results, listing_tables, sas_checkpoints
+    )
+    modified_text = report.render_report(results, modified_comparisons, written.facts, modified)
+    modified_rows = _tolerance_rows(modified_text)
 
     assert float(modified_rows["summary_statistics"]["Limit"]) == _SENTINEL_LIMIT
     assert {key: row for key, row in modified_rows.items() if key != "summary_statistics"} == {
         key: row for key, row in rows.items() if key != "summary_statistics"
     }
     assert file_state(tolerance_file) == file_before
+
+
+@pytest.mark.parametrize(
+    ("edit", "named"),
+    [
+        pytest.param(_latin1_label, None, id="not_utf8"),
+        pytest.param(
+            _setting("summary_statistics", "limit", _HUGE_INTEGER),
+            "classes.summary_statistics.limit",
+            id="integer_beyond_float_range",
+        ),
+        pytest.param(_deeply_nested, None, id="nested_beyond_recursion_limit"),
+        pytest.param(
+            _setting("categorical", "limit", 0.5),
+            "classes.categorical.limit",
+            id="categorical_limit",
+        ),
+        pytest.param(
+            _setting("rounded_listing", "limit", 1e-3),
+            "classes.rounded_listing.limit",
+            id="rounded_listing_limit",
+        ),
+        pytest.param(
+            _setting(
+                "summary_statistics",
+                "fields",
+                list(compare.compared_fields()["summary_statistics"]),
+            ),
+            "classes.summary_statistics.fields",
+            id="fields_in_file",
+        ),
+        pytest.param(_setting("counts", "limit", 1), "classes.counts.limit", id="counts_limit_1"),
+        pytest.param(_setting(None, "comment", "extra"), "'comment'", id="unknown_top_level_key"),
+        pytest.param(
+            _setting(None, "description", ["not", "text"]), "description", id="description_list"
+        ),
+    ],
+)
+def test_load_tolerances_rejects_invalid_file(
+    edit: Callable[[dict[str, Any]], bytes],
+    named: str | None,
+    repo_paths: RepoPaths,
+    tmp_path: Path,
+) -> None:
+    """An invalid tolerance file is an input error naming its absolute path and the key.
+
+    Each case edits the repository file as ``compare.load_tolerances`` gives it and writes the
+    result under ``tmp_path``: bytes that are not UTF-8, a limit beyond the floating-point range,
+    nesting beyond the parser's recursion limit, a key the class does not read (a ``limit`` of
+    ``categorical`` or ``rounded_listing``, or a field list, which only ``wpct.schemas`` holds),
+    a counts limit other than 0 (counts compare by exact integer equality), an unknown top-level
+    key, and a description that is not a string. Loading raises ``ValueError``, which the command
+    line reports with exit code 2, and the message names the absolute file path and the offending
+    key where there is one; it never repeats the 401-digit integer.
+    """
+    target = tmp_path / "tolerances.json"
+    target.write_bytes(edit(compare.load_tolerances(repo_paths.tolerances_file).to_dict()))
+
+    with pytest.raises(ValueError) as excinfo:
+        compare.load_tolerances(target)
+
+    message = str(excinfo.value)
+    assert f"invalid tolerance file {target.absolute()}: " in message
+    if named is not None:
+        assert named in message
+    assert str(_HUGE_INTEGER) not in message
+
+
+def test_write_report_renders_applied_tolerances(
+    results: Mapping[str, object],
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+    write_paths: RepoPaths,
+    file_state: _FileState,
+) -> None:
+    """``write_report`` prints the tolerances the comparisons applied; it never re-reads the file.
+
+    The comparisons are judged under a copy of the loaded tolerances whose summary-statistics
+    limit is a sentinel. Every group that applies a tolerance carries that copy, the written table
+    shows the sentinel while ``tolerances.json`` keeps its own limit and stays unchanged, and the
+    bytes are those ``render_report`` gives for the copy.
+    """
+    tolerance_file = repo_paths.tolerances_file
+    file_before = file_state(tolerance_file)
+    modified = _with_sentinel_limit(tolerances)
+    comparisons = _clean_comparisons_under(modified, results, listing_tables, sas_checkpoints)
+    no_tolerance = {compare.GROUP_NOT_COMPARED, compare.GROUP_HALT}
+    for program in PROGRAMS:
+        for group in comparisons[program]:
+            assert group.tolerances is (None if group.key in no_tolerance else modified)
+    facts = provenance.collect(write_paths)
+
+    path = report.write_report(results, comparisons, facts, write_paths)
+
+    text = path.read_bytes().decode("utf-8")
+    assert float(_tolerance_rows(text)["summary_statistics"]["Limit"]) == _SENTINEL_LIMIT
+    assert compare.load_tolerances(tolerance_file).limit("summary_statistics") != _SENTINEL_LIMIT
+    assert text == report.render_report(results, comparisons, facts, modified)
+    assert file_state(tolerance_file) == file_before
+
+
+@pytest.mark.parametrize("snapshots", ["mixed", "none"])
+def test_write_report_needs_one_applied_snapshot(
+    snapshots: str,
+    results: Mapping[str, object],
+    clean_comparisons: _Comparisons,
+    listing_tables: Mapping[str, Sequence[object]],
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    write_paths: RepoPaths,
+) -> None:
+    """Without exactly one tolerance snapshot across the groups, ``write_report`` writes nothing.
+
+    - ``mixed``: WPCT-F.07.02 is judged under the loaded tolerances and WPCT-F.07.07 under a copy
+      with a sentinel limit, so no single table matches every verdict.
+    - ``none``: no group carries the tolerances it was judged under.
+
+    Either raises ``ValueError`` before anything is created, so the write root stays empty.
+    """
+    if snapshots == "mixed":
+        other = _clean_comparisons_under(
+            _with_sentinel_limit(tolerances), results, listing_tables, sas_checkpoints
+        )
+        comparisons = {**clean_comparisons, PROGRAM_07_07: other[PROGRAM_07_07]}
+        match = "2 different tolerance snapshots"
+    else:
+        comparisons = {
+            program: tuple(
+                dataclasses.replace(group, tolerances=None) for group in clean_comparisons[program]
+            )
+            for program in PROGRAMS
+        }
+        match = "no comparison group carries the tolerances"
+    facts = provenance.collect(write_paths)
+
+    with pytest.raises(ValueError, match=match):
+        report.write_report(results, comparisons, facts, write_paths)
+
+    assert _tree(write_paths.write_root) == {}
+
+
+def test_render_report_rejects_other_tolerances(
+    results: Mapping[str, object],
+    clean_comparisons: _Comparisons,
+    tolerances: compare.Tolerances,
+    write_paths: RepoPaths,
+) -> None:
+    """``render_report`` refuses a tolerance table other than the one the comparisons applied.
+
+    The clean-checkout groups carry the loaded tolerances, so rendering them with a copy whose
+    summary-statistics limit is a sentinel raises ``ValueError`` naming the first such group.
+    """
+    facts = provenance.collect(write_paths)
+    first = clean_comparisons[PROGRAM_07_02][0]
+    assert first.tolerances == tolerances
+
+    with pytest.raises(ValueError, match="judged under tolerances other than") as excinfo:
+        report.render_report(results, clean_comparisons, facts, _with_sentinel_limit(tolerances))
+
+    assert f"comparisons[{PROGRAM_07_02!r}][0] ({first.key})" in str(excinfo.value)
 
 
 def test_summary_counts(written: _Written, clean_comparisons: _Comparisons) -> None:
@@ -537,8 +773,231 @@ def test_not_compared_rows_never_counted_as_pass(
     assert listed == [(synthetic.title, f"synthetic NC {n}", reason) for n in (1, 2, 3)]
 
 
+#: Every outcome path of the primitive comparison rules, as ``(tolerance class, Python value, SAS
+#: value or displayed token, expected status, expected reason)``. The values are functions of the
+#: loaded tolerances, so no limit is restated here; ``rounded_listing`` cases go through
+#: ``check_rounded`` and the others through ``check_value``.
+_RULE_CASES = (
+    pytest.param(
+        "counts",
+        lambda t: 3549 + int(t.limit("counts")),
+        lambda t: 3548,
+        compare.FAIL,
+        "counts differ",
+        id="count-differs",
+    ),
+    pytest.param(
+        "categorical", lambda t: 815.0, lambda t: 817, compare.FAIL, "values differ", id="number"
+    ),
+    pytest.param(
+        "categorical",
+        lambda t: "CDISCPILOT01",
+        lambda t: "CDISCPILOT02",
+        compare.FAIL,
+        "values differ",
+        id="text",
+    ),
+    pytest.param(
+        "summary_statistics",
+        lambda t: 12.5 + 2 * t.limit("summary_statistics"),
+        lambda t: 12.5,
+        compare.FAIL,
+        "values differ by more than",
+        id="summary-absolute",
+    ),
+    pytest.param(
+        "p_values",
+        lambda t: 0.25 + 2 * t.limit("p_values"),
+        lambda t: 0.25,
+        compare.FAIL,
+        "values differ by more than",
+        id="p-value-absolute",
+    ),
+    pytest.param(
+        "record_numeric",
+        lambda t: 120.0 + 2 * t.limit("record_numeric"),
+        lambda t: 120.0,
+        compare.FAIL,
+        "values differ by more than",
+        id="record-absolute",
+    ),
+    pytest.param(
+        "record_numeric",
+        lambda t: 120.0,
+        lambda t: "ABC-123",
+        compare.FAIL,
+        "SAS value is not a number",
+        id="record-not-a-number",
+    ),
+    pytest.param(
+        "glm_estimates",
+        lambda t: 2.5 * (1 + 3 * t.limit("glm_estimates")),
+        lambda t: 2.5,
+        compare.FAIL,
+        "× |SAS value|",
+        id="glm-relative",
+    ),
+    pytest.param(
+        "glm_estimates",
+        lambda t: t.limit("glm_estimates"),
+        lambda t: 0.0,
+        compare.FAIL,
+        "only an exact 0 agrees",
+        id="glm-zero-reference",
+    ),
+    pytest.param(
+        "rounded_listing",
+        lambda t: 0.1234 + 3 * t.half_unit * 10.0**-4,
+        lambda t: "0.1234",
+        compare.FAIL,
+        "displayed precision (4 dp)",
+        id="displayed-precision",
+    ),
+    pytest.param(
+        "rounded_listing",
+        lambda t: 2 * t.bound_upper,
+        lambda t: t.bound_token,
+        compare.FAIL,
+        "outside the bound",
+        id="bound-above",
+    ),
+    pytest.param(
+        "rounded_listing",
+        lambda t: -t.bound_upper / 2,
+        lambda t: t.bound_token,
+        compare.FAIL,
+        "outside the bound",
+        id="bound-negative",
+    ),
+    pytest.param("counts", lambda t: 3548, lambda t: 3548, compare.PASS, "", id="count-equal"),
+    pytest.param(
+        "categorical",
+        lambda t: "CDISCPILOT01",
+        lambda t: "CDISCPILOT01",
+        compare.PASS,
+        "",
+        id="text-equal",
+    ),
+    pytest.param(
+        "summary_statistics",
+        lambda t: 12.5 + t.limit("summary_statistics") / 2,
+        lambda t: 12.5,
+        compare.PASS,
+        "",
+        id="absolute-within",
+    ),
+    pytest.param(
+        "glm_estimates",
+        lambda t: 2.5 * (1 + t.limit("glm_estimates") / 2),
+        lambda t: 2.5,
+        compare.PASS,
+        "",
+        id="relative-within",
+    ),
+    pytest.param(
+        "glm_estimates", lambda t: 0.0, lambda t: 0.0, compare.PASS, "", id="zero-reference-exact"
+    ),
+    pytest.param(
+        "rounded_listing",
+        lambda t: 0.1234 + t.half_unit * 10.0**-4 / 2,
+        lambda t: "0.1234",
+        compare.PASS,
+        "",
+        id="displayed-within",
+    ),
+    pytest.param(
+        "rounded_listing",
+        lambda t: t.bound_upper / 2,
+        lambda t: t.bound_token,
+        compare.PASS,
+        "",
+        id="bound-within",
+    ),
+    pytest.param(
+        "record_numeric",
+        lambda t: math.nan,
+        lambda t: math.nan,
+        compare.PASS,
+        "both missing",
+        id="both-missing",
+    ),
+)
+
+
+@pytest.mark.parametrize(("class_key", "python", "sas", "status", "reason"), _RULE_CASES)
+def test_rule_outcome_reasons(
+    class_key: str,
+    python: Callable[[compare.Tolerances], object],
+    sas: Callable[[compare.Tolerances], object],
+    status: str,
+    reason: str,
+    tolerances: compare.Tolerances,
+) -> None:
+    """Every FAIL of a primitive comparison rule says why, without showing either value.
+
+    Unequal counts and categorical values, an absolute or relative limit exceeded, a displayed
+    precision exceeded and a value outside the ``<.0001`` bound each FAIL with an explanation, so
+    no failed report row lacks one. The explanation names neither value, so a record-level field
+    mismatch can report only the keys of its records. A plain PASS has no reason, and a PASS of
+    the missing rule keeps ``both missing``.
+    """
+    py_value, sas_value = python(tolerances), sas(tolerances)
+    if class_key == "rounded_listing":
+        outcome = compare.check_rounded(sas_value, py_value, tolerances)
+    else:
+        outcome = compare.check_value(class_key, py_value, sas_value, tolerances)
+    assert outcome.status == status
+    if status == compare.PASS:
+        assert outcome.reason == reason
+        return
+    assert reason in outcome.reason
+    for value in (py_value, sas_value):
+        assert str(value) not in outcome.reason, f"{outcome.reason!r} shows the value {value!r}"
+
+
+def test_failed_checkpoint_reason_in_report(
+    results: Mapping[str, object],
+    clean_comparisons: _Comparisons,
+    sas_checkpoints: Mapping[str, Sequence[object]],
+    tolerances: compare.Tolerances,
+    repo_paths: RepoPaths,
+) -> None:
+    """A failed log checkpoint states why, once per count, in the report's Reason column.
+
+    The first WPCT-F.07.02 checkpoint, ADVS at an ``obs/vars`` log line, is given more Python
+    observations and variables than the counts limit allows. Its row FAILs as ``observation count
+    differs; variable count differs``, every other checkpoint still passes without a reason, and
+    the report's log-checkpoint table shows that reason beside the FAIL.
+    """
+    result = results[PROGRAM_07_02]
+    first, *others = result.checkpoints
+    assert first.NVARS is not None
+    step = 1 + int(tolerances.limit("counts"))
+    altered = dataclasses.replace(first, NOBS=first.NOBS + step, NVARS=first.NVARS + step)
+    group = compare.compare_counts(
+        PROGRAM_07_02, (altered, *others), sas_checkpoints[PROGRAM_07_02], tolerances
+    )
+    failed = [row for row in group.rows if row.status == compare.FAIL]
+    assert [row.quantity for row in failed] == [f"{first.SAS_DATASET} #{first.OCCURRENCE}"]
+    assert failed[0].reason == "observation count differs; variable count differs"
+    assert all(row.reason == "" for row in group.rows if row.status == compare.PASS)
+    assert len(group.rows) == len(failed) + group.n_pass
+
+    groups = tuple(
+        group if existing.key == compare.GROUP_LOG_CHECKPOINTS else existing
+        for existing in clean_comparisons[PROGRAM_07_02]
+    )
+    comparisons = {**clean_comparisons, PROGRAM_07_02: groups}
+    text = report.render_report(results, comparisons, provenance.collect(repo_paths), tolerances)
+    table = _single_table(_subsection(_section(text, PROGRAM_07_02), group.title))
+    reported = [
+        (entry["Quantity"], entry["Reason"]) for entry in table if entry["Result"] == compare.FAIL
+    ]
+    assert reported == [(failed[0].quantity, failed[0].reason)]
+
+
 @pytest.mark.parametrize("program", PROGRAMS)
-def test_merged_pval_group_separate(
+def test_s02_trn_05_and_s07_trn_08_merged_pval_group_separate(
     program: str, written: _Written, clean_comparisons: _Comparisons
 ) -> None:
     """The merged ``CSS_STATS.pval`` cells (S02-TRN-05, S07-TRN-08) have their own table.
@@ -627,7 +1086,9 @@ def test_rounded_reference_wording(
     assert sum(line.startswith(_ROUNDED_START) for line in written.text.split("\n")) == notes_seen
 
 
-def test_not_compared_section(written: _Written, clean_comparisons: _Comparisons) -> None:
+def test_s02_and_s07_mod_01_not_compared_section(
+    written: _Written, clean_comparisons: _Comparisons
+) -> None:
     """Not compared lists every NOT COMPARED row with its reason, and claims no equivalence.
 
     The table holds exactly the NOT COMPARED rows of both programs, in report order. Without SAS
@@ -1018,3 +1479,59 @@ def test_cli_rejects_other_arguments(argv: list[str], capsys: pytest.CaptureFixt
 
     assert excinfo.value.code == 2
     assert "error:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("host_handler", "root_level", "expected_err"),
+    [
+        pytest.param(
+            None,
+            logging.WARNING,
+            "WARNING: wpct.derivation: (DERIVE_LASTMINMAX_MEASURES) Omitting obs without a "
+            "post-baseline measure, such as USUBJID='01-701-1015'\n",
+            id="unconfigured_root",
+        ),
+        pytest.param(logging.NullHandler(), logging.DEBUG, "", id="host_configured_root"),
+    ],
+)
+def test_cli_logging_configuration(
+    host_handler: logging.Handler | None,
+    root_level: int,
+    expected_err: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``main``'s logging set-up writes warnings to stderr as ``WARNING: <logger>: <message>``.
+
+    It acts only on a root logger without handlers, as in a fresh ``python -m wpct``, and then
+    passes WARNING records but not INFO ones. A root logger the host has configured keeps its
+    handlers and level, and nothing reaches stderr. The set-up is called alone, because ``main``
+    would write the checkout's outputs and report; pytest's own root handlers are set aside for the
+    call and restored afterwards.
+    """
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    host_handlers = [] if host_handler is None else [host_handler]
+    root.handlers = host_handlers[:]
+    root.setLevel(root_level)
+    try:
+        cli._configure_logging()
+        handlers, level = root.handlers[:], root.level
+        logger = logging.getLogger("wpct.derivation")
+        logger.info("not a warning")
+        logger.warning(
+            "(DERIVE_LASTMINMAX_MEASURES) Omitting obs without a post-baseline measure, such as %s",
+            "USUBJID='01-701-1015'",
+        )
+    finally:
+        for handler in root.handlers:
+            if handler not in host_handlers:
+                handler.close()
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+
+    assert capsys.readouterr().err == expected_err
+    assert level == root_level
+    if host_handler is None:
+        assert len(handlers) == 1 and isinstance(handlers[0], logging.StreamHandler)
+    else:
+        assert handlers == host_handlers

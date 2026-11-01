@@ -85,7 +85,9 @@ def _edited_line_copy(source: Path, destination_dir: Path, line: int, old: str, 
 # --- GLM listings ---------------------------------------------------------------------------------
 
 
-def test_listing_07_02_row_counts(listing_tables: Mapping[str, tuple[ListingTable, ...]]) -> None:
+def test_s02_mod_02_listing_row_counts(
+    listing_tables: Mapping[str, tuple[ListingTable, ...]]
+) -> None:
     """WPCT-F.07.02.lst holds 2 endpoint tables of 5 rows, 10 rows in all (S02-MOD-02).
 
     [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst:8-14,23-29]: no BY line, dependent ``CHG``,
@@ -112,7 +114,9 @@ def test_listing_07_02_row_counts(listing_tables: Mapping[str, tuple[ListingTabl
         assert table.problems == ()
 
 
-def test_listing_07_07_row_counts(listing_tables: Mapping[str, tuple[ListingTable, ...]]) -> None:
+def test_s07_mod_02_03_listing_row_counts(
+    listing_tables: Mapping[str, tuple[ListingTable, ...]]
+) -> None:
     """WPCT-F.07.07.lst holds 4 per-study tables of 5 rows and 2 pooled of 6, 32 rows in all.
 
     S07-MOD-02 fits BY ``studynum``, so its tables carry ``studynum=`` BY lines; the S07-MOD-03
@@ -252,7 +256,7 @@ def test_listing_tokens(
     assert _Tokens(row.ESTIMATE, row.BIASED, row.STDERR, row.TVALUE, row.PROBT) == expected
 
 
-def test_glm_table_map_order() -> None:
+def test_s02_trn_04_and_s07_trn_07_glm_table_map_order() -> None:
     """Tables map to strata by SAS loop order, not by the page titles, which lag one iteration.
 
     07.02 runs DIABP/815 then SYSBP/816 at the endpoint visit 99 (S02-TRN-04, S02-MOD-02); 07.07
@@ -490,7 +494,7 @@ def test_log_checkpoint_map_sizes() -> None:
 
 
 @pytest.mark.parametrize("position", _pinned_cases(_PINNED_07_02))
-def test_log_07_02_pinned_lines(
+def test_s02_flt_01_to_trn_05_log_pinned_lines(
     position: int,
     sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
 ) -> None:
@@ -504,7 +508,7 @@ def test_log_07_02_pinned_lines(
 
 
 @pytest.mark.parametrize("position", _pinned_cases(_PINNED_07_07))
-def test_log_07_07_pinned_lines(
+def test_lmm_flt_01_to_s07_trn_08_log_pinned_lines(
     position: int,
     sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]],
 ) -> None:
@@ -586,9 +590,7 @@ def test_log_mismatch_reported(
             "reference listing not found: ",
         ),
         (
-            functools.partial(
-                parse_log_checkpoints, checkpoint_map=LOG_CHECKPOINT_MAP[PROGRAM_07_02]
-            ),
+            functools.partial(parse_log_checkpoints, map=LOG_CHECKPOINT_MAP[PROGRAM_07_02]),
             f"{PROGRAM_07_02}.log",
             "reference log not found: ",
         ),
@@ -625,7 +627,7 @@ def test_load_sas_exports_empty_dir(create: bool, tmp_path: Path) -> None:
     assert directory.exists() is create
 
 
-def test_load_sas_exports_latin1(tmp_path: Path) -> None:
+def test_s07_trn_05_load_sas_exports_latin1(tmp_path: Path) -> None:
     """A Latin-1 export keeps the pooled ``'A0'x`` byte; names fold up and ``.`` becomes NaN.
 
     The pooled identifier ``'A0'x !! 'Pooled'`` (S07-TRN-05, D-16) survives only because the
@@ -656,7 +658,7 @@ def test_load_sas_exports_latin1(tmp_path: Path) -> None:
     assert [name for name, loaded in exports.items() if loaded is not None] == [file_name]
 
 
-def test_load_sas_exports_parameter_estimates(tmp_path: Path) -> None:
+def test_s02_mod_02_load_sas_exports_parameter_estimates(tmp_path: Path) -> None:
     """A ParameterEstimates export gains ``EFFECT`` and ``LEVEL`` before ``PARAMETER``.
 
     ``split_parameter`` keys the SAS labels on the same pair as the listing rows, and the four
@@ -692,18 +694,236 @@ def test_load_sas_exports_parameter_estimates(tmp_path: Path) -> None:
     assert frame[["STDERR", "TVALUE", "PROBT"]].iloc[1].isna().all()
 
 
+def test_load_sas_exports_csv_quoting(tmp_path: Path) -> None:
+    """Standard CSV quoting, CRLF records and blank lines load as written.
+
+    A quoted comma, a quoted line break and a doubled quote keep their characters; an explicitly
+    empty field is an empty character value or a missing number; blank lines are not records; an
+    extra column such as ODS ``Dependent`` stays text.
+    """
+    file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
+    (tmp_path / file_name).write_bytes(
+        b"\r\n"
+        b"studyid,usubjid,saffl,param,base,chg,Dependent\r\n"
+        b'CDISCPILOT01,01-701-1015,Y,"Diastolic, mmHg",80,-4,CHG\r\n'
+        b"\r\n"
+        b'CDISCPILOT01,01-701-1023,,"Line one\r\nline two",,,CHG\r\n'
+        b'CDISCPILOT02,01-701-1028,Y,"Say ""hi""",.,2.5,\r\n'
+    )
+
+    frame = load_sas_exports(dir=tmp_path)[file_name]
+
+    assert frame is not None
+    columns = ["STUDYID", "USUBJID", "SAFFL", "PARAM", "BASE", "CHG", "DEPENDENT"]
+    assert list(frame.columns) == columns
+    assert len(frame) == 3
+    assert frame["USUBJID"].tolist() == ["01-701-1015", "01-701-1023", "01-701-1028"]
+    assert frame["SAFFL"].tolist() == ["Y", "", "Y"]
+    assert frame["PARAM"].tolist() == ["Diastolic, mmHg", "Line one\r\nline two", 'Say "hi"']
+    assert frame["DEPENDENT"].tolist() == ["CHG", "CHG", ""]
+    assert frame["BASE"].iloc[0] == 80.0
+    assert frame["BASE"].iloc[1:].isna().all()
+    assert frame["CHG"].iloc[0] == -4.0
+    assert math.isnan(frame["CHG"].iloc[1])
+    assert frame["CHG"].iloc[2] == 2.5
+
+
+def test_load_sas_exports_header_only(tmp_path: Path) -> None:
+    """A header without records loads as an empty frame that keeps its columns."""
+    file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
+    (tmp_path / file_name).write_bytes(b"studyid,usubjid,chg\n")
+
+    frame = load_sas_exports(tmp_path)[file_name]
+
+    assert frame is not None
+    assert list(frame.columns) == ["STUDYID", "USUBJID", "CHG"]
+    assert frame.empty
+
+
+def test_load_sas_exports_one_column_quoted_empty(tmp_path: Path) -> None:
+    """In a one-column export a lone ``""`` is a record holding a missing value, not a blank line.
+
+    Only the empty physical line at the end is skipped.
+    """
+    file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
+    (tmp_path / file_name).write_bytes(b'CHG\n1\n""\n\n')
+
+    frame = load_sas_exports(tmp_path)[file_name]
+
+    assert frame is not None
+    assert list(frame.columns) == ["CHG"]
+    assert len(frame) == 2
+    assert frame["CHG"].dtype == "float64"
+    assert frame["CHG"].iloc[0] == 1.0
+    assert math.isnan(frame["CHG"].iloc[1])
+
+
+_HEADER_AND_ROW = b"studyid,usubjid,chg\nCDISCPILOT01,01-701-1015,1\n"
+_ONE_FIELD_ROW_2 = ": data row 2, ending at line 3, has 1 fields but the header has 3$"
+
+
 @pytest.mark.parametrize(
     "content, message",
     [
-        ("studyid,usubjid,chg\nCDISCPILOT01,01-701-1015,nan\n", "is not a SAS numeric value"),
-        ("studyid,STUDYID,chg\nCDISCPILOT01,CDISCPILOT01,1\n", "columns that differ only in case"),
+        (b"studyid,usubjid,chg\nCDISCPILOT01,01-701-1015,nan\n", "is not a SAS numeric value"),
+        (
+            b"studyid,STUDYID,chg\nCDISCPILOT01,CDISCPILOT01,1\n",
+            "has columns with the same name ignoring case: STUDYID at fields 1, 2$",
+        ),
+        (
+            b"studyid,usubjid,chg,chg\nCDISCPILOT01,01-701-1015,1,99\n",
+            "has columns with the same name ignoring case: CHG at fields 3, 4$",
+        ),
+        (
+            b"01-701-1015,01-701-1015,chg\nCDISCPILOT01,01-701-1015,1\n",
+            "has columns with the same name ignoring case: fields 1, 2$",
+        ),
+        (
+            b"studyid,usubjid,chg\nX,CDISCPILOT01,01-701-1015,1\nY,CDISCPILOT01,01-701-1023,2\n",
+            ": data row 1, ending at line 2, has 4 fields but the header has 3$",
+        ),
+        (
+            b"studyid,usubjid,chg\nCDISCPILOT01,01-701-1015\n",
+            ": data row 1, ending at line 2, has 2 fields but the header has 3$",
+        ),
+        (
+            (
+                b"studyid,usubjid,chg\n\nCDISCPILOT01,01-701-1015,1\n"
+                b"CDISCPILOT01,01-701-1023,2,extra,more\n"
+            ),
+            ": data row 2, ending at line 4, has 5 fields but the header has 3$",
+        ),
+        (_HEADER_AND_ROW + b'""\n', _ONE_FIELD_ROW_2),
+        (_HEADER_AND_ROW + b'"   "\n', _ONE_FIELD_ROW_2),
+        (_HEADER_AND_ROW + b'"\t"\n', _ONE_FIELD_ROW_2),
+        (_HEADER_AND_ROW + b"  \n", _ONE_FIELD_ROW_2),
+        (b" \t\nstudyid,usubjid,chg\n", "has a header column without a name: field 1$"),
+        (
+            b"studyid, ,chg\nCDISCPILOT01,01-701-1015,1\n",
+            "has a header column without a name: field 2$",
+        ),
+        (
+            b"studyid,,chg,\nCDISCPILOT01,01-701-1015,1,\n",
+            "has header columns without a name: fields 2, 4$",
+        ),
+        (
+            b'studyid,usubjid,chg\n"CDISCPILOT01,01-701-1015,1\n',
+            ": line 2: unexpected end of data$",
+        ),
+        (bytes(range(256)) * 20, ": line 1: line contains NUL$"),
+        (b"", " has no header row$"),
+        (b"\n\r\n\n", " has no header row$"),
     ],
-    ids=["non-sas-number", "case-duplicate-columns"],
+    ids=[
+        "non-sas-number",
+        "case-duplicate-columns",
+        "identical-duplicate-columns",
+        "duplicate-non-sas-names",
+        "surplus-leading-field",
+        "short-record",
+        "ragged-record",
+        "quoted-empty-record",
+        "quoted-blanks-record",
+        "quoted-tab-record",
+        "unquoted-blanks-record",
+        "blanks-before-header",
+        "unnamed-header-column",
+        "unnamed-header-columns",
+        "unterminated-quote",
+        "binary-garbage",
+        "zero-byte-file",
+        "blank-file",
+    ],
 )
-def test_load_sas_exports_rejects(content: str, message: str, tmp_path: Path) -> None:
-    """A malformed export raises rather than loading a silently altered frame."""
-    file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
-    (tmp_path / file_name).write_bytes(content.encode("latin-1"))
+def test_load_sas_exports_rejects(content: bytes, message: str, tmp_path: Path) -> None:
+    """A malformed export raises one line naming the file, never loading an altered frame.
 
-    with pytest.raises(InputDataError, match=message):
+    pandas would rename an identical duplicate header to ``CHG.1``, take surplus leading fields
+    as an ignored index and pad short records; the loader's own parse refuses all three.
+    """
+    file_name = export_spec(PROGRAM_07_07, "css_anadata").sas_export_file
+    export = tmp_path / file_name
+    export.write_bytes(content)
+
+    with pytest.raises(InputDataError, match=message) as raised:
         load_sas_exports(tmp_path)
+
+    text = str(raised.value)
+    assert str(export.absolute()) in text
+    assert "\n" not in text
+    assert "01-701-1015" not in text
+
+
+_ANADATA_HEAD = b"studyid,usubjid,base,chg\nCDISCPILOT01,01-701-1023,80,-4\n"
+
+
+@pytest.mark.parametrize(
+    "program_id, name, content, column, row, reason, hidden",
+    [
+        (
+            PROGRAM_07_07,
+            "css_anadata",
+            _ANADATA_HEAD + b"CDISCPILOT01,01-701-1028,80,120 mmHg\n",
+            "CHG",
+            2,
+            "the value is not a SAS numeric value",
+            ("120 mmHg", "mmHg"),
+        ),
+        (
+            PROGRAM_07_07,
+            "css_anadata",
+            _ANADATA_HEAD + b"CDISCPILOT01,,80,01-701-1015\n",
+            "CHG",
+            2,
+            "the value is not a SAS numeric value",
+            ("01-701-1015",),
+        ),
+        (
+            PROGRAM_07_07,
+            "css_anadata",
+            _ANADATA_HEAD + b"CDISCPILOT01,,01-701-1015,-4\n",
+            "BASE",
+            2,
+            "the value is not a SAS numeric value",
+            ("01-701-1015",),
+        ),
+        (
+            PROGRAM_07_02,
+            "parameter_estimates",
+            (
+                b"PARAMCD,ATPTN,Parameter,Estimate,StdErr,tValue,Probt\n"
+                b"DIABP,815,Intercept,1,1,1,0.5\n"
+                b"DIABP,815,TRTPN 01-701-1015 54,1,1,1,0.5\n"
+            ),
+            "PARAMETER",
+            2,
+            "parameter label of 3 words cannot be split into an effect and a CLASS level",
+            ("01-701-1015", "TRTPN 01-701-1015"),
+        ),
+    ],
+    ids=["measurement-in-chg", "subject-id-in-chg", "subject-id-in-base", "parameter-label"],
+)
+def test_load_sas_exports_redacts_rejected_values(
+    program_id: str,
+    name: str,
+    content: bytes,
+    column: str,
+    row: int,
+    reason: str,
+    hidden: tuple[str, ...],
+    tmp_path: Path,
+) -> None:
+    """A rejected cell is located by file, column and data row, and its contents never shown.
+
+    The CLI prints the message on stderr, so a measurement or a subject identifier misplaced in
+    a numeric column or a ``Parameter`` label must not reach it.
+    """
+    export = tmp_path / export_spec(program_id, name).sas_export_file
+    export.write_bytes(content)
+
+    with pytest.raises(InputDataError) as raised:
+        load_sas_exports(tmp_path)
+
+    text = str(raised.value)
+    assert text == f"SAS export {export.absolute()}: column {column}, data row {row}: {reason}"
+    assert [token for token in hidden if token in text] == []

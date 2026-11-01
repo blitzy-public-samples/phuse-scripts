@@ -17,8 +17,8 @@ so any module may depend on it.
 * ``OutputPathError`` reports a target refused by the write policy: the package
   writes only below ``python/wpct/outputs/`` and to
   ``python/wpct/reports/equivalence_report.md`` under the write root, so every
-  other target, including any destination reached through a symlink, is
-  refused before it is opened.
+  other target, including any fixed destination reached through a symlink
+  below the write root, is refused before it is opened.
 """
 
 from __future__ import annotations
@@ -36,15 +36,27 @@ _PERMITTED_DESTINATIONS = (
 
 
 class WpctError(Exception):
-    """Base class of every error the package raises deliberately.
+    """Common base of the package's operational errors.
 
-    The command line catches this family to report package failures without a
-    traceback, while unexpected exceptions still propagate.
+    Its subclasses are ``InputDataError`` (a required input is missing, or an
+    input is unreadable, malformed, lacks required variables or has a case
+    clash), ``AnalysisHalted`` (a halting check failed) and ``OutputPathError``
+    (a write destination was refused). The command line catches each of them
+    and reports it without a traceback.
+
+    Not every deliberate error belongs to this family. Argument, configuration
+    and schema validation raise the standard ``TypeError``, ``ValueError`` or
+    ``KeyError``; for example, constructing an inconsistent
+    ``schemas.ExportSpec`` raises ``ValueError``. The tolerance loader,
+    ``compare.load_tolerances``, raises ``OSError`` or ``ValueError``, which the
+    command line also reports as an input error. Any other exception the command
+    line does not handle propagates with its traceback.
     """
 
 
 class InputDataError(WpctError):
-    """A required input is missing, unreadable, lacks required variables, or has a case clash.
+    """A required input is missing, or an input is unreadable, malformed, lacks
+    required variables or has a case clash.
 
     Raised by ``xpt_reader`` and ``sas_reference``. The raiser supplies the full
     message, which ``str(exc)`` returns verbatim, for example:
@@ -113,15 +125,19 @@ class AnalysisHalted(WpctError):
 
 
 class OutputPathError(WpctError):
-    """A write target lies outside the permitted output locations.
+    """A write target is refused by the write policy.
 
-    Raised by ``paths.check_write_destination`` before any directory is created
-    or file opened. ``target`` is the path as requested and ``resolved`` the
-    path it resolves to once every symlink is followed; the message names both.
+    Raised by ``paths.check_write_destination`` and by the writers' fixed-target
+    check in ``export`` and ``report`` (a fixed destination reached through a
+    symlink), before any directory is created or file opened. ``target`` is the
+    path as requested and ``resolved`` the path it resolves to once every
+    symlink is followed, or its absolute form (``os.path.abspath``) when the
+    target or the write root cannot be resolved; the message names both.
 
     Attributes:
         target: The requested write target, as a ``Path``.
-        resolved: The resolved form of ``target``, as a ``Path``.
+        resolved: The resolved form of ``target``, or its absolute form when the
+            target or the write root cannot be resolved, as a ``Path``.
         reason: The caller's explanation; when ``None`` or empty the message
             states the permitted destinations instead.
     """

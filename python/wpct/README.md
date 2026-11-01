@@ -40,7 +40,7 @@ Run every command from `python/wpct/`. The package runs from there without insta
    python -m wpct reproduce
    ```
 
-   This reads `data/adam/cdisc/advs.xpt` (07.02) and `data/adam/cdisc-split/advs.xpt` (07.07) from the repository root, writes `outputs/WPCT-F.07.02/` and `outputs/WPCT-F.07.07/`, and regenerates `reports/equivalence_report.md`. It prints PASS, FAIL and NOT COMPARED counts per program and overall; the warnings for records the 07.07 derivation omits go to stderr, as SAS writes them to its log. The only option is `--sas-exports DIR`, which names a read-only directory of full-precision SAS exports (default `reference/sas_exports/`); a directory named this way must exist:
+   This reads `data/adam/cdisc/advs.xpt` (07.02) and `data/adam/cdisc-split/advs.xpt` (07.07) from the repository root, writes `outputs/WPCT-F.07.02/` and `outputs/WPCT-F.07.07/`, and regenerates `reports/equivalence_report.md`. It prints PASS, FAIL and NOT COMPARED counts per program and overall; the warnings for records the 07.07 derivation omits go to stderr as `WARNING: wpct.derivation: ...` lines, as SAS writes WARNING lines to its log, and each names only the omitted group's `STUDYID`, `USUBJID`, `PARAMCD` and `ATPTN`. The only option is `--sas-exports DIR`, which names a read-only directory of full-precision SAS exports (default `reference/sas_exports/`); a directory named this way must exist:
 
    ```sh
    python -m wpct reproduce --sas-exports DIR
@@ -93,7 +93,7 @@ SAS variable names are case-insensitive, and every comparison folds them to uppe
 
 * Data are read only through `wpct/xpt_reader.py`, and SAS references only through `wpct/sas_reference.py`. Nothing opens a network connection.
 * The only writes go to `python/wpct/outputs/**` and `python/wpct/reports/equivalence_report.md`.
-* Before any directory is created or file opened, every write target passes `check_write_destination` in `wpct/paths.py`. The target is resolved with every symlink followed. Any other target, such as a SAS-era file, a path outside the checkout or a symlinked destination, raises `OutputPathError`, and nothing is written.
+* Before any directory is created or file opened, every write target passes `check_write_destination` in `wpct/paths.py`. It resolves the target with every symlink followed and raises `OutputPathError` for a target outside those two destinations, such as a SAS-era file or a path outside the checkout. Each writer's fixed-target check then requires the resolved path to be its own fixed destination, so a destination reached through a symlink below the write root (the checkout, for the command line) also raises `OutputPathError`. On either refusal the refused writer call creates no directory and writes no file, and `python -m wpct reproduce` exits with `2`. Files written by earlier calls of the run stay: the command writes the 07.02 exports, then the 07.07 exports, then the report, each in its own call.
 * The command line has no output, report or write-root option.
 
 ### Reference results

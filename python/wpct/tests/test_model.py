@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from wpct import model
+from wpct import compare, model
 from wpct.sas_semantics import format_level
 from wpct.schemas import PARAMETER_ESTIMATE_COLUMNS
 
@@ -36,10 +36,6 @@ TREATMENT_CYCLE = (81.0, 0.0, 54.0)
 N_RECORDS = 30
 #: Records per treatment level in :func:`_analysis_frame`.
 N_PER_LEVEL = N_RECORDS // len(TREATMENT_CYCLE)
-#: Relative limit for estimates, standard errors and t values against an independent solution.
-RTOL = 1e-10
-#: Absolute limit for p values against the independent solution.
-P_ATOL = 1e-12
 #: Columns that an aliased or zero-DFE row leaves missing (D-06, D-09).
 INFERENCE_COLUMNS = ("STDERR", "TVALUE", "PROBT")
 
@@ -103,13 +99,31 @@ def _full_rank_ols(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndar
     return estimate, stderr, tvalue, probt
 
 
-def _assert_finite_close(actual, expected, *, rtol: float = 0.0, atol: float = 0.0) -> None:
-    """Assert both value sets are finite and agree; a missing value never passes."""
+def _rule_class(column: str) -> str:
+    """The one tolerance class whose ``compare.compared_fields()`` (``wpct.schemas``) name
+    ``column``, matched case-insensitively as SAS names are."""
+    owners = [
+        key
+        for key, fields in compare.compared_fields().items()
+        if column.upper() in {field.upper() for field in fields}
+    ]
+    assert len(owners) == 1, (column, owners)
+    return owners[0]
+
+
+def _assert_finite_close(actual, expected, column: str, tolerances: compare.Tolerances) -> None:
+    """Assert both value sets are finite and agree, value by value through
+    ``compare.check_value``, under the limits ``tolerances.json`` sets for the class
+    ``compare.compared_fields()`` assigns ``column``; a missing value never passes."""
     actual = np.asarray(actual, dtype="float64")
     expected = np.asarray(expected, dtype="float64")
-    assert np.isfinite(actual).all(), actual
-    assert np.isfinite(expected).all(), expected
-    np.testing.assert_allclose(actual, expected, rtol=rtol, atol=atol, equal_nan=False)
+    assert actual.shape == expected.shape, (column, actual.shape, expected.shape)
+    assert np.isfinite(actual).all(), (column, actual)
+    assert np.isfinite(expected).all(), (column, expected)
+    class_key = _rule_class(column)
+    for position, (py, reference) in enumerate(zip(actual.ravel(), expected.ravel(), strict=True)):
+        outcome = compare.check_value(class_key, py, reference, tolerances)
+        assert outcome.status == compare.PASS, (column, position, py, reference, outcome)
 
 
 def _assert_aliased(row: pd.Series) -> None:
@@ -120,23 +134,26 @@ def _assert_aliased(row: pd.Series) -> None:
         assert np.isnan(row[column]), (column, row)
 
 
-def _assert_same_solution(actual: pd.DataFrame, expected: pd.DataFrame) -> None:
+def _assert_same_solution(
+    actual: pd.DataFrame, expected: pd.DataFrame, tolerances: compare.Tolerances
+) -> None:
     """Assert two ParameterEstimates tables of fits with ``DFE > 0`` describe the same solution.
 
-    Labels and aliasing flags must be identical. Every estimate must be finite and agree within
-    :data:`RTOL`; the standard error, t and p must be missing exactly on the aliased rows and agree
-    within :data:`RTOL` on the others.
+    Labels and aliasing flags must be identical. Every estimate must be finite and agree under the
+    ``glm_estimates`` rule of ``tolerances.json``; the standard error, t and p must be missing
+    exactly on the aliased rows and agree on the others under the class that
+    ``compare.compared_fields()`` assigns them (``glm_estimates`` for SE and t, ``p_values`` for p).
     """
     assert list(actual.columns) == list(PARAMETER_ESTIMATE_COLUMNS)
     labels = ["EFFECT", "LEVEL", "PARAMETER", "ALIASED"]
     assert actual[labels].to_dict("records") == expected[labels].to_dict("records")
-    _assert_finite_close(actual["ESTIMATE"], expected["ESTIMATE"], rtol=RTOL)
+    _assert_finite_close(actual["ESTIMATE"], expected["ESTIMATE"], "ESTIMATE", tolerances)
     aliased = expected["ALIASED"].to_numpy(dtype=bool)
     for column in INFERENCE_COLUMNS:
         for table in (actual, expected):
             np.testing.assert_array_equal(table[column].isna().to_numpy(), aliased, err_msg=column)
         _assert_finite_close(
-            actual.loc[~aliased, column], expected.loc[~aliased, column], rtol=RTOL
+            actual.loc[~aliased, column], expected.loc[~aliased, column], column, tolerances
         )
 
 
@@ -158,11 +175,12 @@ LEVEL_ABSENCE = pytest.mark.parametrize(
 )
 
 
-def test_matches_full_rank_ols() -> None:
+def test_s02_mod_02_matches_full_rank_ols(tolerances: compare.Tolerances) -> None:
     """S02-MOD-02, D-05: the retained columns reproduce an independent full-rank least-squares fit.
 
-    Estimates, standard errors and t values agree within a relative 1e-10 and p values within an
-    absolute 1e-12; ``DFE = n - rank``, with rank 4 once ``TRTPN 0`` is aliased.
+    Estimates, standard errors and t values agree under the ``glm_estimates`` rule of
+    ``tolerances.json`` and p values under its ``p_values`` rule; ``DFE = n - rank``, with rank 4
+    once ``TRTPN 0`` is aliased.
     """
     frame = _analysis_frame()
     rows, fit = _fit(frame)
@@ -176,10 +194,10 @@ def test_matches_full_rank_ols() -> None:
     assert rows["PARAMETER"].tolist() == ["Intercept", "BASE", "TRTPN 54", "TRTPN 81", "TRTPN 0"]
     retained = rows.iloc[:4]
     assert not retained["ALIASED"].any()
-    _assert_finite_close(retained["ESTIMATE"], estimate, rtol=RTOL)
-    _assert_finite_close(retained["STDERR"], stderr, rtol=RTOL)
-    _assert_finite_close(retained["TVALUE"], tvalue, rtol=RTOL)
-    _assert_finite_close(retained["PROBT"], probt, atol=P_ATOL)
+    for column, independent in zip(
+        ("ESTIMATE", "STDERR", "TVALUE", "PROBT"), (estimate, stderr, tvalue, probt), strict=True
+    ):
+        _assert_finite_close(retained[column], independent, column, tolerances)
     _assert_aliased(rows.iloc[4])
 
 
@@ -191,8 +209,11 @@ def test_matches_full_rank_ols() -> None:
     ],
     ids=["ref-0", "ref-54"],
 )
-def test_column_order_model_order_reference_last(
-    ref_level: int, level_order: tuple[int, ...], trtpn_parameters: tuple[str, ...]
+def test_d05_07_column_order_model_order_reference_last(
+    ref_level: int,
+    level_order: tuple[int, ...],
+    trtpn_parameters: tuple[str, ...],
+    tolerances: compare.Tolerances,
 ) -> None:
     """D-05, D-07: rows follow MODEL order, CLASS levels ascend and the ``REF=`` level comes last.
 
@@ -217,20 +238,20 @@ def test_column_order_model_order_reference_last(
 
     reference_rows, _ = _fit(_analysis_frame(), ref_level=REF_LEVEL)
     base = rows["EFFECT"] == "BASE"
-    _assert_finite_close(
-        rows.loc[base, ["ESTIMATE", "STDERR"]],
-        reference_rows.loc[base, ["ESTIMATE", "STDERR"]],
-        rtol=RTOL,
-    )
+    for column in ("ESTIMATE", "STDERR"):
+        _assert_finite_close(
+            rows.loc[base, column], reference_rows.loc[base, column], column, tolerances
+        )
 
 
-def test_constant_column_aliased() -> None:
+def test_s07_mod_03_constant_column_aliased(tolerances: compare.Tolerances) -> None:
     """S07-MOD-03, D-06, DIV-01: the constant pooled ``studynum`` is aliased, not estimated.
 
     As in [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.lst:47], ``studynum`` gets estimate 0 with
     missing standard error, t and p, and every other row equals the fit without ``studynum``. The
     minimum-norm solution that ``pinv`` would return instead spreads the Intercept over
-    ``studynum``; the contrast shows that this data would expose it.
+    ``studynum``; the contrast shows that this data would expose it, since that solution fails the
+    ``glm_estimates`` rule of ``tolerances.json`` against the port's.
     """
     frame = _analysis_frame()
     pooled_rows, pooled_fit = _fit(frame, POOLED_TERMS)
@@ -240,7 +261,7 @@ def test_constant_column_aliased() -> None:
     last = pooled_rows.iloc[-1]
     assert (last["EFFECT"], last["LEVEL"], last["PARAMETER"]) == ("STUDYNUM", "", "studynum")
     _assert_aliased(last)
-    _assert_same_solution(pooled_rows.iloc[:-1], rows)
+    _assert_same_solution(pooled_rows.iloc[:-1], rows, tolerances)
     assert pooled_fit == fit
 
     trtpn = frame["TRTPN"].to_numpy(dtype="float64")
@@ -254,11 +275,18 @@ def test_constant_column_aliased() -> None:
     )
     response = frame["CHG"].to_numpy(dtype="float64")
     minimum_norm = np.linalg.lstsq(full_design, response, rcond=None)[0]
-    assert abs(minimum_norm[-1]) > 1e-3
-    assert abs(minimum_norm[0] - pooled_rows["ESTIMATE"].iloc[0]) > 1e-3
+    # The design columns follow the pooled rows, Intercept first and studynum last. The port's
+    # studynum estimate is 0, which only an exact 0 matches, and the Intercepts differ.
+    estimate_rule = _rule_class("ESTIMATE")
+    port_estimates = pooled_rows["ESTIMATE"].to_numpy(dtype="float64")
+    for position in (-1, 0):
+        outcome = compare.check_value(
+            estimate_rule, minimum_norm[position], port_estimates[position], tolerances
+        )
+        assert outcome.status == compare.FAIL, (pooled_rows["PARAMETER"].iat[position], outcome)
 
 
-def _assert_incomplete_record_dropped(column: str) -> None:
+def _assert_incomplete_record_dropped(column: str, tolerances: compare.Tolerances) -> None:
     """Assert a record missing ``column`` is excluded: the fit equals the fit without it (D-08)."""
     frame = _analysis_frame()
     frame.loc[7, column] = np.nan
@@ -267,20 +295,20 @@ def _assert_incomplete_record_dropped(column: str) -> None:
 
     assert fit.NOBS == N_RECORDS - 1
     assert fit == expected_fit
-    _assert_same_solution(rows, expected_rows)
+    _assert_same_solution(rows, expected_rows, tolerances)
 
 
-def test_missing_base_dropped() -> None:
+def test_missing_base_dropped(tolerances: compare.Tolerances) -> None:
     """D-08: a record with missing BASE is left out of S02-MOD-02 / S07-MOD-02 fits."""
-    _assert_incomplete_record_dropped("BASE")
+    _assert_incomplete_record_dropped("BASE", tolerances)
 
 
-def test_missing_chg_dropped() -> None:
+def test_missing_chg_dropped(tolerances: compare.Tolerances) -> None:
     """D-08: a record with a missing response CHG is left out of the fit."""
-    _assert_incomplete_record_dropped("CHG")
+    _assert_incomplete_record_dropped("CHG", tolerances)
 
 
-def test_fit_without_studynum_column() -> None:
+def test_fit_without_studynum_column(tolerances: compare.Tolerances) -> None:
     """D-08: complete cases are judged over the response and the current terms only.
 
     A frame without ``studynum`` fits ``CHG = BASE TRTPN`` (S02-MOD-02, S07-MOD-02), and missing
@@ -296,7 +324,7 @@ def test_fit_without_studynum_column() -> None:
     partly_missing.loc[[2, 11, 25], "studynum"] = np.nan
     unaffected_rows, unaffected_fit = _fit(partly_missing)
     assert unaffected_fit == fit
-    _assert_same_solution(unaffected_rows, rows)
+    _assert_same_solution(unaffected_rows, rows, tolerances)
 
     _, pooled_fit = _fit(partly_missing, POOLED_TERMS)
     assert pooled_fit.NOBS == N_RECORDS - 3
@@ -320,7 +348,7 @@ def test_absent_level(make_absent: Callable[[pd.DataFrame, pd.Series], pd.DataFr
 # model.py suppresses the RuntimeWarning statsmodels raises for the 0/0 residual variance, so any
 # RuntimeWarning escaping the zero-DFE fit is an error.
 @pytest.mark.filterwarnings("error::RuntimeWarning")
-def test_zero_dfe() -> None:
+def test_zero_dfe(tolerances: compare.Tolerances) -> None:
     """D-09: with as many retained columns as records, estimates stand and SE, t and p are missing.
 
     The three records solve ``CHG = -1 + 2 BASE + 1 I(TRTPN=54)`` exactly; ``TRTPN 0`` is aliased.
@@ -333,7 +361,7 @@ def test_zero_dfe() -> None:
     assert fit == model.GlmFitRecord(NOBS=3, DFE=0, RANK=3, STATUS=model.STATUS_FITTED)
     assert rows["PARAMETER"].tolist() == ["Intercept", "BASE", "TRTPN 54", "TRTPN 0"]
     assert rows["ALIASED"].tolist() == [False, False, False, True]
-    _assert_finite_close(rows["ESTIMATE"], [-1.0, 2.0, 1.0, 0.0], atol=1e-10)
+    _assert_finite_close(rows["ESTIMATE"], [-1.0, 2.0, 1.0, 0.0], "ESTIMATE", tolerances)
     for column in INFERENCE_COLUMNS:
         assert rows[column].isna().all(), (column, rows[column].tolist())
 

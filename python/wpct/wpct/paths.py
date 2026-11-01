@@ -19,8 +19,10 @@ Reads come from ``repo_root``, the checkout:
 
 Writes go to ``write_root``, and only to two fixed destinations (ENV-03: outputs go to fixed
 locations under ``python/wpct/``): anything strictly below ``python/wpct/outputs`` and the single
-file ``python/wpct/reports/equivalence_report.md``. :func:`check_write_destination` enforces that
-data reach and write policy (Agent Action Plan 0.8) for every target before it is opened.
+file ``python/wpct/reports/equivalence_report.md``. :func:`check_write_destination` applies the
+resolved-path rule of that data reach and write policy (Agent Action Plan 0.8) to every target
+before it is opened, and the writers additionally require each resolved target to be its own
+fixed destination.
 
 Importing this module touches no file: paths are resolved only when a constructor or the guard runs.
 """
@@ -181,13 +183,24 @@ def check_write_destination(target: str | os.PathLike[str], paths: RepoPaths) ->
 
     Everything else raises :class:`~wpct.errors.OutputPathError`, naming the target and its
     resolved path: a protected repository file such as ``whitepapers/WPCT/WPCT-F.07.02.sas``, any
-    path outside the write root, the outputs directory itself, and any fixed destination whose own
-    path or a parent directory is a symlink leading elsewhere, inside or outside the checkout.
+    target that resolves outside the write root, the outputs directory itself, any target whose own
+    path or a parent directory is a symlink that makes it resolve outside the permitted locations
+    (for example to an external SAS-export CSV), and a target that cannot be resolved.
+
+    Because it compares resolved paths only, this check does not establish that a target is its
+    own fixed destination: a fixed export CSV symlinked to another file in the outputs tree, or a
+    ``python/wpct/reports`` directory symlinked into the outputs tree, resolves to a permitted
+    location and is accepted.
 
     The writers (``export.write_program_outputs`` and ``report.write_report``) must call this for
     every target of a call before creating any directory or opening any file, and open only the
     returned path, so a single rejection leaves every target of that call unopened and unchanged.
-    The check itself creates, opens and modifies nothing.
+    Before any directory is created they also apply a fixed-target check (``export._vet_target``
+    and the same comparison in ``report.write_report``): the returned path must equal the
+    unresolved target re-rooted at the resolved write root, or ``OutputPathError`` is raised.
+    Together with this function, that refuses every fixed destination reached through a symlink
+    below the write root, whether the link leads inside the checkout or outside it. The check
+    itself creates, opens and modifies nothing.
     """
     try:
         base = paths.write_root.resolve()

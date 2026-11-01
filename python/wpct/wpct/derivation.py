@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from wpct.sas_semantics import char_missing_mask, sas_sort
+from wpct.sas_semantics import char_missing_mask, format_level, sas_sort
 
 __all__ = ["LmmCounts", "LmmModeCounts", "derive_lastminmax_measure"]
 
@@ -58,6 +58,12 @@ _OMIT_NO_POST = (
     "(DERIVE_LASTMINMAX_MEASURES) Omitting obs without a post-baseline measure, such as %s"
 )
 _OMIT_NO_BASE = "(DERIVE_LASTMINMAX_MEASURES) Omitting obs without a baseline measure, such as %s"
+
+#: The only variables an LMM-FLT-02 warning names, when they are among the GRPVARS: the subject and
+#: the stratum of the omitted group. SAS ``PUT _ALL_`` also prints measurements, dates, treatment
+#: and flags, which the port never logs.
+_WARNING_CONTEXT = ("STUDYID", "USUBJID", "PARAMCD", "ATPTN")
+_NO_WARNING_CONTEXT = "(no STUDYID, USUBJID, PARAMCD or ATPTN among GRPVARS)"
 
 
 @dataclass(frozen=True)
@@ -108,11 +114,14 @@ class LmmCounts:
 
 @dataclass(frozen=True)
 class _Mode:
+    """One resolved change mode (LMM-TRN-02); ``invalid`` is the upper-cased token it replaces."""
+
     name: str
     func: str
     variable: str
     flag: str
     idx: int
+    invalid: "str | None" = None
 
 
 @dataclass(frozen=True)
@@ -149,7 +158,8 @@ def derive_lastminmax_measure(
 
     - ``c_modes``: change modes, upper-cased and processed in order with idx = 1, 2, ...
       (LMM-TRN-02). ``MIN`` and ``MAX`` take the minimum or maximum ``AVAL``, ``LAST`` the latest
-      ``ADT``. Any other token logs a warning and is processed as ``LAST``.
+      ``ADT``. Any other token is processed as ``LAST``, with a warning logged when its turn comes,
+      after the warnings of the modes before it.
     - ``flvars``: flag variable per mode, by position and upper-cased; a mode without one gets
       ``ANL<mode>FL``.
     - ``grpvars``: required GROUP BY variables; each group yields one baseline and one
@@ -162,7 +172,9 @@ def derive_lastminmax_measure(
     LMM-TRN-03 keeps every record equal to its group's extremum, ordered by ``grpvars``, ``ordvars``
     and input position (D-15, U-01), and LMM-TRN-04 keeps the first record per group. LMM-FLT-02
     drops baseline records whose group has no post-baseline record, then post-baseline records
-    whose group has no surviving baseline record, logging one warning per record. LMM-TRN-05 sets
+    whose group has no surviving baseline record, logging one warning per record that names only
+    the group's ``STUDYID``, ``USUBJID``, ``PARAMCD`` and ``ATPTN`` among ``grpvars``, never the
+    whole record that SAS ``PUT _ALL_`` prints. LMM-TRN-05 sets
     ``AVISIT='Baseline (<mode>)'``, ``AVISITN=9900+10*idx+1``, ``BASE=AVAL`` and ``CHG=0``;
     LMM-TRN-06 sets ``AVISIT='Post-baseline (<mode>)'``, ``AVISITN=9900+10*idx+2``, ``BASE`` from
     the group's baseline record and ``CHG=AVAL-BASE``.
@@ -184,7 +196,8 @@ def derive_lastminmax_measure(
     SAS behaviour for empty derivation input not established (U-03): AVLEN stays blank when
     ``%if &avlen < 20`` is evaluated [whitepapers/ADaM/derive_lastminmax_measure.sas:98-102]; this
     guard is a Python decision, not a proven SAS equivalent. When ``df`` has no rows, or LMM-FLT-01
-    removes them all, the result is an empty frame with the columns above and every count is 0.
+    removes them all, the result is an empty frame with the columns above and every count is 0; an
+    invalid mode still logs its warning.
 
     ``df`` is never modified. Raises ``ValueError`` for an empty ``c_modes`` or ``grpvars``, a name
     matching several columns, or a flag that would overwrite another output variable; ``KeyError``
@@ -236,7 +249,10 @@ def derive_lastminmax_measure(
     post_baseline = usable & ~baseline
 
     if not usable.any():
-        # U-03 guard: SAS behaviour for empty derivation input is not established.
+        # U-03 guard: SAS behaviour for empty derivation input is not established. The macro's mode
+        # loop runs whatever the data, so each invalid mode is still reported, in mode order.
+        for mode in modes:
+            _warn_invalid_mode(mode)
         empty_counts = tuple(LmmModeCounts(MODE=m.name, FLAG=m.flag, IDX=m.idx) for m in modes)
         return _empty_output(records, layout), LmmCounts(0, 0, 0, empty_counts)
 
@@ -246,6 +262,7 @@ def derive_lastminmax_measure(
     frames: list[pd.DataFrame] = []
     mode_counts: list[LmmModeCounts] = []
     for mode in modes:
+        _warn_invalid_mode(mode)
         frame, counts = _derive_mode(lmm_base, lmm_post, mode, grp, ordered, layout)
         frames.append(frame)
         mode_counts.append(counts)
@@ -282,7 +299,7 @@ def _derive_mode(
     has_post = np.fromiter(
         (key in post_keys for key in base_key_list), dtype=bool, count=len(base_first)
     )
-    _warn_omitted(base_first.loc[~has_post], _OMIT_NO_POST)
+    _warn_omitted(base_first.loc[~has_post], grp, _OMIT_NO_POST)
     base_rows = base_first.loc[has_post].reset_index(drop=True)
     base_rows[layout.avisit] = _constant(base_rows, f"Baseline ({mode.name})", object)
     base_rows[layout.avisitn] = _constant(base_rows, _AVISITN_OFFSET + 10 * mode.idx + 1, "float64")
@@ -298,7 +315,7 @@ def _derive_mode(
     has_base = np.fromiter(
         (key in base_by_key for key in post_key_list), dtype=bool, count=len(post_first)
     )
-    _warn_omitted(post_first.loc[~has_base], _OMIT_NO_BASE)
+    _warn_omitted(post_first.loc[~has_base], grp, _OMIT_NO_BASE)
     post_rows = post_first.loc[has_base].reset_index(drop=True)
     matched = [base_by_key[key] for key, keep in zip(post_key_list, has_base, strict=True) if keep]
     post_rows[layout.base] = np.asarray(matched, dtype="float64")
@@ -349,13 +366,8 @@ def _group_extremum(
 
 def _first_per_group(frame: pd.DataFrame, grp: list[str]) -> pd.DataFrame:
     """LMM-TRN-04: PROC SORT ``NODUPKEY BY grp`` on a frame already in BY order (D-14)."""
-    seen: set[tuple] = set()
-    keep = np.zeros(len(frame), dtype=bool)
-    for position, key in enumerate(_key_tuples(frame, grp)):
-        if key not in seen:
-            seen.add(key)
-            keep[position] = True
-    return frame.loc[keep].reset_index(drop=True)
+    repeated = pd.Series(_key_tuples(frame, grp), dtype=object).duplicated(keep="first")
+    return frame.loc[~repeated.to_numpy()].reset_index(drop=True)
 
 
 def _key_tuples(frame: pd.DataFrame, names: list[str]) -> list[tuple]:
@@ -383,17 +395,42 @@ def _key_tuples(frame: pd.DataFrame, names: list[str]) -> list[tuple]:
 
 def _group_codes(keys: list[tuple]) -> np.ndarray:
     """Number the distinct keys in order of first appearance."""
-    ids: dict[tuple, int] = {}
-    codes = (ids.setdefault(key, len(ids)) for key in keys)
-    return np.fromiter(codes, dtype=np.int64, count=len(keys))
+    codes, _ = pd.factorize(pd.Series(keys, dtype=object), sort=False)
+    return codes.astype(np.int64, copy=False)
 
 
-def _warn_omitted(omitted: pd.DataFrame, message: str) -> None:
-    """Log one LMM-FLT-02 warning per omitted record, as the SAS ``PUT _ALL_`` does."""
+def _warn_omitted(omitted: pd.DataFrame, grp: list[str], message: str) -> None:
+    """Log one LMM-FLT-02 warning per omitted record, naming only its group's identifiers.
+
+    SAS ``PUT _ALL_`` prints every variable of the record
+    [whitepapers/ADaM/derive_lastminmax_measure.sas:167,187]. The warning here names only the
+    :data:`_WARNING_CONTEXT` variables among ``grp``, in ``grp`` order and in ``PUT name=value``
+    style, such as ``STUDYID='CDISCPILOT01' USUBJID='01-703-1279' PARAMCD='DIABP' ATPTN=817``, so
+    no measurement, date, treatment or flag value is logged. See :func:`_context_value`.
+    """
     if omitted.empty:
         return
-    for record in omitted.drop(columns=_ROW).to_dict("records"):
-        logger.warning(message, record)
+    names = [name for name in grp if name.upper() in _WARNING_CONTEXT]
+    for values in omitted.loc[:, names].to_numpy(dtype=object):
+        context = " ".join(
+            f"{name}={_context_value(value)}" for name, value in zip(names, values, strict=True)
+        )
+        logger.warning(message, context or _NO_WARNING_CONTEXT)
+
+
+def _context_value(value: object) -> str:
+    """One value of an LMM-FLT-02 warning: text quoted by ``repr``, a number as a level label.
+
+    ``repr`` escapes control characters, so a value holding a line break cannot forge a log line.
+    A number reads as :func:`format_level` prints it, ``.`` when missing; any other value is quoted
+    as text.
+    """
+    if isinstance(value, str):
+        return repr(value)
+    try:
+        return format_level(value)
+    except TypeError:
+        return repr(str(value))
 
 
 def _constant(frame: pd.DataFrame, value: object, dtype: object) -> pd.Series:
@@ -414,17 +451,34 @@ def _empty_output(records: pd.DataFrame, layout: _Layout) -> pd.DataFrame:
 
 
 def _resolve_modes(mode_tokens: tuple[str, ...], flag_tokens: tuple[str, ...]) -> list[_Mode]:
-    """LMM-TRN-02 [whitepapers/ADaM/derive_lastminmax_measure.sas:81,113-130]."""
+    """LMM-TRN-02 [whitepapers/ADaM/derive_lastminmax_measure.sas:81,113-130].
+
+    An invalid token becomes ``LAST`` and is kept in ``invalid``; :func:`_warn_invalid_mode` logs
+    it when the mode loop reaches it, not here.
+    """
     modes: list[_Mode] = []
     for idx, token in enumerate(mode_tokens, start=1):
         name = token.upper()
+        invalid = None
         if name not in _MODE_RULES:
-            logger.warning(_INVALID_MODE, name)
-            name = "LAST"
+            invalid, name = name, "LAST"
         func, variable = _MODE_RULES[name]
         flag = flag_tokens[idx - 1].upper() if idx <= len(flag_tokens) else f"ANL{name}FL"
-        modes.append(_Mode(name=name, func=func, variable=variable, flag=flag, idx=idx))
+        modes.append(
+            _Mode(name=name, func=func, variable=variable, flag=flag, idx=idx, invalid=invalid)
+        )
     return modes
+
+
+def _warn_invalid_mode(mode: _Mode) -> None:
+    """LMM-TRN-02: the macro's ``%put WARNING`` for an invalid token, as its loop reaches the mode.
+
+    SAS issues it inside the ``%do %while`` pass of that mode
+    [whitepapers/ADaM/derive_lastminmax_measure.sas:115-127], so it follows the warnings of the
+    earlier modes and precedes those of its own.
+    """
+    if mode.invalid is not None:
+        logger.warning(_INVALID_MODE, mode.invalid)
 
 
 def _layout(

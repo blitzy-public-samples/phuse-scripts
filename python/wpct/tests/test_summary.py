@@ -5,18 +5,20 @@ Both programs compute their statistics with one PROC SUMMARY step
 port reproduces with the SAS defaults where numpy and pandas differ (Part C of
 ``docs/sas_specification.md``): D-01 quantile definition 5, D-02 the n - 1 divisor, D-03 missing
 analysis values, and D-04 and D-14 BY-group order. Expected values are hand-computed literals; the
-only other quantile source is the ``numpy.quantile`` cross-check of D-01. The frames are synthetic
-and nothing is written.
+only other quantile source is the ``numpy.quantile`` cross-check of D-01. Floating statistics are
+judged by ``compare.check_value`` under the ``summary_statistics`` rule of ``tolerances.json``;
+``n``, BY values and frame identities are exact. The frames are synthetic and nothing is written.
 """
 
 import math
+from collections.abc import Iterable
 from fractions import Fraction
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from wpct import schemas
+from wpct import compare, schemas
 from wpct.summary import proc_summary, sas_quantile_def5
 
 Q1, MEDIAN, Q3 = Fraction(1, 4), Fraction(1, 2), Fraction(3, 4)
@@ -28,6 +30,8 @@ BY_07_07 = ("STUDYID", "TRTPN", "studynum", "trtp_short")
 
 #: Every statistic except ``n``, the float64 columns of the result.
 FLOAT_STATISTICS = schemas.STATISTICS[1:]
+#: The ``tolerances.json`` class of the float statistics and of the def-5 quantiles.
+SUMMARY_CLASS = "summary_statistics"
 
 _TREATMENT_LABELS = {0.0: "P", 54.0: "X-low", 81.0: "X-high"}
 
@@ -44,8 +48,16 @@ DEF5_QUARTILES = {
 }
 
 
-def _approx(expected: object) -> object:
-    return pytest.approx(expected, abs=1e-12)
+def _assert_agree(
+    actual: "Iterable[object]", expected: "Iterable[object]", tolerances: compare.Tolerances
+) -> None:
+    """Assert equal lengths and each value agreeing with its expected value under the
+    ``summary_statistics`` rule, whose ``missing`` rule lets a missing value match only another."""
+    actual_values, expected_values = list(actual), list(expected)
+    assert len(actual_values) == len(expected_values), (actual_values, expected_values)
+    for position, (py, reference) in enumerate(zip(actual_values, expected_values)):
+        outcome = compare.check_value(SUMMARY_CLASS, py, reference, tolerances)
+        assert outcome.status == compare.PASS, (position, py, reference, outcome)
 
 
 def _frame_07_02(rows: "list[tuple[float, float, float, float]]") -> pd.DataFrame:
@@ -61,11 +73,21 @@ def _frame_07_02(rows: "list[tuple[float, float, float, float]]") -> pd.DataFram
     return frame
 
 
-def _assert_row(result: pd.DataFrame, position: int, n: int, **statistics: float) -> None:
-    """Assert ``n`` exactly and every float statistic of one result row, NaN matching NaN."""
+def _assert_row(
+    result: pd.DataFrame,
+    position: int,
+    tolerances: compare.Tolerances,
+    n: int,
+    **statistics: float,
+) -> None:
+    """Assert ``n`` exactly and every float statistic of one result row under the
+    ``summary_statistics`` rule, NaN matching NaN through the ``missing`` rule."""
     assert result["n"].iat[position] == n
-    actual = {name: float(result[name].iat[position]) for name in FLOAT_STATISTICS}
-    assert actual == pytest.approx(statistics, abs=1e-12, nan_ok=True)
+    assert sorted(statistics) == sorted(FLOAT_STATISTICS), statistics
+    for name in FLOAT_STATISTICS:
+        actual = float(result[name].iat[position])
+        outcome = compare.check_value(SUMMARY_CLASS, actual, statistics[name], tolerances)
+        assert outcome.status == compare.PASS, (name, position, actual, statistics[name], outcome)
 
 
 # --- D-01: quantile definition 5 ------------------------------------------------------------------
@@ -74,7 +96,9 @@ def _assert_row(result: pd.DataFrame, position: int, n: int, **statistics: float
 @pytest.mark.parametrize(
     ("n", "expected"), sorted(DEF5_QUARTILES.items()), ids=[f"n{n}" for n in sorted(DEF5_QUARTILES)]
 )
-def test_d01_quantile_def5_n1_to_n8(n: int, expected: "tuple[float, float, float]") -> None:
+def test_d01_quantile_def5_n1_to_n8(
+    n: int, expected: "tuple[float, float, float]", tolerances: compare.Tolerances
+) -> None:
     """D-01: QNTLDEF=5 Q1, median and Q3 of 1..n for n = 1 to 8 (S02-MOD-01, S07-MOD-01).
 
     ``sas_quantile_def5`` receives the shuffled values sorted, and ``proc_summary`` receives them
@@ -85,15 +109,17 @@ def test_d01_quantile_def5_n1_to_n8(n: int, expected: "tuple[float, float, float
     values = np.sort(shuffled)
 
     actual = tuple(sas_quantile_def5(values, p) for p in (Q1, MEDIAN, Q3))
-    assert actual == _approx(expected)
+    _assert_agree(actual, expected, tolerances)
     numpy_type2 = tuple(
         float(np.quantile(values, float(p), method="averaged_inverted_cdf"))
         for p in (Q1, MEDIAN, Q3)
     )
-    assert actual == _approx(numpy_type2)
+    _assert_agree(actual, numpy_type2, tolerances)
 
     stats = proc_summary(pd.DataFrame({"TRTPN": 0.0, "CHG": shuffled}), "TRTPN")
-    assert tuple(stats[QUANTILE_COLUMNS[p]].iat[0] for p in (Q1, MEDIAN, Q3)) == _approx(expected)
+    _assert_agree(
+        (stats[QUANTILE_COLUMNS[p]].iat[0] for p in (Q1, MEDIAN, Q3)), expected, tolerances
+    )
 
 
 @pytest.mark.parametrize(
@@ -101,21 +127,25 @@ def test_d01_quantile_def5_n1_to_n8(n: int, expected: "tuple[float, float, float
     [(4, Q1, 1.5, 1.75), (6, Q3, 5.0, 4.75)],
     ids=["n4-q1", "n6-q3"],
 )
-def test_d01_def5_differs_from_linear(n: int, p: Fraction, def5: float, linear: float) -> None:
+def test_d01_def5_differs_from_linear(
+    n: int, p: Fraction, def5: float, linear: float, tolerances: compare.Tolerances
+) -> None:
     """D-01: the port gives definition 5, not numpy's default ``linear`` (type 7) quantile.
 
-    The two definitions disagree on these values, so agreement with ``def5`` from both
-    ``sas_quantile_def5`` and ``proc_summary`` shows the numpy default is not used.
+    The two definitions disagree on these values beyond the ``summary_statistics`` rule, so
+    agreement with ``def5`` from both ``sas_quantile_def5`` and ``proc_summary`` shows the numpy
+    default is not used.
     """
     values = np.arange(1, n + 1, dtype="float64")
     numpy_default = float(np.quantile(values, float(p)))
-    assert numpy_default == _approx(linear)
+    _assert_agree([numpy_default], [linear], tolerances)
 
     port = sas_quantile_def5(values, p)
-    assert port == _approx(def5)
-    assert port != _approx(numpy_default)
+    _assert_agree([port], [def5], tolerances)
+    contrast = compare.check_value(SUMMARY_CLASS, port, numpy_default, tolerances)
+    assert contrast.status == compare.FAIL, contrast
     stats = proc_summary(pd.DataFrame({"TRTPN": 0.0, "CHG": values}), "TRTPN")
-    assert stats[QUANTILE_COLUMNS[p]].iat[0] == _approx(def5)
+    _assert_agree([stats[QUANTILE_COLUMNS[p]].iat[0]], [def5], tolerances)
 
 
 @pytest.mark.parametrize(
@@ -123,7 +153,9 @@ def test_d01_def5_differs_from_linear(n: int, p: Fraction, def5: float, linear: 
     [(Q1, 0.25), (MEDIAN, 0.45), (Q3, 0.65)],
     ids=["q1-x2-x3", "median-x4-x5", "q3-x6-x7"],
 )
-def test_d01_exact_fraction_boundary(p: Fraction, expected: float) -> None:
+def test_d01_exact_fraction_boundary(
+    p: Fraction, expected: float, tolerances: compare.Tolerances
+) -> None:
     """D-01: with n * p an integer, g = 0 and the quantile averages x_np and x_(np+1).
 
     For n = 8 every quartile falls on that boundary. ``sas_quantile_def5`` decides g from the exact
@@ -132,8 +164,9 @@ def test_d01_exact_fraction_boundary(p: Fraction, expected: float) -> None:
     """
     values = np.array([k / 10 for k in range(1, 9)])
     actual = sas_quantile_def5(values, p)
-    assert actual == _approx(expected)
-    assert actual == _approx(float(np.quantile(values, float(p), method="averaged_inverted_cdf")))
+    _assert_agree([actual], [expected], tolerances)
+    numpy_type2 = float(np.quantile(values, float(p), method="averaged_inverted_cdf"))
+    _assert_agree([actual], [numpy_type2], tolerances)
 
 
 @pytest.mark.parametrize(
@@ -159,7 +192,7 @@ def test_d01_quantile_def5_rejects_invalid_arguments(
 # --- S02-MOD-01, S07-MOD-01: proc_summary --------------------------------------------------------
 
 
-def test_s02_mod_01_statistics_columns() -> None:
+def test_s02_mod_01_statistics_columns(tolerances: compare.Tolerances) -> None:
     """S02-MOD-01: the 12 ``css_stats`` columns and their values on the group ``[2, 4, 4, 5]``.
 
     The columns are the BY variables, then ``n mean std median datamin datamax q1 q3``. ``std`` is the sample standard deviation, sqrt(4.75 / 3) (D-02), and the quartiles follow
@@ -177,6 +210,7 @@ def test_s02_mod_01_statistics_columns() -> None:
     _assert_row(
         result,
         0,
+        tolerances,
         n=4,
         mean=3.75,
         std=1.2583057392117916,
@@ -188,7 +222,7 @@ def test_s02_mod_01_statistics_columns() -> None:
     )
 
 
-def test_d02_std_missing_for_n_below_2() -> None:
+def test_d02_std_missing_for_n_below_2(tolerances: compare.Tolerances) -> None:
     """D-02: VARDEF=DF divides by n - 1, so STD is missing for a single value (S02-MOD-01).
 
     The single value is every other statistic; the two-value group shows STD defined from n = 2,
@@ -199,11 +233,22 @@ def test_d02_std_missing_for_n_below_2() -> None:
 
     assert result["TRTPN"].tolist() == [0.0, 54.0]
     _assert_row(
-        result, 0, n=1, mean=7.5, std=math.nan, median=7.5, datamin=7.5, datamax=7.5, q1=7.5, q3=7.5
+        result,
+        0,
+        tolerances,
+        n=1,
+        mean=7.5,
+        std=math.nan,
+        median=7.5,
+        datamin=7.5,
+        datamax=7.5,
+        q1=7.5,
+        q3=7.5,
     )
     _assert_row(
         result,
         1,
+        tolerances,
         n=2,
         mean=2.0,
         std=1.4142135623730951,
@@ -215,7 +260,7 @@ def test_d02_std_missing_for_n_below_2() -> None:
     )
 
 
-def test_d03_all_missing_group() -> None:
+def test_d03_all_missing_group(tolerances: compare.Tolerances) -> None:
     """D-03: a BY group whose ``CHG`` values are all missing keeps its row, n = 0 (S02-MOD-01).
 
     Every statistic of that row is missing, as is a quantile of an empty input.
@@ -226,14 +271,24 @@ def test_d03_all_missing_group() -> None:
     result = proc_summary(frame, BY_07_02)
 
     assert result["TRTPN"].tolist() == [0.0, 54.0]
-    _assert_row(result, 0, n=0, **{name: math.nan for name in FLOAT_STATISTICS})
+    _assert_row(result, 0, tolerances, n=0, **{name: math.nan for name in FLOAT_STATISTICS})
     _assert_row(
-        result, 1, n=1, mean=1.0, std=math.nan, median=1.0, datamin=1.0, datamax=1.0, q1=1.0, q3=1.0
+        result,
+        1,
+        tolerances,
+        n=1,
+        mean=1.0,
+        std=math.nan,
+        median=1.0,
+        datamin=1.0,
+        datamax=1.0,
+        q1=1.0,
+        q3=1.0,
     )
     assert all(math.isnan(sas_quantile_def5([], p)) for p in (Q1, MEDIAN, Q3))
 
 
-def test_missing_chg_excluded() -> None:
+def test_missing_chg_excluded(tolerances: compare.Tolerances) -> None:
     """D-03: a missing ``CHG`` is out of ``n`` and every statistic, not its BY group (S02-MOD-01).
 
     Each group's statistics equal those of the same group with its missing records removed, and
@@ -258,13 +313,33 @@ def test_missing_chg_excluded() -> None:
         [8.0, 54.0, "Week 8", "X-low"],
     ]
     _assert_row(
-        result, 0, n=3, mean=3.0, std=2.0, median=3.0, datamin=1.0, datamax=5.0, q1=1.0, q3=5.0
+        result,
+        0,
+        tolerances,
+        n=3,
+        mean=3.0,
+        std=2.0,
+        median=3.0,
+        datamin=1.0,
+        datamax=5.0,
+        q1=1.0,
+        q3=5.0,
     )
     _assert_row(
-        result, 1, n=1, mean=2.0, std=math.nan, median=2.0, datamin=2.0, datamax=2.0, q1=2.0, q3=2.0
+        result,
+        1,
+        tolerances,
+        n=1,
+        mean=2.0,
+        std=math.nan,
+        median=2.0,
+        datamin=2.0,
+        datamax=2.0,
+        q1=2.0,
+        q3=2.0,
     )
     complete = frame.loc[frame["CHG"].notna()]
-    pd.testing.assert_frame_equal(result, proc_summary(complete, BY_07_02))
+    pd.testing.assert_frame_equal(result, proc_summary(complete, BY_07_02), check_exact=True)
 
 
 def test_missing_base_ignored() -> None:
@@ -288,11 +363,13 @@ def test_missing_base_ignored() -> None:
 
     missing_base = frame.copy()
     missing_base.loc[[0, 2, 4], "BASE"] = math.nan
-    pd.testing.assert_frame_equal(proc_summary(missing_base, BY_07_02), expected)
-    pd.testing.assert_frame_equal(proc_summary(frame.drop(columns="BASE"), BY_07_02), expected)
+    pd.testing.assert_frame_equal(proc_summary(missing_base, BY_07_02), expected, check_exact=True)
+    pd.testing.assert_frame_equal(
+        proc_summary(frame.drop(columns="BASE"), BY_07_02), expected, check_exact=True
+    )
 
 
-def test_d04_missing_by_keys_sorted_first() -> None:
+def test_d04_missing_by_keys_sorted_first(tolerances: compare.Tolerances) -> None:
     """D-04: a missing ``AVISITN`` is its own BY group, ordered before the others (S02-MOD-01).
 
     The other groups ascend by the BY variables. pandas would drop the missing key from
@@ -315,7 +392,7 @@ def test_d04_missing_by_keys_sorted_first() -> None:
     assert result["TRTPN"].tolist() == [0.0, 0.0, 81.0, 0.0, 54.0]
     assert result["AVISIT"].tolist() == ["", "Week 2", "Week 2", "Week 8", "Week 8"]
     assert result["n"].tolist() == [2, 1, 1, 1, 1]
-    assert result["mean"].tolist() == _approx([3.5, 4.0, 3.0, 6.0, 1.0])
+    _assert_agree(result["mean"], [3.5, 4.0, 3.0, 6.0, 1.0], tolerances)
 
 
 @pytest.mark.parametrize(
@@ -323,7 +400,9 @@ def test_d04_missing_by_keys_sorted_first() -> None:
     [("P ", "P"), ("P", "P ")],
     ids=["trailing-blank-first", "trailing-blank-second"],
 )
-def test_d14_tied_records_keep_input_order(labels: "tuple[str, str]") -> None:
+def test_d14_tied_records_keep_input_order(
+    labels: "tuple[str, str]", tolerances: compare.Tolerances
+) -> None:
     """D-14: records tied on every BY variable keep their input order (S02-MOD-01).
 
     ``P`` and ``P `` are one ``trtp_short`` value in SAS, where trailing blanks are ignored (D-11),
@@ -335,10 +414,10 @@ def test_d14_tied_records_keep_input_order(labels: "tuple[str, str]") -> None:
 
     assert result["trtp_short"].tolist() == [labels[0]]
     assert result["n"].tolist() == [2]
-    assert result["mean"].tolist() == _approx([2.0])
+    _assert_agree(result["mean"], [2.0], tolerances)
 
 
-def test_s07_mod_01_by_variables() -> None:
+def test_s07_mod_01_by_variables(tolerances: compare.Tolerances) -> None:
     """S07-MOD-01: BY ``STUDYID TRTPN studynum trtp_short``, as the WPCT-F.07.07 driver passes it.
 
     Groups ascend by study then treatment, and the pooled ``'\\u00a0Pooled'`` study (code point
@@ -374,7 +453,7 @@ def test_s07_mod_01_by_variables() -> None:
     assert result["studynum"].tolist() == [1, 1, 2, 2, 3, 3]
     assert result["trtp_short"].tolist() == ["P", "X-low", "P", "X-low", "P", "X-low"]
     assert result["n"].tolist() == [1, 1, 1, 1, 2, 2]
-    assert result["mean"].tolist() == _approx([3.0, 5.0, 6.0, 2.0, 4.5, 3.5])
+    _assert_agree(result["mean"], [3.0, 5.0, 6.0, 2.0, 4.5, 3.5], tolerances)
 
 
 @pytest.mark.parametrize(
@@ -389,7 +468,7 @@ def test_s07_mod_01_by_variables() -> None:
     ],
     ids=["no-by", "repeated-by", "by-named-like-statistic", "absent-var", "absent-by", "char-var"],
 )
-def test_proc_summary_rejects_invalid_arguments(
+def test_s02_and_s07_mod_01_proc_summary_rejects_invalid_arguments(
     by: "tuple[str, ...]", var: str, error: "type[Exception]"
 ) -> None:
     """S02-MOD-01, S07-MOD-01: a BY list or analysis variable SAS would reject raises."""

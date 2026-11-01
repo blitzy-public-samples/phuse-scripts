@@ -107,7 +107,7 @@ def test_s02_flt_01_param_timepoint_subset():
     kept = selection.subset_param_timepoints(advs, PAIRS_07_02)
 
     assert kept["SEQ"].tolist() == [1, 3, 7]
-    assert_frame_equal(kept, _rows(advs, [0, 2, 6]))
+    assert_frame_equal(kept, _rows(advs, [0, 2, 6]), check_exact=True)
 
 
 @pytest.mark.parametrize(
@@ -124,7 +124,7 @@ def test_d13_in_list_false_for_missing(pairs, timepoint):
 
     kept = selection.subset_param_timepoints(advs, pairs)
 
-    assert_frame_equal(kept, _rows(advs, [0]))
+    assert_frame_equal(kept, _rows(advs, [0]), check_exact=True)
 
 
 @pytest.mark.parametrize(
@@ -149,7 +149,7 @@ def test_d13_missing_configured_timepoint_rejected(pairs, missing):
         selection.subset_param_timepoints(advs, configured)
 
     assert str(raised.value).endswith(f"got {[missing]!r}")
-    assert_frame_equal(advs, original)
+    assert_frame_equal(advs, original, check_exact=True)
 
 
 def test_s02_trn_02_abbreviate_treatment():
@@ -193,8 +193,8 @@ def test_s02_trn_02_abbreviate_treatment():
         "UNEXPE",
     ]
     assert list(out.columns) == [*advs.columns, "trtp_short"]
-    assert_frame_equal(out.drop(columns="trtp_short"), advs)
-    assert_frame_equal(advs, original)
+    assert_frame_equal(out.drop(columns="trtp_short"), advs, check_exact=True)
+    assert_frame_equal(advs, original, check_exact=True)
 
 
 def _assert_flag_filter(flags, analysis_flag: str) -> None:
@@ -214,7 +214,7 @@ def _assert_flag_filter(flags, analysis_flag: str) -> None:
     kept = selection.flag_filter(frame, flags)
 
     assert kept["SEQ"].tolist() == [1, 8]
-    assert_frame_equal(kept, _rows(frame, [0, 7]))
+    assert_frame_equal(kept, _rows(frame, [0, 7]), check_exact=True)
 
 
 @pytest.mark.parametrize(
@@ -261,8 +261,8 @@ def test_s02_flt_03_exclude_baseline_visit(dtype, ne_missing):
     kept = selection.exclude_visit(frame, "AVISITN", 0)
 
     assert kept["SEQ"].tolist() == [2, 3, 4, 6]
-    assert_frame_equal(kept, _rows(frame, [1, 2, 3, 5]))
-    assert_frame_equal(selection.exclude_visit(frame), kept)
+    assert_frame_equal(kept, _rows(frame, [1, 2, 3, 5]), check_exact=True)
+    assert_frame_equal(selection.exclude_visit(frame), kept, check_exact=True)
 
 
 @pytest.mark.parametrize("value", [None, np.nan], ids=["None", "NaN"])
@@ -278,7 +278,7 @@ def test_s02_flt_03_exclude_missing_visit(dtype, value):
     kept = selection.exclude_visit(frame, "AVISITN", value)
 
     assert kept["SEQ"].tolist() == [1, 2, 3, 5, 6]
-    assert_frame_equal(kept, _rows(frame, [0, 1, 2, 4, 5]))
+    assert_frame_equal(kept, _rows(frame, [0, 1, 2, 4, 5]), check_exact=True)
 
 
 def _assert_keep_variables(
@@ -293,7 +293,7 @@ def _assert_keep_variables(
     kept = selection.keep_variables(frame, ANA_VARIABLES[program_id])
 
     assert tuple(kept.columns) == expected
-    assert_frame_equal(kept, frame[list(expected)])
+    assert_frame_equal(kept, frame[list(expected)], check_exact=True)
     reversed_input = frame[list(reversed(input_columns))]
     reversed_kept = selection.keep_variables(reversed_input, ANA_VARIABLES[program_id])
     assert tuple(reversed_kept.columns) == tuple(reversed(expected))
@@ -342,7 +342,7 @@ def test_s07_flt_01_param_timepoint_subset():
     kept = selection.subset_param_timepoints(advs, PAIRS_07_07)
 
     assert kept["SEQ"].tolist() == [1, 3]
-    assert_frame_equal(kept, _rows(advs, [0, 2]))
+    assert_frame_equal(kept, _rows(advs, [0, 2]), check_exact=True)
 
 
 def test_s07_flt_02_post_baseline_prefix():
@@ -368,7 +368,7 @@ def test_s07_flt_02_post_baseline_prefix():
     kept = selection.post_baseline_filter(frame)
 
     assert kept["SEQ"].tolist() == [2, 7]
-    assert_frame_equal(kept, _rows(frame, [1, 6]))
+    assert_frame_equal(kept, _rows(frame, [1, 6]), check_exact=True)
 
 
 @pytest.mark.parametrize(
@@ -421,13 +421,13 @@ def test_s07_trn_05_stack_pooled():
 
     assert len(stacked) == 2 * len(css_safana) == 6
     assert list(stacked.columns) == list(css_safana.columns)
-    assert_frame_equal(stacked.iloc[:3], css_safana)
+    assert_frame_equal(stacked.iloc[:3], css_safana, check_exact=True)
     pooled = _rows(stacked, [3, 4, 5])
     assert pooled["STUDYID"].tolist() == [POOLED_STUDYID] * 3
     assert pooled["USUBJID"].tolist() == ["P1-701-1015", "P1-702-1023", "P1-703-1042"]
     unchanged = [column for column in css_safana.columns if column not in ("STUDYID", "USUBJID")]
-    assert_frame_equal(pooled[unchanged], css_safana[unchanged])
-    assert_frame_equal(css_safana, original)
+    assert_frame_equal(pooled[unchanged], css_safana[unchanged], check_exact=True)
+    assert_frame_equal(css_safana, original, check_exact=True)
 
 
 def test_d16_pooled_sorts_after_ascii():
@@ -485,9 +485,9 @@ def test_s07_trn_06_assign_studynum():
     assert numbered["SEQ"].tolist() == expected_seq
     expected = _rows(frame, [seq - 1 for seq in expected_seq])
     expected["studynum"] = np.repeat(np.array([1, 2, 3], dtype=np.int64), 9)
-    assert_frame_equal(numbered, expected)
-    assert_frame_equal(selection.assign_studynum(frame), numbered)
-    assert_frame_equal(frame, original)
+    assert_frame_equal(numbered, expected, check_exact=True)
+    assert_frame_equal(selection.assign_studynum(frame), numbered, check_exact=True)
+    assert_frame_equal(frame, original, check_exact=True)
 
 
 @pytest.mark.parametrize(
@@ -525,7 +525,7 @@ def _assert_frame_returned(result, frame: pd.DataFrame) -> None:
     assert isinstance(result, pd.DataFrame)
     assert result is not frame
     assert isinstance(result.index, pd.RangeIndex)
-    assert_frame_equal(result, frame)
+    assert_frame_equal(result, frame, check_exact=True)
 
 
 @pytest.mark.parametrize(
@@ -640,7 +640,7 @@ def test_s07_flt_04_missing_chg_halts(var):
     ],
     ids=["assert_var_nonmissing", "assert_unique_keys"],
 )
-def test_s07_halting_checks_halt_on_absent_variable(check, args, message):
+def test_s07_flt_04_05_halting_checks_halt_on_absent_variable(check, args, message):
     """S07-FLT-04 and S07-FLT-05: an absent variable halts, as the macros' existence checks fail.
 
     [whitepapers/utilities/assert_var_nonmissing.sas:34-40;

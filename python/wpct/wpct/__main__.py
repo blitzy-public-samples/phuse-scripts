@@ -12,22 +12,31 @@ Exit codes (Agent Action Plan 0.6.5):
 * 1 (:data:`EXIT_FAILED`): a comparison failed, or a halting check stopped a program
   (S07-FLT-04, S07-FLT-05). Like ``%assert_continue`` (S07-DEP-assert_continue), the halt stops
   that program before any export; the report records it.
-* 2 (:data:`EXIT_INPUT_ERROR`): an input error, i.e. a missing or unreadable ADVS file, SAS
-  reference, SAS export or tolerance file, a dataset lacking a required variable or storing one
-  under more than one spelling (S02-DEP-assert_depend, S07-DEP-assert_depend), or a
-  ``--sas-exports`` that is not an existing directory; a write destination the guard rejects; or a
-  command-line error from ``argparse``.
+* 2 (:data:`EXIT_INPUT_ERROR`): an input error, i.e. a missing or unreadable required input (an
+  ADVS transport file, a SAS listing or log, or the tolerance file), a dataset lacking a required
+  variable or storing one under more than one spelling (S02-DEP-assert_depend,
+  S07-DEP-assert_depend), a SAS export that is present but unreadable or malformed, a default
+  export path that exists but is not a directory, or a ``--sas-exports`` that is not an existing
+  directory; a write destination the guard rejects; or a command-line error from ``argparse``.
+  The SAS exports are optional: an absent export is not an error, and its quantities are reported
+  as NOT COMPARED.
 
 Data reach and write policy (Agent Action Plan 0.8): ``--sas-exports`` is the only option, and it
 names a read-only input directory, which is never written. No option reaches an input file, an
 output or report destination, or the write root: every path comes from :meth:`RepoPaths.checkout`
 (:func:`build_paths`), and the only writes are those of ``wpct.export`` and ``wpct.report``, each
 behind ``paths.check_write_destination``. The command runs no SAS and opens no network connection.
+
+Warnings: :func:`main` sends logged warnings to stderr as ``WARNING: <logger>: <message>`` lines,
+as SAS writes ``WARNING:`` lines to its log, unless the host has configured the root logger
+already. The derivation's omission warnings therefore read ``WARNING: wpct.derivation:
+(DERIVE_LASTMINMAX_MEASURES) Omitting obs ...``. :func:`reproduce` configures no logging.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -56,6 +65,9 @@ PROG = "python -m wpct"
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_INPUT_ERROR = 2
+
+#: The stderr line of a logged warning, such as ``WARNING: wpct.derivation: <message>``.
+_LOG_FORMAT = "%(levelname)s: %(name)s: %(message)s"
 
 #: The drivers in the order the request fixes: WPCT-F.07.02, then WPCT-F.07.07.
 _DRIVERS = ((PROGRAM_07_02, wpct_f_07_02), (PROGRAM_07_07, wpct_f_07_07))
@@ -254,13 +266,27 @@ def reproduce(paths: RepoPaths, sas_exports_dir: str | os.PathLike[str] | None =
 # --- Entry point ----------------------------------------------------------------------------------
 
 
+def _configure_logging() -> None:
+    """Send WARNING records to stderr as ``WARNING: <logger>: <message>`` lines, unless the host
+    has configured logging already.
+
+    SAS writes ``WARNING:`` lines to its log; this gives the derivation's omission warnings the same
+    tag plus their logger name, such as ``WARNING: wpct.derivation: (DERIVE_LASTMINMAX_MEASURES)
+    ...``. :func:`logging.basicConfig` changes nothing when the root logger already has a handler,
+    so a host's own configuration is left as it is.
+    """
+    logging.basicConfig(level=logging.WARNING, format=_LOG_FORMAT, stream=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse ``argv`` (``sys.argv[1:]`` when ``None``) and run the chosen subcommand.
 
     ``reproduce`` is the only subcommand and ``argparse`` requires it, so a missing or unknown
-    subcommand or option exits with code 2 before anything is read or written.
+    subcommand or option exits with code 2 before anything is read or written. The run's warnings
+    go to stderr through :func:`_configure_logging`.
     """
     args = build_parser().parse_args(argv)
+    _configure_logging()
     return reproduce(build_paths(), args.sas_exports)
 
 

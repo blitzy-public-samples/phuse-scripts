@@ -18,7 +18,6 @@
       "label": "Summary statistics",
       "rule": "absolute",
       "limit": 1e-8,
-      "fields": ["mean", "std", "median", "datamin", "datamax", "q1", "q3"],
       "applies_to": "PROC SUMMARY statistics against full-precision exports"
     },
     "glm_estimates": {
@@ -26,21 +25,18 @@
       "rule": "relative",
       "limit": 1e-6,
       "zero_reference": "exact",
-      "fields": ["ESTIMATE", "STDERR", "TVALUE"],
       "applies_to": "ParameterEstimates against full-precision exports"
     },
     "p_values": {
       "label": "p-values",
       "rule": "absolute",
       "limit": 1e-8,
-      "fields": ["PROBT", "pval"],
       "applies_to": "PROBT and the merged CSS_STATS pval against full-precision exports"
     },
     "record_numeric": {
       "label": "Record-level numeric values",
       "rule": "absolute",
       "limit": 1e-8,
-      "fields": ["AVAL", "BASE", "CHG", "ADT"],
       "applies_to": "Record-by-record comparisons; the request names no class for these, so the plan sets this value"
     },
     "rounded_listing": {

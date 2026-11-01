@@ -30,13 +30,13 @@ footnotes, ODS PDF and PROC SGRENDER, and the ``util_delete_dsets`` cleanup of W
 Data reach: input is read only through ``xpt_reader``, from ``paths.input_xpt(PROGRAM_ID)``
 (``data/adam/cdisc/advs.xpt``). The driver reads no SAS reference file, writes no file and opens
 no connection; the export step writes the datasets it returns. 07.02 has no data-content halting
-check, so the only failure it raises is the reader's ``InputDataError``, unchanged.
+check; the reader's ``InputDataError`` propagates unchanged.
 """
 
 from __future__ import annotations
 
 import numbers
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 import pandas as pd
@@ -85,22 +85,31 @@ _EMPTY_DTYPES = {CHAR: object, NUM: "float64", INT: "int64", NULLABLE_INT: "Int6
 class Config:
     """The SAS ``%let`` user settings of WPCT-F.07.02 (S02-TRN-01).
 
-    Each field mirrors one setting [whitepapers/WPCT/WPCT-F.07.02.sas:108-124]. Variable names are
-    spelled as the port's frames spell them: upper case for ADaM variables, as the transport file
-    stores them, and ``trtp_short`` as the subset step creates it (``wpct.schemas``).
+    Each field mirrors one setting [whitepapers/WPCT/WPCT-F.07.02.sas:108-124]. A variable setting
+    is matched to the S02-TRN-03 analysis variables ignoring case and surrounding blanks, as SAS
+    matches the ``%let`` value, and is stored as the port's frames spell the variable: upper case
+    for ADaM variables, as the transport file stores them, and ``trtp_short`` as the subset step
+    creates it (``wpct.schemas``). ``Config(c_var="chg")`` therefore holds ``"CHG"`` and equals
+    ``Config()``.
 
     Attributes:
         m_ds: ``advs_sub``, the dataset the analysis reads; the port passes the subset frame on in
             memory.
-        t_var: Treatment label variable, a PROC SUMMARY BY variable.
-        tn_var: Treatment number variable: sort key, BY variable and the CLASS variable.
-        c_var: Change from baseline, the analysis and response variable.
-        b_var: Baseline covariate; ``None`` or ``""`` is the blank SAS setting and skips the GLM.
+        t_var: Treatment label variable, a PROC SUMMARY BY variable; ``trtp_short`` only.
+        tn_var: Treatment number variable: sort key, BY variable and the CLASS variable; ``TRTPN``
+            only.
+        c_var: Change from baseline, the analysis and response variable; a numeric analysis
+            variable.
+        b_var: Baseline covariate, a numeric analysis variable other than ``tn_var``; ``None`` or
+            ``""`` is the blank SAS setting and skips the GLM.
         ref_trtn: ``REF=`` level of ``tn_var``; ``None`` or ``""`` is blank and skips the GLM.
-        b_visn: Baseline ``AVISITN``, dropped from the analysis records (S02-FLT-03).
+        b_visn: Baseline ``AVISITN``, dropped from the analysis records (S02-FLT-03). ``None`` is
+            the SAS missing value ``.``, so ``where also avisitn ne .`` drops the records with a
+            missing ``AVISITN`` instead.
         e_visn: Endpoint ``AVISITN``, the visit the GLM is fitted at (S02-MOD-02).
-        p_fl: Population flag; records need ``'Y'`` (S02-POP-01).
-        a_fl: Analysis record flag; records need ``'Y'`` (S02-FLT-02).
+        p_fl: Population flag, a character analysis variable; records need ``'Y'`` (S02-POP-01).
+        a_fl: Analysis record flag, a character analysis variable; records need ``'Y'``
+            (S02-FLT-02).
         param_timepoints: The ``(PARAMCD, ATPTN values)`` pairs of the subset WHERE (S02-FLT-01)
             [whitepapers/WPCT/WPCT-F.07.02.sas:90-93].
 
@@ -108,9 +117,15 @@ class Config:
     ENV-03) are presentation and environment settings and are not ported. ``m_lb=work`` names the
     SAS WORK library, which the port does not have.
 
-    Raises ``ValueError`` when a variable setting names a variable outside the S02-TRN-03 analysis
-    variables, which fix every exported shape, and ``TypeError`` when ``e_visn`` or a set
-    ``ref_trtn`` is not a number.
+    Raises:
+        ValueError: A variable setting names no analysis variable (the analysis variables fix
+            every exported shape); ``t_var`` or ``tn_var`` names a variable other than
+            ``trtp_short`` or ``TRTPN``, the columns the export schemas fix for them, where SAS
+            accepts any variable; ``c_var`` or a set ``b_var`` names a character variable, or
+            ``p_fl`` or ``a_fl`` a numeric one; or ``b_var`` names ``tn_var``, which would enter
+            the MODEL twice.
+        TypeError: ``e_visn`` is not a number, ``b_visn`` is neither a number nor ``None``, or a
+            set ``ref_trtn`` is not a number.
     """
 
     m_ds: str = "advs_sub"
@@ -119,7 +134,7 @@ class Config:
     c_var: str = "CHG"
     b_var: str | None = "BASE"
     ref_trtn: float | None = 0
-    b_visn: float = 0
+    b_visn: float | None = 0
     e_visn: float = 99
     p_fl: str = "SAFFL"
     a_fl: str = "ANL01FL"
@@ -130,27 +145,70 @@ class Config:
 
     def __post_init__(self) -> None:
         analysis_variables = ANA_VARIABLES[PROGRAM_ID]
-        settings = {
-            "t_var": self.t_var,
-            "tn_var": self.tn_var,
-            "c_var": self.c_var,
-            "p_fl": self.p_fl,
-            "a_fl": self.a_fl,
-        }
+        # SAS variable names are case-insensitive ASCII and %let drops surrounding blanks, so each
+        # variable setting is matched ignoring both and stored in the frames' spelling.
+        spellings = {variable.upper(): variable for variable in analysis_variables}
+        settings = ["t_var", "tn_var", "c_var", "p_fl", "a_fl"]
         if not _is_blank(self.b_var):
-            settings["b_var"] = self.b_var
-        unknown = {
-            name: value for name, value in settings.items() if value not in analysis_variables
-        }
+            settings.append("b_var")
+        unknown: dict[str, object] = {}
+        for name in settings:
+            value = getattr(self, name)
+            stripped = value.strip(SAS_BLANK) if isinstance(value, str) else ""
+            spelling = spellings.get(stripped.upper()) if stripped.isascii() else None
+            if spelling is None:
+                unknown[name] = value
+            else:
+                object.__setattr__(self, name, spelling)
         if unknown:
             raise ValueError(
                 f"{PROGRAM_ID}: Config settings name variables outside the analysis variables "
                 f"({' '.join(analysis_variables)}): {unknown}"
             )
-        # A non-numeric endpoint would match no record, and a non-numeric REF= level would fail
-        # only once a stratum reaches the model, so both are refused here.
+        # SAS takes any variable for t_var and tn_var, but the export schemas fix the columns they
+        # name: the css_stats BY columns and key, the sort and merge keys and the CLASS effect of
+        # parameter_estimates. Only the S02-TRN-01 names, the defaults, produce those shapes.
+        defaults = {field.name: field.default for field in fields(self)}
+        for name in ("t_var", "tn_var"):
+            value = getattr(self, name)
+            if value != defaults[name]:
+                raise ValueError(
+                    f"{PROGRAM_ID}: Config.{name} must name {defaults[name]}, the column the "
+                    f"export schemas fix for it, got {value!r}"
+                )
+        # PROC SUMMARY analyses c_var and the GLM regresses on b_var, so both are numeric; the
+        # flag filters compare p_fl and a_fl with 'Y', so both are character. The types are those
+        # of the exported analysis records.
+        column_types = export_spec(PROGRAM_ID, _CSS_ANADATA).column_types
+        for name, code, kind in (
+            ("c_var", NUM, "numeric"),
+            ("b_var", NUM, "numeric"),
+            ("p_fl", CHAR, "character"),
+            ("a_fl", CHAR, "character"),
+        ):
+            value = getattr(self, name)
+            if name in settings and column_types[value] != code:
+                allowed = " ".join(
+                    variable for variable in analysis_variables if column_types[variable] == code
+                )
+                raise ValueError(
+                    f"{PROGRAM_ID}: Config.{name} must name a {kind} analysis variable "
+                    f"({allowed}), got {value!r}"
+                )
+        if "b_var" in settings and self.b_var == self.tn_var:
+            raise ValueError(
+                f"{PROGRAM_ID}: Config.b_var must not name tn_var ({self.tn_var}), which would "
+                "enter the MODEL twice"
+            )
+        # A non-numeric endpoint would match no record, a non-numeric baseline visit would fail
+        # only after the input is read, and a non-numeric REF= level only once a stratum reaches
+        # the model, so all three are refused here.
         if not _is_number(self.e_visn):
             raise TypeError(f"{PROGRAM_ID}: Config.e_visn must be a number, got {self.e_visn!r}")
+        if self.b_visn is not None and not _is_number(self.b_visn):
+            raise TypeError(
+                f"{PROGRAM_ID}: Config.b_visn must be a number or None, got {self.b_visn!r}"
+            )
         if not _is_blank(self.ref_trtn) and not _is_number(self.ref_trtn):
             raise TypeError(
                 f"{PROGRAM_ID}: Config.ref_trtn must be a number, None or '', got {self.ref_trtn!r}"
@@ -171,7 +229,7 @@ def _is_blank(value: object) -> bool:
 
     ``%let`` drops leading and trailing blanks, so a setting of blanks has ``%length`` 0.
     """
-    return value is None or (isinstance(value, str) and value.strip(SAS_BLANK) == "")
+    return value is None or (isinstance(value, str) and is_char_missing(value))
 
 
 def _is_number(value: object) -> bool:
@@ -334,6 +392,19 @@ def run(
         the 15 checkpoints of the SAS log, in log order.
 
     Raises:
+        TypeError: ``config`` is not a :class:`Config`, or ``config.param_timepoints`` is not a
+            sequence of ``(PARAMCD, timepoints)`` pairs, each with a string ``PARAMCD`` and a
+            sequence of numeric timepoints (S02-FLT-01, ``selection.subset_param_timepoints``).
+            :class:`Config` does not check ``param_timepoints``, so it is checked once the input
+            is read, before any record is selected. Any other setting that :class:`Config`
+            refuses raises when the ``Config`` is built, before ``run`` is called. An input
+            variable whose SAS type does not fit its use, such as a character ``ATPTN`` or ``CHG``
+            or a numeric ``PARAMCD`` or ``SAFFL``, raises it too, from the step that relies on its
+            type (``selection``, ``summary.proc_summary`` or ``model.glm_solution``), before any
+            record is exported.
+        ValueError: ``config.param_timepoints`` lists a NaN timepoint, the SAS missing value,
+            which would otherwise select the records whose ``ATPTN`` is missing (S02-FLT-01);
+            raised at the same point as the ``param_timepoints`` ``TypeError``.
         InputDataError: The input file is missing or unreadable, lacks a required variable, or
             stores a required variable under more than one spelling, as columns that differ only
             in case (S02-DEP-assert_depend ``vars=``).

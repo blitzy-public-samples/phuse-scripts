@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 
 import pandas as pd
@@ -385,7 +386,56 @@ def test_u01_ties_equal_on_all_order_keys_keep_input_order(
 # --- LMM-FLT-02: both phases required -------------------------------------------------------------
 
 
-def test_lmm_flt_02_both_phases_required(caplog: pytest.LogCaptureFixture) -> None:
+#: The SAS warning texts up to ``such as`` [whitepapers/ADaM/derive_lastminmax_measure.sas:167,187].
+OMIT_NO_POST = "(DERIVE_LASTMINMAX_MEASURES) Omitting obs without a post-baseline measure, such as "
+OMIT_NO_BASE = "(DERIVE_LASTMINMAX_MEASURES) Omitting obs without a baseline measure, such as "
+
+#: Variables of an omitted record that SAS ``PUT _ALL_`` prints and a port warning never names.
+#: ``PARAM`` and ``ATPT`` are prefixes of the named ``PARAMCD`` and ``ATPTN``, so they carry ``=``.
+UNLOGGED_NAMES = (
+    "AVAL",
+    "ADT",
+    "TRTSDT",
+    "TRTPN",
+    "trtp_short",
+    "SAFFL",
+    "AVISITN",
+    "PARAM=",
+    "ATPT=",
+)
+
+
+def unlogged_values(record: Mapping[str, object]) -> list[str]:
+    """The measurement, date, treatment and flag values of ``record``, as a warning shows them."""
+    numbers = [f"{record[name]:g}" for name in ("AVAL", "ADT", "TRTSDT", "TRTPN")]
+    texts = [str(record[name]) for name in ("trtp_short", "SAFFL", "PARAM", "ATPT")]
+    return numbers + texts
+
+
+@pytest.mark.parametrize(
+    ("subject_b", "context_b"),
+    [
+        pytest.param(
+            {},
+            "STUDYID='CDISCPILOT01' USUBJID='01-701-1023' PARAMCD='DIABP' ATPTN=815",
+            id="identifiers",
+        ),
+        pytest.param(
+            {"ATPTN": math.nan},
+            "STUDYID='CDISCPILOT01' USUBJID='01-701-1023' PARAMCD='DIABP' ATPTN=.",
+            id="missing_atptn",
+        ),
+        pytest.param(
+            {"USUBJID": f"{SUBJECT_B}\nWARNING: forged"},
+            "STUDYID='CDISCPILOT01' USUBJID='01-701-1023\\nWARNING: forged' "
+            "PARAMCD='DIABP' ATPTN=815",
+            id="line_break_escaped",
+        ),
+    ],
+)
+def test_lmm_flt_02_both_phases_required(
+    subject_b: Mapping[str, object], context_b: str, caplog: pytest.LogCaptureFixture
+) -> None:
     """LMM-FLT-02, LMM-TRN-06: only groups with both phases survive; each omission is logged.
 
     Subject A has both phases at timepoints 815 and 817, two groups. Subject B has a baseline record
@@ -396,15 +446,21 @@ def test_lmm_flt_02_both_phases_required(caplog: pytest.LogCaptureFixture) -> No
     ``BASE`` from its own group's baseline record
     [whitepapers/ADaM/derive_lastminmax_measure.sas:180-182,193], and the baseline records precede
     the post-baseline records, each in GRPVARS order.
+
+    Where SAS ``PUT _ALL_`` prints the whole record, each warning names only the group's
+    ``STUDYID``, ``USUBJID``, ``PARAMCD`` and ``ATPTN``: never a measurement, date, treatment or
+    flag. A missing number reads ``.``, and a line break in a value is escaped, not written.
     """
     caplog.set_level(logging.WARNING, logger=LOGGER)
+    record_b = visit(90, 85, 0, **{"USUBJID": SUBJECT_B, **subject_b})
+    record_c = visit(110, 70, 2, USUBJID=SUBJECT_C)
     frame = make_rows(
         visit(90, 80, 0),
         visit(110, 72, 2),
         visit(90, 90, 0, ATPTN=817.0),
         visit(110, 95, 2, ATPTN=817.0),
-        visit(90, 85, 0, USUBJID=SUBJECT_B),
-        visit(110, 70, 2, USUBJID=SUBJECT_C),
+        record_b,
+        record_c,
     )
 
     dsout, counts = derive(frame)
@@ -426,12 +482,19 @@ def test_lmm_flt_02_both_phases_required(caplog: pytest.LogCaptureFixture) -> No
     ]
 
     warnings = derivation_warnings(caplog)
-    assert len(warnings) == 2
-    no_post = [text for text in warnings if "Omitting obs without a post-baseline measure" in text]
-    no_base = [text for text in warnings if "Omitting obs without a baseline measure" in text]
-    assert len(no_post) == len(no_base) == 1
-    assert SUBJECT_B in no_post[0] and SUBJECT_C not in no_post[0]
-    assert SUBJECT_C in no_base[0] and SUBJECT_B not in no_base[0]
+    assert warnings == [
+        OMIT_NO_POST + context_b,
+        OMIT_NO_BASE + "STUDYID='CDISCPILOT01' USUBJID='01-701-1028' PARAMCD='DIABP' ATPTN=815",
+    ]
+    omitted = ({**_DEFAULTS, **record_b}, {**_DEFAULTS, **record_c})
+    for text, record in zip(warnings, omitted, strict=True):
+        assert "\n" not in text
+        assert [name for name in UNLOGGED_NAMES if name in text] == []
+        assert [
+            value
+            for value in unlogged_values(record)
+            if re.search(rf"(?<![\w-]){re.escape(value)}(?![\w-])", text)
+        ] == []
 
 
 # --- LMM-TRN-02: change modes and flags -----------------------------------------------------------
@@ -501,8 +564,53 @@ def test_lmm_trn_02_invalid_mode_defaults_to_last(caplog: pytest.LogCaptureFixtu
 
     last_dsout, last_counts = derive(mode_rows(), "LAST", ())
     assert last_counts == counts
-    pd.testing.assert_frame_equal(dsout, last_dsout)
+    pd.testing.assert_frame_equal(dsout, last_dsout, check_exact=True)
     assert len(derivation_warnings(caplog)) == 1
+
+
+INVALID_BOGUS = (
+    "(DERIVE_LASTMINMAX_MEASURES) Invalid C_MODES value: BOGUS. "
+    "Defaulting to LAST (rather than MIN or MAX)."
+)
+OMITTED_B = OMIT_NO_POST + "STUDYID='CDISCPILOT01' USUBJID='01-701-1023' PARAMCD='DIABP' ATPTN=815"
+
+
+@pytest.mark.parametrize(
+    ("rows", "omitted", "expected"),
+    [
+        pytest.param(
+            (visit(90, 80, 0), visit(110, 72, 2), visit(90, 85, 0, USUBJID=SUBJECT_B)),
+            1,
+            [OMITTED_B, INVALID_BOGUS, OMITTED_B],
+            id="omission_per_mode",
+        ),
+        pytest.param((), 0, [INVALID_BOGUS], id="no_rows"),
+    ],
+)
+def test_lmm_trn_02_invalid_mode_warned_in_mode_order(
+    rows: tuple[dict[str, object], ...],
+    omitted: int,
+    expected: list[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """LMM-TRN-02, LMM-FLT-02, U-03: an invalid mode's warning comes when the mode loop reaches it.
+
+    The ``%put WARNING`` for an invalid token sits inside that token's ``%do %while`` pass
+    [whitepapers/ADaM/derive_lastminmax_measure.sas:115-127], so with ``MIN bogus`` the MIN pass's
+    omission warning for subject B comes first, then the upper-cased invalid-mode warning, then the
+    LAST pass's omission warning. The loop runs whatever the data, so an input without records
+    still logs the invalid-mode warning, once.
+    """
+    caplog.set_level(logging.WARNING, logger=LOGGER)
+
+    _dsout, counts = derive(make_rows(*rows), "MIN bogus")
+
+    assert [(mode.MODE, mode.FLAG, mode.IDX) for mode in counts.modes] == [
+        ("MIN", "ANL02FL", 1),
+        ("LAST", "ANLLASTFL", 2),
+    ]
+    assert [(mode.OMITTED_BASE, mode.OMITTED_POST) for mode in counts.modes] == [(omitted, 0)] * 2
+    assert derivation_warnings(caplog) == expected
 
 
 def test_lmm_trn_02_lowercase_mode_and_default_flag() -> None:
@@ -604,7 +712,7 @@ def test_lmm_trn_07_output_columns(
         assert dsout[name].dtype == "float64", name
     assert dsout["BASE"].tolist() == [80, 80]
     assert dsout["CHG"].tolist() == [0, -5]
-    pd.testing.assert_frame_equal(frame, before)
+    pd.testing.assert_frame_equal(frame, before, check_exact=True)
 
 
 @pytest.mark.parametrize(
@@ -667,7 +775,7 @@ def _dates_as_text(frame: pd.DataFrame) -> pd.DataFrame:
         pytest.param(_dates_as_text, "MIN", TypeError, "ADT", id="adt_not_day_number"),
     ],
 )
-def test_invalid_arguments_raise(
+def test_lmm_trn_02_and_flt_01_invalid_arguments_raise(
     alter: Callable[[pd.DataFrame], pd.DataFrame],
     c_modes: str,
     error: type[Exception],
@@ -683,3 +791,44 @@ def test_invalid_arguments_raise(
 
     with pytest.raises(error, match=fragment):
         derive(frame, c_modes)
+
+
+def test_lmm_trn_03_04_missing_and_blank_padded_keys_match() -> None:
+    """LMM-TRN-03, LMM-TRN-04, LMM-FLT-02 (D-11): missing and blank-padded GRPVARS values match.
+
+    SAS GROUP BY, PROC SORT ``NODUPKEY BY`` and MERGE ``BY`` treat every missing value of a variable
+    as equal and ignore trailing blanks [whitepapers/ADaM/derive_lastminmax_measure.sas:133-189].
+    Subject A's records have a missing ``TRTPN`` and a ``STUDYID`` that is ``''``, ``None`` or
+    blank, so they form one group per phase. Subject B's ``USUBJID`` is blank-padded on some
+    records, so its padded and unpadded records form one group, and its unpadded baseline record
+    matches its padded post-baseline record. Split groups would raise the SQL and NODUPKEY counts.
+    """
+    padded = SUBJECT_B + "  "
+    frame = make_rows(
+        visit(90, 80, 0, STUDYID="", TRTPN=math.nan),
+        visit(95, 78, 1, STUDYID=None, TRTPN=math.nan),
+        visit(110, 72, 2, STUDYID="  ", TRTPN=math.nan),
+        visit(120, 72, 3, STUDYID="", TRTPN=math.nan),
+        visit(90, 83, 0, USUBJID=SUBJECT_B),
+        visit(95, 85, 1, USUBJID=padded),
+        visit(120, 70, 3, USUBJID=SUBJECT_B),
+        visit(110, 70, 2, USUBJID=padded),
+    )
+
+    dsout, counts = derive(frame)
+
+    assert (counts.LMM_BASE, counts.LMM_POST) == (4, 4)
+    (mode,) = counts.modes
+    assert (mode.SQL_BASE, mode.SQL_POST) == (2, 4)
+    assert (mode.NODUPKEY_BASE, mode.NODUPKEY_POST) == (2, 2)
+    assert (mode.OMITTED_BASE, mode.OMITTED_POST) == (0, 0)
+    assert (mode.MERGED_BASE, mode.MERGED_POST) == (2, 2)
+    assert counts.DSOUT == len(dsout) == 4
+    assert dsout["TRTPN"].isna().tolist() == [True, False, True, False]
+    columns = ["STUDYID", "USUBJID", "AVISITN", "AVAL", "ADT", "BASE", "CHG"]
+    assert dsout.loc[:, columns].to_numpy().tolist() == [
+        ["", SUBJECT_A, 9911, 78, 95, 78, 0],
+        ["CDISCPILOT01", SUBJECT_B, 9911, 83, 90, 83, 0],
+        ["", SUBJECT_A, 9912, 72, 110, 78, -6],
+        ["CDISCPILOT01", padded, 9912, 70, 110, 83, -13],
+    ]

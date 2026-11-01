@@ -155,7 +155,7 @@ def _with_param(result: ProgramResult, value: str) -> tuple[ProgramResult, int]:
 
 
 @pytest.mark.parametrize(("program_id", "name"), _SPEC_CASES)
-def test_round_trip_exact(
+def test_d16_round_trip_exact(
     program_id: str,
     name: str,
     results: Mapping[str, ProgramResult],
@@ -198,7 +198,7 @@ def test_round_trip_exact(
 
 
 @pytest.mark.parametrize("program_id", PROGRAMS)
-def test_export_keys_unique(
+def test_d04_14_export_keys_unique(
     program_id: str,
     results: Mapping[str, ProgramResult],
     write_paths: RepoPaths,
@@ -241,7 +241,9 @@ def test_export_keys_unique(
         ),
     ],
 )
-def test_halted_result_writes_nothing(check: str, message: str, write_paths: RepoPaths) -> None:
+def test_s07_flt_04_05_halted_result_writes_nothing(
+    check: str, message: str, write_paths: RepoPaths
+) -> None:
     """A run stopped by a halting check (S07-FLT-04, S07-FLT-05) exports nothing (AAP 0.6.4).
 
     The halted result keeps the checkpoints recorded before the halt, yet the writer returns ``()``

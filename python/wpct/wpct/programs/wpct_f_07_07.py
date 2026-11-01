@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import numbers
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 import pandas as pd
@@ -130,23 +130,30 @@ _EMPTY_DTYPES = {CHAR: object, NUM: "float64", INT: "int64", NULLABLE_INT: "Int6
 class Config:
     """The SAS ``%let`` user settings of WPCT-F.07.07 (S07-TRN-01).
 
-    Each field mirrors one setting [whitepapers/WPCT/WPCT-F.07.07.sas:96-117]. Variable names are
-    spelled as the port's frames spell them: upper case for ADaM variables, as the transport file
-    stores them, ``trtp_short`` as the subset step creates it, and ``ANL02FL`` as the derivation
-    upper-cases ``flvars=anl02fl`` (``wpct.schemas``).
+    Each field mirrors one setting [whitepapers/WPCT/WPCT-F.07.07.sas:96-117]. A variable setting
+    is matched to the S07-TRN-04 analysis variables ignoring case and surrounding blanks, as SAS
+    matches the ``%let`` value, and is stored as the port's frames spell the variable: upper case
+    for ADaM variables, as the transport file stores them, ``trtp_short`` as the subset step
+    creates it, and ``ANL02FL`` as the derivation upper-cases ``flvars=anl02fl``
+    (``wpct.schemas``). ``Config(a_fl="anl02fl")`` therefore holds ``"ANL02FL"`` and equals
+    ``Config()``.
 
     Attributes:
         ds: ``DS=ADVS``, the input dataset name; with ``lmm`` it names the derived dataset.
         param: ``param='DIABP'``, the blank-separated PARAMCD codes of the subset WHERE; every code
             in ``param_timepoints`` must be one of them.
-        t_var: Treatment label variable, a PROC SUMMARY BY variable.
-        tn_var: Treatment number variable: sort key, BY variable and the CLASS variable.
-        c_var: Change from baseline, the analysis and response variable.
-        b_var: Baseline covariate; ``None`` or ``""`` is the blank SAS setting and skips both GLMs.
+        t_var: Treatment label variable, a PROC SUMMARY BY variable; ``trtp_short`` only.
+        tn_var: Treatment number variable: sort key, BY variable and the CLASS variable; ``TRTPN``
+            only.
+        c_var: Change from baseline, the analysis and response variable; a numeric analysis
+            variable.
+        b_var: Baseline covariate, a numeric analysis variable other than ``tn_var``; ``None`` or
+            ``""`` is the blank SAS setting and skips both GLMs.
         ref_trtn: ``REF=`` level of ``tn_var``; ``None`` or ``""`` is blank and skips both GLMs.
-        p_fl: Population flag; records need ``'Y'`` (S07-POP-01).
+        p_fl: Population flag, a character analysis variable; records need ``'Y'`` (S07-POP-01).
         lmm: ``lmm=MIN``, the single change mode of the derivation (S07-TRN-03).
-        a_fl: Analysis record flag the derivation sets, then required ``'Y'`` (S07-FLT-03).
+        a_fl: Analysis record flag the derivation sets, then required ``'Y'`` (S07-FLT-03);
+            ``ANL02FL`` only.
         param_timepoints: The ``(PARAMCD, ATPTN values)`` pairs of the subset WHERE ``paramcd in
             (&param) and atptn in (815 817)`` (S07-FLT-01)
             [whitepapers/WPCT/WPCT-F.07.07.sas:146-148].
@@ -155,11 +162,17 @@ class Config:
     label, S07-PRS-01), ``max_boxes_per_page`` (pagination) and ``outputs_folder`` (the PDF
     location, ENV-04) are presentation and environment settings and are not ported.
 
-    Raises ``ValueError`` when a variable setting names a variable outside the S07-TRN-04 analysis
-    variables, which fix every exported shape, when ``ds`` or ``lmm`` is not one blank-free name
-    (SAS builds the dataset name ``&ds._&LMM`` from them, so a list of modes cannot run), or when
-    ``param_timepoints`` names a code that ``param`` does not list; ``TypeError`` when a set
-    ``ref_trtn`` is not a number.
+    Raises:
+        ValueError: A variable setting names no analysis variable (the analysis variables fix
+            every exported shape); ``t_var``, ``tn_var`` or ``a_fl`` names a variable other than
+            ``trtp_short``, ``TRTPN`` or ``ANL02FL``, the columns the export schemas fix for
+            them, where SAS accepts any variable; ``c_var`` or a set ``b_var`` names a character
+            variable, or ``p_fl`` a numeric one; ``b_var`` names ``tn_var``, which would enter the
+            MODEL twice; ``ds`` or ``lmm`` is not one blank-free name (SAS builds the dataset name
+            ``&ds._&LMM`` from them, so a list of modes cannot run); or ``param_timepoints`` names
+            a code that ``param`` does not list.
+        TypeError: ``param_timepoints`` cannot be iterated, such as ``param_timepoints=5`` (the
+            plain ``TypeError`` of iterating it), or a set ``ref_trtn`` is not a number.
     """
 
     ds: str = "ADVS"
@@ -176,22 +189,61 @@ class Config:
 
     def __post_init__(self) -> None:
         analysis_variables = ANA_VARIABLES[PROGRAM_ID]
-        settings = {
-            "t_var": self.t_var,
-            "tn_var": self.tn_var,
-            "c_var": self.c_var,
-            "p_fl": self.p_fl,
-            "a_fl": self.a_fl,
-        }
+        # SAS variable names are case-insensitive ASCII and %let drops surrounding blanks, so each
+        # variable setting is matched ignoring both and stored in the frames' spelling.
+        spellings = {variable.upper(): variable for variable in analysis_variables}
+        settings = ["t_var", "tn_var", "c_var", "p_fl", "a_fl"]
         if not _is_blank(self.b_var):
-            settings["b_var"] = self.b_var
-        unknown = {
-            name: value for name, value in settings.items() if value not in analysis_variables
-        }
+            settings.append("b_var")
+        unknown: dict[str, object] = {}
+        for name in settings:
+            value = getattr(self, name)
+            stripped = value.strip(SAS_BLANK) if isinstance(value, str) else ""
+            spelling = spellings.get(stripped.upper()) if stripped.isascii() else None
+            if spelling is None:
+                unknown[name] = value
+            else:
+                object.__setattr__(self, name, spelling)
         if unknown:
             raise ValueError(
                 f"{PROGRAM_ID}: Config settings name variables outside the analysis variables "
                 f"({' '.join(analysis_variables)}): {unknown}"
+            )
+        # SAS takes any variable for t_var, tn_var and a_fl, but the export schemas fix the columns
+        # they name: the css_stats BY columns and key, the sort and merge keys, the CLASS effect of
+        # parameter_estimates, and the flag the derivation creates beside its fixed group and
+        # carried variables, which advs_min and css_anadata export. Only the S07-TRN-01 names, the
+        # defaults, produce those shapes.
+        defaults = {field.name: field.default for field in fields(self)}
+        for name in ("t_var", "tn_var", "a_fl"):
+            value = getattr(self, name)
+            if value != defaults[name]:
+                raise ValueError(
+                    f"{PROGRAM_ID}: Config.{name} must name {defaults[name]}, the column the "
+                    f"export schemas fix for it, got {value!r}"
+                )
+        # PROC SUMMARY analyses c_var and the GLMs regress on b_var, so both are numeric; the flag
+        # filter compares p_fl with 'Y', so it is character (a_fl is fixed above). The types are
+        # those of the exported analysis records.
+        column_types = export_spec(PROGRAM_ID, _CSS_ANADATA).column_types
+        for name, code, kind in (
+            ("c_var", NUM, "numeric"),
+            ("b_var", NUM, "numeric"),
+            ("p_fl", CHAR, "character"),
+        ):
+            value = getattr(self, name)
+            if name in settings and column_types[value] != code:
+                allowed = " ".join(
+                    variable for variable in analysis_variables if column_types[variable] == code
+                )
+                raise ValueError(
+                    f"{PROGRAM_ID}: Config.{name} must name a {kind} analysis variable "
+                    f"({allowed}), got {value!r}"
+                )
+        if "b_var" in settings and self.b_var == self.tn_var:
+            raise ValueError(
+                f"{PROGRAM_ID}: Config.b_var must not name tn_var ({self.tn_var}), which would "
+                "enter the MODEL twice"
             )
         for name in ("ds", "lmm"):
             value = getattr(self, name)
@@ -247,7 +299,7 @@ def _is_blank(value: object) -> bool:
 
     ``%let`` drops leading and trailing blanks, so a setting of blanks has ``%length`` 0.
     """
-    return value is None or (isinstance(value, str) and value.strip(SAS_BLANK) == "")
+    return value is None or (isinstance(value, str) and is_char_missing(value))
 
 
 def _is_number(value: object) -> bool:
@@ -579,6 +631,20 @@ def run(
         checkpoints of the SAS log, in log order.
 
     Raises:
+        TypeError: ``config`` is not a :class:`Config`, or ``config.param_timepoints`` is not a
+            sequence of ``(PARAMCD, timepoints)`` pairs, each with a string ``PARAMCD`` and a
+            sequence of numeric timepoints (S07-FLT-01, ``selection.subset_param_timepoints``).
+            :class:`Config` refuses only a ``param_timepoints`` that cannot be iterated or names a
+            code that ``param`` does not list, so the pairs are checked once the input is read,
+            before any record is selected. A setting that :class:`Config` refuses raises when the
+            ``Config`` is built, before ``run`` is called. An input variable whose SAS type does not
+            fit its use, such as a character ``ATPTN`` or ``AVAL`` or a numeric ``PARAMCD`` or
+            ``USUBJID``, raises it too, from the step that relies on its type (``selection``,
+            ``derivation.derive_lastminmax_measure`` or ``model.glm_solution``), before any record
+            is exported.
+        ValueError: ``config.param_timepoints`` lists a NaN timepoint, the SAS missing value,
+            which would otherwise select the records whose ``ATPTN`` is missing (S07-FLT-01);
+            raised at the same point as the ``param_timepoints`` ``TypeError``.
         InputDataError: The input file is missing or unreadable, lacks a required variable, or
             stores a required variable under more than one spelling, as columns that differ only
             in case (S07-DEP-assert_depend ``vars=``).

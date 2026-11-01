@@ -124,7 +124,7 @@ def _assert_record_keys(
 
 
 @pytest.mark.parametrize("file_name", schemas.SAS_EXPORT_FILES)
-def test_sas_export_equivalence(
+def test_d01_02_05_to_09_sas_export_equivalence(
     file_name: str,
     sas_exports_dir: Path,
     sas_exports: Mapping[str, pd.DataFrame | None],

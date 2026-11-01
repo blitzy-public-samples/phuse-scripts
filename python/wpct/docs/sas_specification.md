@@ -162,7 +162,14 @@ The 19 dependency items `S02-DEP-*` follow in A.3.
 - `Disposition:` Ported → `programs.wpct_f_07_02.Config` defaults
 - `Relies on:` —
 - `Port notes:` `Config` also carries the parameter/timepoint pairs of S02-FLT-01. `b_var=None` or
-  `ref_trtn=None` stands for a blank SAS setting and skips the model (S02-MOD-02).
+  `ref_trtn=None` stands for a blank SAS setting and skips the model (S02-MOD-02). Variable settings
+  are matched to the S02-TRN-03 analysis variables ignoring case and surrounding blanks, as SAS
+  matches names, and are stored in the frames' spelling, so `c_var=chg` holds `CHG`. Where SAS
+  accepts any variable, the port fixes `t_var` to `trtp_short` and `tn_var` to `TRTPN`, the columns
+  the export schemas fix for them. `c_var` and a set `b_var` must name numeric analysis variables,
+  `p_fl` and `a_fl` character ones, and `b_var` must differ from `tn_var`. `b_visn` must be a number
+  or `None`; `None` is the SAS missing value, so `avisitn ne .` drops the records with a missing
+  `AVISITN` instead. A setting that breaks these rules is refused when `Config` is built.
 
 #### S02-FLT-01 — Parameter and timepoint subset
 
@@ -665,6 +672,13 @@ The 22 dependency items `S07-DEP-*` follow in B.4.
 - `Relies on:` —
 - `Port notes:` `Config` also carries the parameter/timepoint selection of S07-FLT-01. `b_var=None` or
   `ref_trtn=None` stands for a blank SAS setting and skips both models (S07-MOD-02, S07-MOD-03).
+  Variable settings are matched to the S07-TRN-04 analysis variables ignoring case and surrounding
+  blanks, as SAS matches names, and are stored in the frames' spelling, so `a_fl=anl02fl` holds
+  `ANL02FL`. Where SAS accepts any variable, the port fixes `t_var` to `trtp_short`, `tn_var` to
+  `TRTPN` and `a_fl` to `ANL02FL`, the columns the export schemas fix for them; the derivation's
+  group and carried variables are fixed as well (S07-TRN-03). `c_var` and a set `b_var` must name
+  numeric analysis variables, `p_fl` a character one, and `b_var` must differ from `tn_var`. A
+  setting that breaks these rules is refused when `Config` is built.
 
 #### S07-FLT-01 — Parameter and timepoint subset
 
@@ -983,7 +997,11 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
 - `Disposition:` Ported → `derivation.derive_lastminmax_measure` (omission counts kept)
 - `Relies on:` —
 - `Port notes:` Each omission is logged as a warning through Python `logging`, and the omitted-baseline
-  and omitted-post-baseline counts are returned in `counts`.
+  and omitted-post-baseline counts are returned in `counts`. The warning keeps the SAS text up to
+  `such as`, then names only the omitted group's `STUDYID`, `USUBJID`, `PARAMCD` and `ATPTN` (those
+  among GRPVARS), for example `STUDYID='CDISCPILOT01' USUBJID='01-703-1279' PARAMCD='DIABP' ATPTN=817`,
+  not the record that SAS `PUT _ALL_` prints, so no measurement, date, treatment or flag value is
+  logged.
 
 #### LMM-TRN-05 — Baseline record values
 

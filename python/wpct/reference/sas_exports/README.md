@@ -31,7 +31,7 @@ Supply any subset of the seven files below, named exactly as shown. Line referen
 
 Notes on the table:
 
-* **Names, not positions.** Columns are matched by name, so their order in the file does not matter. Content columns are listed in SAS dataset order. Header names are matched case-insensitively: `studynum` and `STUDYNUM` are the same column, as are `BASE` and `base`. One file must not hold two names that differ only in case.
+* **Names, not positions.** Columns are matched by name, so their order in the file does not matter. Content columns are listed in SAS dataset order. Header names are matched case-insensitively: `studynum` and `STUDYNUM` are the same column, as are `BASE` and `base`. One file must not hold two columns with the same name ignoring case, whether spelled identically (`CHG,CHG`) or in different case (`CHG,chg`).
 * **Missing columns fail.** Every listed content column and stratum column is read. A column missing from a file is reported as FAIL, not skipped.
 * **Extra columns are ignored.** ODS also writes `Dependent` and `Biased`. That is why `WORK.CSS_PVALUES` has 7 variables at `WPCT-F.07.02.log:992`, and `WORK.CSS_PVAL_STDY` has 8, including the BY variable, at `WPCT-F.07.07.log:1128`. These columns, and any other extra ones, may stay in the file: the loader keeps them as text and no comparison reads them.
 * **`EFFECT` and `LEVEL` are derived, not supplied.** [`sas_reference.split_parameter`](../../wpct/sas_reference.py) derives them from `Parameter`:
@@ -89,10 +89,14 @@ The shipped programs overwrite `CSS_STATS` and the ODS ParameterEstimates output
   * Run both commands from `python/wpct/`. See [`python/wpct/README.md`](../../README.md) for setup.
 * **Read-only.** The folder is read, never written: the port writes only below `python/wpct/outputs/` and to `python/wpct/reports/equivalence_report.md`.
 * **Load errors.** `python -m wpct reproduce` stops with an input error (exit code 2) and writes nothing, and the tests that use the exports error, when:
-  * a present file cannot be parsed as CSV;
-  * a file has two columns whose names differ only in case;
+  * a present file cannot be parsed as CSV (an unterminated quote or a NUL byte, for example) or has no header row;
+  * a header column has no name;
+  * a file has two columns with the same name ignoring case, whether identical or case variants;
+  * a record has more or fewer fields than the header;
   * a numeric column holds a value that is not a SAS number;
   * a ParameterEstimates file has no usable `Parameter` column.
+
+  The one-line message names the file and the header field, column or data row at fault, never a value from the file.
 * **Comparisons.** Each present file is compared on its record key with the in-memory Python result:
   * Key sets must be equal. Each key present on one side only is listed individually in the report and counted as FAIL, and so is each repeated key.
   * Record counts must match exactly, and so must the per-stratum record counts of `css_anadata` and `advs_min`.

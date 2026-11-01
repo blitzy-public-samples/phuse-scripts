@@ -5,7 +5,7 @@ This report compares the Python port of WPCT-F.07.02 and WPCT-F.07.07 under `pyt
 ## Provenance
 
 - Upstream commit, the commit the port was built against: `398a6d33ced9359ffb58c46650a6d488811176b1`
-- Checkout `HEAD` when the report was generated (`git rev-parse HEAD`): `f0c6acbe5a9bb9701994cd2f65ec4bc2468c0d73`
+- Checkout `HEAD` when the report was generated (`git rev-parse HEAD`): `989f000d6fbfc41c888475eaf8ae3e4abbe04dfa`
 - Python: `3.10.22`
 - Source integrity: all 36 read-only inputs match their blobs at the upstream commit.
 
@@ -22,18 +22,18 @@ This report compares the Python port of WPCT-F.07.02 and WPCT-F.07.07 under `pyt
 
 ### Tolerances
 
-Rendered from `python/wpct/tolerances.json` (schema version 1), the single tolerance source; every comparison below applies these values.
+Rendered from `python/wpct/tolerances.json` (schema version 1), the single tolerance source; every comparison below applies these values. The Fields column lists the export variables each class compares, as `python/wpct/wpct/schemas.py` defines them.
 
 File description: Single tolerance source for the WPCT-F.07.02 and WPCT-F.07.07 Python-versus-SAS equivalence checks, holding the values proposed by the request; edit this file to change them.
 
 | Class | Label | Rule | Limit | Settings | Fields | Applies to |
 |---|---|---|---|---|---|---|
-| `counts` | Counts | exact | 0 | — | — | Log checkpoints, per-stratum record counts, summary n, number of parameter rows |
-| `categorical` | Keys and categorical fields | exact | — | strip_trailing_blanks = true | — | Record keys, treatment labels, flags, visit numbers, study identifiers, EFFECT, LEVEL |
+| `counts` | Counts | exact | 0 | — | n | Log checkpoints, per-stratum record counts, summary n, number of parameter rows |
+| `categorical` | Keys and categorical fields | exact | — | strip_trailing_blanks = true | STUDYID USUBJID SAFFL ANL01FL trtp_short TRTPN PARAM PARAMCD AVISIT AVISITN ATPT ATPTN ANL02FL studynum | Record keys, treatment labels, flags, visit numbers, study identifiers, EFFECT, LEVEL |
 | `summary_statistics` | Summary statistics | absolute | 1e-08 | — | mean std median datamin datamax q1 q3 | PROC SUMMARY statistics against full-precision exports |
 | `glm_estimates` | GLM estimate, SE, t | relative | 1e-06 | zero_reference = exact | ESTIMATE STDERR TVALUE | ParameterEstimates against full-precision exports |
-| `p_values` | p-values | absolute | 1e-08 | — | PROBT pval | PROBT and the merged CSS_STATS pval against full-precision exports |
-| `record_numeric` | Record-level numeric values | absolute | 1e-08 | — | AVAL BASE CHG ADT | Record-by-record comparisons; the request names no class for these, so the plan sets this value |
+| `p_values` | p-values | absolute | 1e-08 | — | pval PROBT | PROBT and the merged CSS_STATS pval against full-precision exports |
+| `record_numeric` | Record-level numeric values | absolute | 1e-08 | — | BASE CHG AVAL ADT | Record-by-record comparisons; the request names no class for these, so the plan sets this value |
 | `rounded_listing` | Rounded listing values | displayed_precision | — | half_unit = 0.5; epsilon = 1e-12; bound_token = <.0001; bound_upper = 0.0001 | — | Every value parsed from WPCT-F.07.02.lst and WPCT-F.07.07.lst, including the TRTPN Probt used for merged pval cells |
 | `missing` | Missing values | missing_agreement | — | both_missing = PASS; one_missing = FAIL | — | All classes |
 

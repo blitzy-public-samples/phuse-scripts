@@ -25,6 +25,7 @@ missing or unreadable reference file raises :class:`~wpct.errors.InputDataError`
 
 from __future__ import annotations
 
+import csv
 import itertools
 import math
 import numbers
@@ -419,13 +420,15 @@ LOG_CHECKPOINT_MAP: Mapping[str, tuple[LogCheckpointSpec, ...]] = MappingProxyTy
 
 
 def parse_log_checkpoints(
-    path: str | os.PathLike[str], checkpoint_map: Sequence[LogCheckpointSpec]
+    path: str | os.PathLike[str],
+    # The published keyword is ``map``, so it shadows the builtin, which this body never calls.
+    map: Sequence[LogCheckpointSpec],
 ) -> tuple[SasCheckpoint, ...]:
     """Read the record count at every pinned line of one reference log.
 
     Args:
         path: The SAS log, e.g. ``paths.log_file("WPCT-F.07.02")``.
-        checkpoint_map: One program's entries, e.g. ``LOG_CHECKPOINT_MAP["WPCT-F.07.02"]``.
+        map: One program's entries, e.g. ``LOG_CHECKPOINT_MAP["WPCT-F.07.02"]``.
 
     Returns:
         One :class:`SasCheckpoint` per entry, in map order. A ``dataset`` or ``table`` line is
@@ -435,16 +438,16 @@ def parse_log_checkpoints(
     Raises:
         InputDataError: ``"reference log not found: <absolute path>"`` when the path is not a
             regular file, or ``"cannot read reference log <absolute path>: <reason>"``.
-        TypeError: When ``checkpoint_map`` is a mapping or holds anything but
-            :class:`LogCheckpointSpec` entries.
+        TypeError: When ``map`` is a mapping or holds anything but :class:`LogCheckpointSpec`
+            entries.
     """
-    if isinstance(checkpoint_map, (Mapping, str)):
-        raise TypeError("checkpoint_map must hold one program's entries: LOG_CHECKPOINT_MAP[pid]")
-    specs = tuple(checkpoint_map)
+    if isinstance(map, (Mapping, str)):
+        raise TypeError("map must hold one program's entries: LOG_CHECKPOINT_MAP[pid]")
+    specs = tuple(map)
     for position, spec in enumerate(specs):
         if not isinstance(spec, LogCheckpointSpec):
             raise TypeError(
-                f"checkpoint_map[{position}] must be a LogCheckpointSpec, got {type(spec).__name__}"
+                f"map[{position}] must be a LogCheckpointSpec, got {type(spec).__name__}"
             )
     lines = _read_reference_lines(path, "reference log")
     return tuple(_read_checkpoint(spec, lines) for spec in specs)
@@ -723,7 +726,9 @@ def split_parameter(label: str) -> tuple[str, str]:
 
     Raises:
         TypeError: For a non-string label.
-        ValueError: For a blank label or one with more than two words.
+        ValueError: For a blank label or one with more than two words. The message gives the
+            reason and the word count, never the label, which may hold a misplaced subject
+            identifier or measurement.
     """
     if not isinstance(label, str):
         raise TypeError(f"split_parameter expects a string, got {type(label).__name__}")
@@ -732,7 +737,11 @@ def split_parameter(label: str) -> tuple[str, str]:
         return words[0].upper(), ""
     if len(words) == 2:
         return words[0].upper(), words[1]
-    raise ValueError(f"cannot split parameter label {label!r} into an effect and a CLASS level")
+    if not words:
+        raise ValueError("parameter label is blank, so it names no effect")
+    raise ValueError(
+        f"parameter label of {len(words)} words cannot be split into an effect and a CLASS level"
+    )
 
 
 _HEADER = re.compile(r"^Parameter\s+Estimate\s+Error\s+t Value\s+Pr > \|t\|$")
@@ -994,8 +1003,11 @@ _SAS_MISSING_NUMBER = re.compile(r"^\.[A-Za-z_]?$")
 _SAS_NUMBER = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[Ee][+-]?\d+)?$")
 
 
-def load_sas_exports(directory: str | os.PathLike[str]) -> dict[str, pd.DataFrame | None]:
-    """Load the user-supplied full-precision SAS exports found in ``directory``.
+def load_sas_exports(
+    # The published keyword is ``dir``, so it shadows the builtin, which this body never calls.
+    dir: str | os.PathLike[str],
+) -> dict[str, pd.DataFrame | None]:
+    """Load the user-supplied full-precision SAS exports found in ``dir``.
 
     The exports are optional inputs (``python/wpct/reference/sas_exports/README.md``); the run
     never produces them. Each present file is read as Latin-1 CSV, so the pooled identifier's byte
@@ -1017,12 +1029,16 @@ def load_sas_exports(directory: str | os.PathLike[str]) -> dict[str, pd.DataFram
         or ``None`` for an absent file. A directory that does not exist gives all ``None``.
 
     Raises:
-        InputDataError: When ``directory`` exists but is not a directory, when an export is not a
-            regular file or cannot be parsed as CSV, has columns that differ only in case, holds a
-            numeric value that is not a SAS number, or is a parameter-estimates export without a
-            usable ``Parameter`` column.
+        InputDataError: When ``dir`` exists but is not a directory, or when an export:
+            is not a regular file; cannot be read or parsed as CSV (an unterminated quote or a
+            NUL byte, for example); has no header row; has a header column without a name; has
+            two columns with the same name ignoring case, spelled identically (``CHG,CHG``) or in
+            different case (``CHG,chg``); has a record with more or fewer fields than the
+            header; holds a numeric value that is not a SAS number; or is a parameter-estimates
+            export without a usable ``Parameter`` column. Every message is one line naming the
+            file and the header field, column or data row at fault, never a value from the file.
     """
-    root = Path(directory).absolute()
+    root = Path(dir).absolute()
     exports: dict[str, pd.DataFrame | None] = dict.fromkeys(SAS_EXPORT_FILES)
     try:
         exists, is_dir = root.exists(), root.is_dir()
@@ -1047,17 +1063,9 @@ def load_sas_exports(directory: str | os.PathLike[str]) -> dict[str, pd.DataFram
 
 
 def _load_export(path: Path, file_name: str) -> pd.DataFrame:
-    try:
-        frame = pd.read_csv(path, encoding="latin-1", dtype=str, keep_default_na=False)
-    except (OSError, ValueError) as exc:  # pandas parser and empty-file errors are ValueErrors.
-        raise InputDataError(f"cannot read SAS export {path}: {exc}") from exc
-    columns = upper_columns(str(name).strip() for name in frame.columns)
-    duplicated = sorted({name for name in columns if columns.count(name) > 1})
-    if duplicated:
-        raise InputDataError(
-            f"SAS export {path} has columns that differ only in case: {' '.join(duplicated)}"
-        )
-    frame.columns = list(columns)
+    header, records = _read_records(path)
+    frame = pd.DataFrame(records, columns=header, dtype=object)
+    frame.columns = list(upper_columns(frame.columns))
     for column in frame.columns:
         frame[column] = frame[column].str.rstrip(" ")
 
@@ -1076,8 +1084,86 @@ def _load_export(path: Path, file_name: str) -> pd.DataFrame:
     return frame
 
 
+def _read_records(path: Path) -> tuple[list[str], list[list[str]]]:
+    """Return the stripped header and the data records of one export, each as wide as the header.
+
+    One ``csv`` parse (comma delimiter, double-quote quoting, ``strict``) both validates the file
+    and supplies the frame, so the checks see exactly what is loaded: quoted commas, quoted line
+    breaks and doubled quotes read as written, and an explicitly empty field stays ``""``. Blank
+    lines are skipped, and only empty physical lines count as blank: they are the only records
+    ``csv`` yields with no field. Every other line is a record, a lone ``""`` or a line of blanks
+    included, so a short one fails the width check instead of vanishing. The first record is the
+    header. Messages name the file and positions or counts, never the contents of a field, which
+    may be a subject identifier or a measurement.
+    """
+    header: list[str] | None = None
+    records: list[list[str]] = []
+    reader = None
+    try:
+        with path.open(encoding="latin-1", newline="") as handle:
+            reader = csv.reader(handle, strict=True)
+            for record in reader:
+                if not record:
+                    continue
+                if header is None:
+                    header = [name.strip() for name in record]
+                    _check_header(header, path)
+                elif len(record) != len(header):
+                    raise InputDataError(
+                        f"SAS export {path}: data row {len(records) + 1}, ending at line "
+                        f"{reader.line_num}, has {len(record)} fields but the header has "
+                        f"{len(header)}"
+                    )
+                else:
+                    records.append(record)
+    except (csv.Error, OSError) as exc:
+        # csv and OS messages carry no field contents; folding whitespace keeps them on one line.
+        where = f"line {reader.line_num}: " if reader is not None else ""
+        reason = " ".join(str(exc).split())
+        raise InputDataError(f"cannot read SAS export {path}: {where}{reason}") from exc
+    if header is None:
+        raise InputDataError(f"SAS export {path} has no header row")
+    return header, records
+
+
+def _check_header(header: Sequence[str], path: Path) -> None:
+    """Refuse a header column without a name, or two column names equal ignoring case.
+
+    A repeated name is shown only when it has SAS-name syntax. Anything else, a data row standing
+    where the header should be for example, is identified by its field positions alone.
+    """
+    unnamed = [position for position, name in enumerate(header, start=1) if not name]
+    if unnamed:
+        columns = "a header column" if len(unnamed) == 1 else "header columns"
+        raise InputDataError(f"SAS export {path} has {columns} without a name: {_fields(unnamed)}")
+    positions: dict[str, list[int]] = {}
+    for position, name in enumerate(upper_columns(header), start=1):
+        positions.setdefault(name, []).append(position)
+    duplicated = [
+        f"{name} at {_fields(at)}" if _SAS_NAME.match(name) and len(name) <= 32 else _fields(at)
+        for name, at in positions.items()
+        if len(at) > 1
+    ]
+    if duplicated:
+        raise InputDataError(
+            f"SAS export {path} has columns with the same name ignoring case: "
+            f"{'; '.join(duplicated)}"
+        )
+
+
+def _fields(positions: Sequence[int]) -> str:
+    """Render 1-based header positions: ``field 3`` or ``fields 3, 4``."""
+    if len(positions) == 1:
+        return f"field {positions[0]}"
+    return f"fields {', '.join(str(position) for position in positions)}"
+
+
 def _sas_numbers(values: pd.Series, path: Path, column: str) -> pd.Series:
-    """Parse one exported numeric column into float64, SAS missing values becoming NaN."""
+    """Parse one exported numeric column into float64, SAS missing values becoming NaN.
+
+    A rejected value is located by column and data row only: the cell may hold a measurement
+    with its units or a subject identifier shifted into the column, so it is never shown.
+    """
     numbers_out = np.empty(len(values), dtype="float64")
     for position, text in enumerate(values.to_numpy(dtype=object)):
         token = text.strip(" ")
@@ -1087,8 +1173,8 @@ def _sas_numbers(values: pd.Series, path: Path, column: str) -> pd.Series:
             numbers_out[position] = float(token)
         else:
             raise InputDataError(
-                f"SAS export {path}: column {column}, data row {position + 1}: {text!r} is not a "
-                "SAS numeric value"
+                f"SAS export {path}: column {column}, data row {position + 1}: the value is not "
+                "a SAS numeric value"
             )
     return pd.Series(numbers_out, index=values.index, name=column)
 
@@ -1103,8 +1189,10 @@ def _with_effect_level(frame: pd.DataFrame, path: Path) -> pd.DataFrame:
     for position, label in enumerate(frame["PARAMETER"]):
         try:
             pairs.append(split_parameter(label))
-        except ValueError as exc:
-            raise InputDataError(f"SAS export {path}: data row {position + 1}: {exc}") from exc
+        except ValueError as exc:  # split_parameter's message never quotes the label.
+            raise InputDataError(
+                f"SAS export {path}: column PARAMETER, data row {position + 1}: {exc}"
+            ) from exc
     frame = frame.drop(columns=[name for name in ("EFFECT", "LEVEL") if name in frame.columns])
     at = frame.columns.get_loc("PARAMETER")
     frame.insert(at, "EFFECT", [effect for effect, _ in pairs])

@@ -15,6 +15,8 @@ the ADVS frame (``advs_07_07``), so none re-reads the transport file or writes i
 - Edge states (AAP 0.6.4): the halt on a missing ``CHG`` (S07-FLT-04), the GLM skipped by setting,
   an empty population after the derivation, an empty derivation input (U-03) and a single study.
   Variable names stored in lower case give the default run (S07-DEP-assert_var_exist).
+- Settings (S07-TRN-01): built only, without a run. SAS spellings fold to the schema spelling, and
+  a setting the export schemas cannot carry is refused.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from wpct.errors import AnalysisHalted
 from wpct.export import write_program_outputs
 from wpct.programs import MODEL_POOLED, MODEL_STUDY, ProgramResult, wpct_f_07_07
 from wpct.sas_reference import GLM_TABLE_MAP, LOG_CHECKPOINT_MAP
-from wpct.schemas import POOLED_STUDYID, PROGRAM_07_07, export_spec
+from wpct.schemas import ANA_VARIABLES, POOLED_STUDYID, PROGRAM_07_07, export_spec
 
 PROGRAM = PROGRAM_07_07
 PARAMCD = "DIABP"
@@ -116,6 +118,18 @@ def _where(frame: pd.DataFrame, **values: object) -> pd.DataFrame:
     return frame.loc[mask]
 
 
+def _rule_class(column: str) -> str:
+    """The one tolerance class whose ``compare.compared_fields()`` (``wpct.schemas``) name
+    ``column``, matched case-insensitively as SAS names are."""
+    owners = [
+        key
+        for key, fields in compare.compared_fields().items()
+        if column.upper() in {field.upper() for field in fields}
+    ]
+    assert len(owners) == 1, (column, owners)
+    return owners[0]
+
+
 def _run(advs: pd.DataFrame, paths, config: wpct_f_07_07.Config | None = None) -> ProgramResult:
     """Run the driver on an already-read ADVS frame, with the program's settings by default."""
     return wpct_f_07_07.run(wpct_f_07_07.Config() if config is None else config, paths, advs=advs)
@@ -176,7 +190,7 @@ def _assert_pval_mapping(result: ProgramResult) -> None:
 # --- Equivalence against the repository references ------------------------------------------------
 
 
-def test_log_checkpoints_all_pass(result_07_07, comparisons):
+def test_s07_flt_01_to_trn_08_log_checkpoints_all_pass(result_07_07, comparisons):
     """The 29 pinned log record counts agree exactly (S07-FLT-01 to S07-TRN-08, LMM-*).
 
     The driver records its checkpoints in log order under the names and occurrences of
@@ -198,7 +212,7 @@ def test_log_checkpoints_all_pass(result_07_07, comparisons):
     assert recorded == mapped
 
 
-def test_parameter_estimates_match_listing(comparisons):
+def test_s07_mod_02_03_parameter_estimates_match_listing(comparisons):
     """Every listing ParameterEstimates value agrees at displayed precision.
 
     Covers S07-MOD-02 (per study) and S07-MOD-03 (pooled): 4 per-study tables of 5 rows and 2
@@ -209,7 +223,7 @@ def test_parameter_estimates_match_listing(comparisons):
     assert_all_pass(group, 128)
 
 
-def test_merged_pval_matches_listing(comparisons):
+def test_s07_trn_08_merged_pval_matches_listing(comparisons):
     """The merged ``css_stats`` pval cells agree with the listing's TRTPN Probt (S07-TRN-08).
 
     3 TRTPN levels for studynum 1, 2 and pooled per timepoint: 9 cells each, 18 in all.
@@ -220,8 +234,12 @@ def test_merged_pval_matches_listing(comparisons):
     assert_all_pass(group, 18)
 
 
-def test_listing_based_total_146(comparisons):
-    """The listing-based comparisons total 128 + 18 = 146, all PASS and none NOT COMPARED."""
+def test_s07_mod_02_03_and_trn_08_listing_based_total_146(comparisons):
+    """S07-MOD-02, S07-MOD-03 and S07-TRN-08: 128 + 18 = 146 listing-based values, all PASS.
+
+    The 128 ParameterEstimates values (S07-MOD-02 per study, S07-MOD-03 pooled) and the 18 merged
+    pval cells (S07-TRN-08) total 146, none NOT COMPARED.
+    """
     groups = comparisons[PROGRAM]
     listing = [
         _group(groups, compare.GROUP_LISTING_PARAMETER_ESTIMATES),
@@ -234,12 +252,14 @@ def test_listing_based_total_146(comparisons):
     }
 
 
-def test_pooled_studynum_aliased(result_07_07):
+def test_s07_mod_03_pooled_studynum_aliased(result_07_07, tolerances):
     """The constant pooled ``studynum`` is aliased by the Intercept (S07-MOD-03, D-06, DIV-01).
 
     Its row has estimate 0, flag ``B`` (``ALIASED``) and missing SE, t and p
     [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.lst:47,147], so every other pooled row equals the
-    fit of ``CHG = BASE TRTPN`` with ``CLASS TRTPN (REF="0")`` on the same pooled records.
+    fit of ``CHG = BASE TRTPN`` with ``CLASS TRTPN (REF="0")`` on the same pooled records, within
+    the ``glm_estimates`` rule of ``tolerances.json`` for estimate, SE and t and its ``p_values``
+    rule for p.
     """
     css_anadata = result_07_07.dataset("css_anadata")
     estimates = result_07_07.dataset("parameter_estimates")
@@ -271,14 +291,15 @@ def test_pooled_studynum_aliased(result_07_07):
         )
         assert list(kept["ALIASED"]) == list(refit["ALIASED"])
         for column in ("ESTIMATE", "STDERR", "TVALUE", "PROBT"):
-            np.testing.assert_allclose(
+            class_key = _rule_class(column)
+            pairs = zip(
                 kept[column].to_numpy(dtype="float64"),
                 refit[column].to_numpy(dtype="float64"),
-                rtol=1e-10,
-                atol=0.0,
-                equal_nan=True,
-                err_msg=f"ATPTN {spec.ATPTN} {column}",
+                strict=True,
             )
+            for position, (pooled_value, refit_value) in enumerate(pairs):
+                outcome = compare.check_value(class_key, pooled_value, refit_value, tolerances)
+                assert outcome.status == compare.PASS, (spec.ATPTN, column, position, outcome)
         (pooled_model,) = [
             record
             for record in result_07_07.models
@@ -287,7 +308,7 @@ def test_pooled_studynum_aliased(result_07_07):
         assert (pooled_model.NOBS, pooled_model.DFE) == (fit.NOBS, fit.DFE)
 
 
-def test_model_records(result_07_07):
+def test_s07_mod_02_03_model_records(result_07_07):
     """Per timepoint, studies 1 and 2 are fitted, then the pooled model (S07-MOD-02, S07-MOD-03).
 
     The pooled records are a copy of both studies' records, so the pooled ``NOBS`` is their sum;
@@ -327,7 +348,7 @@ def test_pval_merge_mapping(result_07_07):
     _assert_pval_mapping(result_07_07)
 
 
-def test_derived_and_analysis_sets(result_07_07):
+def test_s07_trn_03_to_06_derived_and_analysis_sets(result_07_07):
     """The derived MIN records and the pooled analysis set have the SAS shapes and keys.
 
     ``advs_min`` (S07-TRN-03, LMM-TRN-05 to LMM-TRN-07, S07-FLT-02): the 498 post-baseline MIN
@@ -508,7 +529,7 @@ def test_single_study_numbering(advs_07_07, repo_paths):
     _assert_pval_mapping(result)
 
 
-def test_lower_case_variable_names(advs_07_07, result_07_07, repo_paths):
+def test_s07_dep_assert_var_exist_lower_case_variable_names(advs_07_07, result_07_07, repo_paths):
     """S07-DEP-assert_var_exist: lower-case variable names in ADVS give the default run.
 
     SAS finds a variable whatever the case of its name
@@ -524,9 +545,93 @@ def test_lower_case_variable_names(advs_07_07, result_07_07, repo_paths):
     assert list(lower.columns) == lower_names
     assert list(result.datasets) == list(DATASETS)
     for name in DATASETS:
-        pd.testing.assert_frame_equal(result.dataset(name), result_07_07.dataset(name))
+        pd.testing.assert_frame_equal(
+            result.dataset(name), result_07_07.dataset(name), check_exact=True
+        )
     assert result.checkpoints == result_07_07.checkpoints
     assert result.models == result_07_07.models
     assert dict(result.omission_counts) == dict(result_07_07.omission_counts)
     assert result.pooled_studynum == result_07_07.pooled_studynum
     assert result.notes == result_07_07.notes
+
+
+# --- Settings (S07-TRN-01) ------------------------------------------------------------------------
+
+#: The variable settings as the SAS program writes them [whitepapers/WPCT/WPCT-F.07.07.sas:96-117],
+#: with ``t_var`` upper-cased: each differs from the frames' spelling only in case.
+SAS_SPELLINGS = {
+    "t_var": "TRTP_SHORT",
+    "tn_var": "trtpn",
+    "c_var": "chg",
+    "b_var": "base",
+    "p_fl": "saffl",
+    "a_fl": "anl02fl",
+}
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        *({name: value} for name, value in SAS_SPELLINGS.items()),
+        SAS_SPELLINGS,
+        {"c_var": "  chg  ", "a_fl": " Anl02fl"},
+    ],
+    ids=[*SAS_SPELLINGS, "all", "blank-padded"],
+)
+def test_s07_trn_01_sas_spellings_fold_to_schema(settings):
+    """A SAS spelling of a variable setting is stored as the frames spell it (S07-TRN-01).
+
+    SAS matches variable names ignoring case and ``%let`` drops surrounding blanks, so the
+    program's own ``%let`` values give the program's settings, spelled as ``wpct.schemas`` spells
+    the analysis variables.
+    """
+    config = wpct_f_07_07.Config(**settings)
+    default = wpct_f_07_07.Config()
+    assert config == default
+    for name in settings:
+        assert getattr(config, name) == getattr(default, name)
+        assert getattr(config, name) in ANA_VARIABLES[PROGRAM]
+
+
+@pytest.mark.parametrize(
+    ("settings", "match"),
+    [
+        ({"t_var": "PARAM"}, "Config.t_var must name trtp_short"),
+        ({"tn_var": "BASE"}, "Config.tn_var must name TRTPN"),
+        ({"a_fl": "SAFFL"}, "Config.a_fl must name ANL02FL"),
+        ({"a_fl": "param"}, "Config.a_fl must name ANL02FL"),
+        ({"c_var": "PARAMCD"}, "Config.c_var must name a numeric analysis variable"),
+        ({"b_var": "trtp_short"}, "Config.b_var must name a numeric analysis variable"),
+        ({"p_fl": "ATPTN"}, "Config.p_fl must name a character analysis variable"),
+        ({"b_var": "TRTPN"}, "Config.b_var must not name tn_var"),
+        ({"b_var": "trtpn"}, "Config.b_var must not name tn_var"),
+        ({"c_var": "NOPE"}, "'c_var': 'NOPE'"),
+        ({"a_fl": "ANL01FL"}, "'a_fl': 'ANL01FL'"),
+        ({"p_fl": "\u017faffl"}, "'p_fl'"),
+    ],
+    ids=[
+        "t_var-PARAM",
+        "tn_var-BASE",
+        "a_fl-SAFFL",
+        "a_fl-param",
+        "c_var-character",
+        "b_var-character",
+        "p_fl-numeric",
+        "b_var-tn_var",
+        "b_var-tn_var-lower",
+        "unknown-name",
+        "07.02-flag",
+        "non-ascii-name",
+    ],
+)
+def test_s07_trn_01_rejects_settings_at_construction(settings, match):
+    """A setting the fixed export schemas cannot carry is refused when built (S07-TRN-01).
+
+    ``t_var`` and ``tn_var`` name the ``css_stats`` BY columns and key and the CLASS effect, and
+    ``a_fl`` the flag the derivation creates beside its fixed group and carried variables, so only
+    ``trtp_short``, ``TRTPN`` and ``ANL02FL`` keep those shapes. The analysis and baseline
+    variables are numeric, the population flag character, and the baseline covariate is not the
+    CLASS variable. Each refusal names the setting before any input is read.
+    """
+    with pytest.raises(ValueError, match=match):
+        wpct_f_07_07.Config(**settings)
