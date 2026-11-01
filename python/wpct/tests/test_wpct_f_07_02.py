@@ -5,7 +5,9 @@ fixture ``result_07_02``), and ``wpct.compare`` checks it with ``python/wpct/tol
 against ``whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst`` and ``WPCT-F.07.02.log``: 15 log
 checkpoints, 40 listing ParameterEstimates values and 6 merged ``pval`` cells, 46 listing-based
 values in all. Every SAS value compared is parsed from those files at run time, and no listing value
-is written here. The record counts asserted directly are the ones the SAS log pins.
+is written here. The SAS record counts asserted directly are likewise read at run time from their
+pinned log lines, through the ``sas_checkpoints`` fixture, and export keys and columns come from
+``wpct.schemas``.
 
 No silent pass: every equivalence test asserts the exact number of comparison rows that ran and that
 each one is PASS, so neither a FAIL nor a NOT COMPARED row can satisfy it.
@@ -30,7 +32,13 @@ import pytest
 
 from wpct import compare, model, sas_reference
 from wpct.programs import MODEL_ENDPOINT, ProgramResult, wpct_f_07_02
-from wpct.schemas import ANA_VARIABLES, PROGRAM_07_02, STATISTICS, export_spec
+from wpct.schemas import (
+    ANA_VARIABLES,
+    PROGRAM_07_02,
+    SAS_EXPORT_STRATUM_COLUMNS,
+    STATISTICS,
+    export_spec,
+)
 
 PROGRAM = PROGRAM_07_02
 
@@ -47,34 +55,10 @@ _REF_TRTPN = 0.0
 #: The only subject whose analysis records lack BASE and CHG in the repository data.
 _INCOMPLETE_SUBJECT = "01-718-1150"
 
-#: Record key of ``css_anadata``, on which the analysis set is unique.
-_ANADATA_KEY = ["STUDYID", "USUBJID", "PARAMCD", "ATPTN", "AVISITN"]
-
 #: The reason ``wpct.compare`` gives for every model quantity of a run whose GLM is skipped.
 _GLM_SKIPPED = "not produced: GLM skipped by setting"
 
 _MODEL_GROUPS = (compare.GROUP_LISTING_PARAMETER_ESTIMATES, compare.GROUP_LISTING_MERGED_PVAL)
-
-#: The record counts of WPCT-F.07.02.log in log order, as ``(SAS dataset, PARAMCD, ATPTN, NOBS,
-#: NVARS)`` [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.log:32-1471]. NVARS is ``None`` where the
-#: checkpoint carries no variable count.
-_EXPECTED_CHECKPOINTS = (
-    ("ADVS", None, None, 32139, 44),
-    ("ADVS_SUB", None, None, 5925, 45),
-    ("CSS_ANADATA", None, None, 3548, 14),
-    *(
-        checkpoint
-        for paramcd, atptn in _STRATA
-        for checkpoint in (
-            ("CSS_NEXTPARAM", paramcd, None, 1774, None),
-            ("CSS_NEXTTIMEPT", paramcd, atptn, 1774, None),
-            ("CSS_STATS", paramcd, atptn, 30, 12),
-            ("CSS_PVALUES", paramcd, atptn, 5, None),
-            ("CSS_PVALUES", paramcd, atptn, 3, None),
-            ("CSS_STATS", paramcd, atptn, 30, 13),
-        )
-    ),
-)
 
 
 # --- Helpers --------------------------------------------------------------------------------------
@@ -117,6 +101,31 @@ def _strata_in_order(frame: pd.DataFrame) -> list[tuple[str, float]]:
     return list(dict.fromkeys(zip(frame["PARAMCD"], frame["ATPTN"], strict=True)))
 
 
+def _sas_counts(
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    dataset: str,
+    stratum: tuple[str, float] | None = None,
+) -> tuple[sas_reference.SasCheckpoint, ...]:
+    """The checkpoints of ``dataset`` read from the program's SAS log at run time, in log order.
+
+    ``stratum`` is a ``(PARAMCD, ATPTN)`` pair; without it only the program-level checkpoints,
+    which carry neither, match. At least one pinned log line must match, and each match must have
+    passed verification with an observation count, so a missing or drifted line fails the caller.
+    """
+    paramcd, atptn = (None, None) if stratum is None else stratum
+    matches = tuple(
+        sas
+        for sas in sas_checkpoints[PROGRAM]
+        if (sas.spec.SAS_DATASET, sas.spec.PARAMCD, sas.spec.ATPTN) == (dataset, paramcd, atptn)
+    )
+    assert matches, f"{PROGRAM}: no pinned SAS log checkpoint {dataset} for stratum {stratum}"
+    unverified = [sas.problem for sas in matches if not sas.ok]
+    assert not unverified, f"{PROGRAM}: SAS log checkpoint {dataset} unverified: {unverified}"
+    uncounted = [sas.spec.line for sas in matches if sas.NOBS is None]
+    assert not uncounted, f"{PROGRAM}: SAS log lines {uncounted} carry no {dataset} count"
+    return matches
+
+
 @pytest.fixture(scope="module")
 def groups_07_02(
     comparisons: Mapping[str, tuple[compare.ComparisonGroup, ...]],
@@ -136,8 +145,10 @@ def test_s02_flt_01_to_trn_05_log_checkpoints_all_pass(
     """The 15 pinned record counts of the SAS log agree exactly.
 
     They evidence S02-FLT-01 and S02-TRN-02 (ADVS_SUB), S02-TRN-03, S02-POP-01, S02-FLT-02 and
-    S02-FLT-03 (CSS_ANADATA), S02-TRN-04 (CSS_NEXTPARAM, CSS_NEXTTIMEPT), S02-MOD-01 (CSS_STATS
-    30/12), S02-MOD-02 (CSS_PVALUES 5) and S02-TRN-05 (CSS_PVALUES 3, CSS_STATS 30/13).
+    S02-FLT-03 (CSS_ANADATA), S02-TRN-04 (CSS_NEXTPARAM, CSS_NEXTTIMEPT), S02-MOD-01 (the PROC
+    SUMMARY CSS_STATS), S02-MOD-02 (CSS_PVALUES of every parameter row) and S02-TRN-05 (CSS_PVALUES
+    of the TRTPN rows, CSS_STATS after the merge). Each count the driver records, and each variable
+    count or its absence, equals the one parsed at run time from its pinned log line.
     """
     pinned = sas_reference.LOG_CHECKPOINT_MAP[PROGRAM]
     assert len(pinned) == 15
@@ -149,7 +160,12 @@ def test_s02_flt_01_to_trn_05_log_checkpoints_all_pass(
     recorded = [
         (cp.SAS_DATASET, cp.PARAMCD, cp.ATPTN, cp.NOBS, cp.NVARS) for cp in result_07_02.checkpoints
     ]
-    assert recorded == list(_EXPECTED_CHECKPOINTS)
+    parsed = [
+        (sas.spec.SAS_DATASET, sas.spec.PARAMCD, sas.spec.ATPTN, sas.NOBS, sas.NVARS)
+        for sas in sas_checkpoints[PROGRAM]
+    ]
+    assert len(parsed) == len(pinned)
+    assert recorded == parsed
     assert [
         (cp.SAS_DATASET, cp.OCCURRENCE, cp.PARAMCD, cp.ATPTN) for cp in result_07_02.checkpoints
     ] == [(spec.SAS_DATASET, spec.OCCURRENCE, spec.PARAMCD, spec.ATPTN) for spec in pinned]
@@ -239,12 +255,16 @@ def test_endpoint_models_use_226(result_07_02: ProgramResult) -> None:
         assert len(records) - len(incomplete) == models[(paramcd, atptn)].NOBS
 
 
-def test_d03_missing_chg_rows_excluded_from_summary(result_07_02: ProgramResult) -> None:
+def test_d03_missing_chg_rows_excluded_from_summary(
+    result_07_02: ProgramResult,
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+) -> None:
     """D-03, S02-MOD-01: a missing CHG is left out of ``n``, and its BY group still forms.
 
     The 20 analysis records of subject 01-718-1150 (every post-baseline visit of both parameters)
-    miss both BASE and CHG, and no record misses only one of them. Each stratum holds 1774 records,
-    10 of them without CHG, so its ``n`` values sum to 1764.
+    miss both BASE and CHG, and no record misses only one of them. Each stratum holds as many
+    records as its CSS_NEXTTIMEPT count, parsed at run time from the pinned log line, 10 of them
+    without CHG, so its ``n`` values sum to that count less 10.
     """
     anadata = result_07_02.dataset("css_anadata")
     stats = result_07_02.dataset("css_stats")
@@ -259,13 +279,16 @@ def test_d03_missing_chg_rows_excluded_from_summary(result_07_02: ProgramResult)
     assert set(anadata.loc[chg_missing, "USUBJID"]) == {_INCOMPLETE_SUBJECT}
 
     for paramcd, atptn in _STRATA:
+        (timepoint,) = _sas_counts(sas_checkpoints, "CSS_NEXTTIMEPT", (paramcd, atptn))
         records = _stratum(anadata, paramcd, atptn)
-        assert len(records) == 1774, (paramcd, atptn)
+        assert len(records) == timepoint.NOBS, (paramcd, atptn)
         assert int(records["CHG"].isna().sum()) == 10, (paramcd, atptn)
-        assert int(_stratum(stats, paramcd, atptn)["n"].sum()) == 1774 - 10, (paramcd, atptn)
+        n_total = int(_stratum(stats, paramcd, atptn)["n"].sum())
+        assert n_total == timepoint.NOBS - 10, (paramcd, atptn)
 
-    # Per BY group, n is the count of non-missing CHG among the group's records.
-    by = ["PARAMCD", "ATPTN", "AVISITN", "TRTPN"]
+    # Per BY group, n is the count of non-missing CHG among the group's records; a group is one
+    # css_stats record, identified by its schema record key.
+    by = list(export_spec(PROGRAM, "css_stats").key)
     expected = anadata.groupby(by, sort=True)["CHG"].count()
     actual = stats.set_index(by)["n"].sort_index()
     pd.testing.assert_series_equal(actual, expected, check_names=False, check_exact=True)
@@ -302,49 +325,72 @@ def test_pval_merge_mapping(result_07_02: ProgramResult) -> None:
             assert row.pval == level_probt, row
 
 
-def test_s02_trn_04_strata_order(result_07_02: ProgramResult) -> None:
+def test_s02_trn_04_strata_order(
+    result_07_02: ProgramResult,
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+) -> None:
     """S02-TRN-04, S02-MOD-01: strata in loop order, rows sorted BY ``AVISITN TRTPN`` (D-04, D-14).
 
-    ``css_stats`` stacks DIABP/815 then SYSBP/816, 30 rows each. Its columns are ``PARAMCD ATPTN``
-    and the 13 SAS columns: the 4 BY variables, the 8 statistics and the merged ``pval``.
+    ``css_stats`` stacks DIABP/815 then SYSBP/816, each block as many rows as the stratum's
+    CSS_STATS after the merge, parsed at run time from its pinned log line. Its columns are the
+    stratum columns a per-stratum SAS export adds, then as many SAS columns as that line's variable
+    count: the 4 BY variables, the 8 statistics and the merged ``pval``, in schema order.
     """
     stats = result_07_02.dataset("css_stats")
-    assert list(stats.columns) == list(export_spec(PROGRAM, "css_stats").columns)
-    assert list(stats.columns[:2]) == ["PARAMCD", "ATPTN"]
-    assert list(stats.columns[2:]) == [
-        "AVISITN",
-        "TRTPN",
-        "AVISIT",
-        "trtp_short",
+    spec = export_spec(PROGRAM, "css_stats")
+    assert list(stats.columns) == list(spec.columns)
+    # The stratum columns a per-stratum SAS export prepends lead both the columns and the key.
+    stratum = SAS_EXPORT_STRATUM_COLUMNS[spec.sas_export_file]
+    assert stratum
+    assert tuple(stats.columns[: len(stratum)]) == stratum
+    assert spec.key[: len(stratum)] == stratum
+    # Then the SAS columns in dataset order: the BY variables of ``by avisitn &tn_var avisit
+    # &t_var`` [whitepapers/WPCT/WPCT-F.07.02.sas:259], which are the rest of the record key and
+    # then the categorical labels, followed by the statistics and the merged pval.
+    by_key = list(spec.key[len(stratum) :])
+    by_variables = [*by_key, *spec.categorical]
+    _, tn_var, _, t_var = by_variables
+    assert (tn_var, t_var) == (_DEFAULT.tn_var, _DEFAULT.t_var)
+    assert list(stats.columns[len(stratum) :]) == [
+        *by_variables,
         *STATISTICS,
-        "pval",
+        *spec.optional_columns,
     ]
-    assert len(stats.columns[2:]) == 13
 
     assert _strata_in_order(stats) == list(_STRATA)
     assert _strata_in_order(result_07_02.dataset("parameter_estimates")) == list(_STRATA)
     for paramcd, atptn in _STRATA:
+        # The stratum's two CSS_STATS lines in log order: PROC SUMMARY's, then the merged one.
+        _, merged = _sas_counts(sas_checkpoints, "CSS_STATS", (paramcd, atptn))
+        assert len(stats.columns) - len(stratum) == merged.NVARS, (paramcd, atptn)
         block = _stratum(stats, paramcd, atptn)
-        assert len(block) == 30, (paramcd, atptn)
+        assert len(block) == merged.NOBS, (paramcd, atptn)
         start = block.index[0]
-        assert list(block.index) == list(range(start, start + 30)), "stratum rows not contiguous"
-        assert not block[["AVISITN", "TRTPN"]].isna().any().any()
-        keys = list(zip(block["AVISITN"], block["TRTPN"], strict=True))
+        contiguous = range(start, start + merged.NOBS)
+        assert list(block.index) == list(contiguous), "stratum rows not contiguous"
+        assert not block[by_key].isna().any().any()
+        keys = list(block[by_key].itertuples(index=False, name=None))
         assert keys == sorted(keys), (paramcd, atptn)
-        assert len(set(keys)) == 30, (paramcd, atptn)
+        assert len(set(keys)) == merged.NOBS, (paramcd, atptn)
 
 
-def test_s02_trn_03_css_anadata_shape(result_07_02: ProgramResult) -> None:
+def test_s02_trn_03_css_anadata_shape(
+    result_07_02: ProgramResult,
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+) -> None:
     """S02-TRN-03 and the selections S02-FLT-01, S02-POP-01, S02-FLT-02, S02-FLT-03.
 
-    3548 records of the 14 analysis variables, unique on ``STUDYID USUBJID PARAMCD ATPTN AVISITN``,
-    without the baseline visit and with ``SAFFL = ANL01FL = 'Y'`` throughout.
+    As many records and variables as the CSS_ANADATA counts parsed at run time from its pinned log
+    line, the variables being the analysis variables in schema order. The records are unique on
+    the schema record key, exclude the baseline visit and have ``SAFFL = ANL01FL = 'Y'``.
     """
     anadata = result_07_02.dataset("css_anadata")
-    assert anadata.shape == (3548, 14)
-    assert list(anadata.columns) == list(export_spec(PROGRAM, "css_anadata").columns)
+    spec = export_spec(PROGRAM, "css_anadata")
+    (sas,) = _sas_counts(sas_checkpoints, "CSS_ANADATA")
+    assert anadata.shape == (sas.NOBS, sas.NVARS)
+    assert list(anadata.columns) == list(spec.columns)
     assert sorted(anadata.columns) == sorted(ANA_VARIABLES[PROGRAM])
-    assert not anadata.duplicated(_ANADATA_KEY).any()
+    assert not anadata.duplicated(list(spec.key)).any()
     assert not (anadata["AVISITN"] == _DEFAULT.b_visn).any()
     assert (anadata["SAFFL"] == "Y").all()
     assert (anadata["ANL01FL"] == "Y").all()
@@ -417,11 +463,16 @@ def test_unset_reference_skips_glm(
     ), _describe(not_compared.rows)
 
 
-def test_empty_selection(advs_07_02: pd.DataFrame, repo_paths) -> None:
+def test_empty_selection(
+    advs_07_02: pd.DataFrame,
+    repo_paths,
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+) -> None:
     """S02-POP-01, S02-TRN-04: no safety-population record gives zero strata and no error.
 
     Every dataset is header-only with its export columns, no model is fitted, and the CSS_ANADATA
-    checkpoint counts 0 records.
+    checkpoint counts 0 records, while ADVS_SUB, taken before the population flag, still holds the
+    count parsed at run time from its pinned log line.
     """
     advs_07_02["SAFFL"] = "N"
     result = wpct_f_07_02.run(wpct_f_07_02.Config(), repo_paths, advs=advs_07_02)
@@ -436,7 +487,8 @@ def test_empty_selection(advs_07_02: pd.DataFrame, repo_paths) -> None:
 
     checkpoints = {(cp.SAS_DATASET, cp.OCCURRENCE): cp for cp in result.checkpoints}
     assert list(checkpoints) == [("ADVS", 1), ("ADVS_SUB", 1), ("CSS_ANADATA", 1)]
-    assert checkpoints[("ADVS_SUB", 1)].NOBS == 5925
+    (advs_sub,) = _sas_counts(sas_checkpoints, "ADVS_SUB")
+    assert checkpoints[("ADVS_SUB", 1)].NOBS == advs_sub.NOBS
     assert checkpoints[("CSS_ANADATA", 1)].NOBS == 0
 
 
@@ -538,12 +590,14 @@ def test_python_columns_colliding_in_case_fail_every_value(
     sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
     tolerances: compare.Tolerances,
 ) -> None:
-    """A Python dataset whose columns collide in case fails every value compared against it.
+    """S02-MOD-02, S02-TRN-05: a case-colliding Python dataset fails every value read from it.
 
-    SAS names are case-insensitive, so a second ``column`` spelled in the other case makes the
-    dataset ambiguous. The comparison does not abort: every quantity and stratum of the clean group
-    is still reported, each a FAIL naming the dataset and the column with no Python value shown,
-    while the group that does not read the dataset keeps passing in full.
+    The ``parameter_estimates`` case covers the ParameterEstimates group (S02-MOD-02), and the
+    ``css_stats`` case the merged-pval group (S02-TRN-05). SAS names are case-insensitive, so a
+    second ``column`` spelled in the other case makes the dataset ambiguous. The comparison does not
+    abort: every quantity and stratum of the clean group is still reported, each a FAIL naming the
+    dataset and the column with no Python value shown, while the group that does not read the
+    dataset keeps passing in full.
     """
     frame = result_07_02.dataset(dataset)
     colliding = frame.assign(**{column.swapcase(): frame[column]})
@@ -579,13 +633,14 @@ def test_listing_problem_keeps_python_values(
     sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
     tolerances: compare.Tolerances,
 ) -> None:
-    """A table the listing parser flags fails its values but still shows the fitted Python values.
+    """S02-MOD-02, S02-TRN-05: a table the listing parser flags fails yet keeps the Python values.
 
     A copy of the listing prints the DIABP/815 ``TRTPN 54`` row as ``TRTPN 55``, so the parser
     reports a problem for that table only. The Python models are fitted, so every row of the
-    ParameterEstimates and merged-pval groups carries the same Python value as in the clean
-    comparison: the reference level's missing estimates stay ``.``, and no row is left without one.
-    The flagged table's rows are FAIL with the listing problem; the other table's still pass.
+    ParameterEstimates (S02-MOD-02) and merged-pval (S02-TRN-05) groups carries the same Python
+    value as in the clean comparison: the reference level's zero estimate stays ``0``, its missing
+    standard error, t statistic, p-value and merged pval stay ``.``, and no row is left without a
+    value. The flagged table's rows are FAIL with the listing problem; the other table's still pass.
     """
     lines = repo_paths.listing_file(PROGRAM).read_bytes().split(b"\n")
     printed, drifted = b"TRTPN     54", b"TRTPN     55"
@@ -1174,8 +1229,9 @@ def test_s02_trn_01_rejects_settings_at_construction(
 def test_s02_flt_03_missing_baseline_visit_accepted() -> None:
     """S02-FLT-03, S02-TRN-01: ``b_visn=None`` is the SAS missing value ``.`` and is accepted.
 
-    ``where also avisitn ne .`` then drops the records with a missing ``AVISITN``
-    (``selection.exclude_visit``), so ``None`` is kept as given and the GLM still runs.
+    ``Config`` keeps ``None`` as given, and the GLM remains enabled. SAS would then drop the
+    records with a missing ``AVISITN`` through ``where also avisitn ne .``, ported by
+    ``selection.exclude_visit``; this settings-only test runs neither that filter nor the GLM.
     """
     config = wpct_f_07_02.Config(b_visn=None)
     assert config.b_visn is None

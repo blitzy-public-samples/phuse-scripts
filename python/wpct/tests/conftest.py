@@ -1,10 +1,14 @@
 """Shared fixtures of the WPCT equivalence suite.
 
-Every test module in ``python/wpct/tests/`` takes its repository paths, input frames, driver runs,
-SAS references, tolerances and comparisons from here. Each is built once per session through the
-package's own modules (``wpct.paths``, ``wpct.xpt_reader``, the two drivers in ``wpct.programs``,
-``wpct.sas_reference`` and ``wpct.compare`` with ``python/wpct/tolerances.json``), so no test
-re-implements a reader, a driver step, a parser or a comparison rule.
+The shared repository paths, input frames, driver runs, SAS references, tolerances and comparisons
+that the test modules in ``python/wpct/tests/`` request come from the session fixtures here. Each is
+built once per session through the package's own modules (``wpct.paths``, ``wpct.xpt_reader``, the
+two drivers in ``wpct.programs``, ``wpct.sas_reference`` and ``wpct.compare`` with
+``python/wpct/tolerances.json``), so no fixture parses the data, the references or the tolerances
+any other way, or re-implements a driver step or a comparison rule. A test module may still compute
+an expected value independently of the package to check it, as the raw transport-header decoding in
+``test_xpt_reader.py`` and the hand-built least-squares fit in ``test_model.py`` do; such an oracle
+checks the package and is not a second access path for the fixtures' data.
 
 Session fixtures (read-only):
 
@@ -83,31 +87,46 @@ def _snapshot(path: str | Path) -> Snapshot:
 
 @pytest.fixture(scope="session")
 def repo_paths() -> RepoPaths:
-    """Paths of this checkout, identical to those the command line builds."""
+    """Paths of this checkout, identical to those the command line builds.
+
+    Session scope; returns a ``RepoPaths``; no teardown: it only builds paths.
+    """
     return RepoPaths.checkout()
 
 
 @pytest.fixture(scope="session")
 def advs_07_02_raw(repo_paths: RepoPaths) -> pd.DataFrame:
-    """ADVS of WPCT-F.07.02 from ``data/adam/cdisc/advs.xpt``; never alter it."""
+    """ADVS of WPCT-F.07.02 from ``data/adam/cdisc/advs.xpt``; never alter it.
+
+    Session scope; returns a ``pd.DataFrame``; no teardown: it only reads the file.
+    """
     return _read_advs(repo_paths, PROGRAM_07_02)
 
 
 @pytest.fixture(scope="session")
 def advs_07_07_raw(repo_paths: RepoPaths) -> pd.DataFrame:
-    """ADVS of WPCT-F.07.07 from ``data/adam/cdisc-split/advs.xpt``; never alter it."""
+    """ADVS of WPCT-F.07.07 from ``data/adam/cdisc-split/advs.xpt``; never alter it.
+
+    Session scope; returns a ``pd.DataFrame``; no teardown: it only reads the file.
+    """
     return _read_advs(repo_paths, PROGRAM_07_07)
 
 
 @pytest.fixture
 def advs_07_02(advs_07_02_raw: pd.DataFrame) -> pd.DataFrame:
-    """A private deep copy of the WPCT-F.07.02 ADVS frame, free to alter."""
+    """A private deep copy of the WPCT-F.07.02 ADVS frame, free to alter.
+
+    Function scope; returns a deep-copied ``pd.DataFrame``; no teardown: the copy is in memory only.
+    """
     return advs_07_02_raw.copy(deep=True)
 
 
 @pytest.fixture
 def advs_07_07(advs_07_07_raw: pd.DataFrame) -> pd.DataFrame:
-    """A private deep copy of the WPCT-F.07.07 ADVS frame, free to alter."""
+    """A private deep copy of the WPCT-F.07.07 ADVS frame, free to alter.
+
+    Function scope; returns a deep-copied ``pd.DataFrame``; no teardown: the copy is in memory only.
+    """
     return advs_07_07_raw.copy(deep=True)
 
 
@@ -116,13 +135,19 @@ def advs_07_07(advs_07_07_raw: pd.DataFrame) -> pd.DataFrame:
 
 @pytest.fixture(scope="session")
 def result_07_02(repo_paths: RepoPaths) -> ProgramResult:
-    """WPCT-F.07.02 run once with the program's own settings (S02-TRN-01); read-only."""
+    """WPCT-F.07.02 run once with the program's own settings (S02-TRN-01); read-only.
+
+    Session scope; returns a ``ProgramResult``; no teardown: the driver writes nothing.
+    """
     return wpct_f_07_02.run(wpct_f_07_02.Config(), repo_paths)
 
 
 @pytest.fixture(scope="session")
 def result_07_07(repo_paths: RepoPaths) -> ProgramResult:
-    """WPCT-F.07.07 run once with the program's own settings (S07-TRN-01); read-only."""
+    """WPCT-F.07.07 run once with the program's own settings (S07-TRN-01); read-only.
+
+    Session scope; returns a ``ProgramResult``; no teardown: the driver writes nothing.
+    """
     return wpct_f_07_07.run(wpct_f_07_07.Config(), repo_paths)
 
 
@@ -134,6 +159,9 @@ def results(
 
     Like every session mapping here it is a read-only view rather than a dict, because the tests
     share it and a test that altered it would change what every later test sees.
+
+    Session scope; returns a read-only ``Mapping`` of program ID to ``ProgramResult``; no teardown:
+    it only wraps the session runs.
     """
     by_program = {PROGRAM_07_02: result_07_02, PROGRAM_07_07: result_07_07}
     return MappingProxyType({program_id: by_program[program_id] for program_id in PROGRAMS})
@@ -144,7 +172,10 @@ def results(
 
 @pytest.fixture(scope="session")
 def tolerances(repo_paths: RepoPaths) -> compare.Tolerances:
-    """The comparison limits of ``python/wpct/tolerances.json``, their only source."""
+    """The comparison limits of ``python/wpct/tolerances.json``, their only source.
+
+    Session scope; returns a ``compare.Tolerances``; no teardown: it only reads the file.
+    """
     return compare.load_tolerances(repo_paths.tolerances_file)
 
 
@@ -152,7 +183,11 @@ def tolerances(repo_paths: RepoPaths) -> compare.Tolerances:
 def listing_tables(
     repo_paths: RepoPaths,
 ) -> Mapping[str, tuple[sas_reference.ListingTable, ...]]:
-    """Per program, the ParameterEstimates tables of its SAS listing, checked against its map."""
+    """Per program, the ParameterEstimates tables of its SAS listing, checked against its map.
+
+    Session scope; returns a read-only ``Mapping`` of program ID to a tuple of
+    ``sas_reference.ListingTable``; no teardown: it only reads the listings.
+    """
     return MappingProxyType(
         {
             program_id: sas_reference.parse_glm_listing(
@@ -167,7 +202,11 @@ def listing_tables(
 def sas_checkpoints(
     repo_paths: RepoPaths,
 ) -> Mapping[str, tuple[sas_reference.SasCheckpoint, ...]]:
-    """Per program, the record counts at the pinned lines of its SAS log."""
+    """Per program, the record counts at the pinned lines of its SAS log.
+
+    Session scope; returns a read-only ``Mapping`` of program ID to a tuple of
+    ``sas_reference.SasCheckpoint``; no teardown: it only reads the logs.
+    """
     return MappingProxyType(
         {
             program_id: sas_reference.parse_log_checkpoints(
@@ -180,13 +219,20 @@ def sas_checkpoints(
 
 @pytest.fixture(scope="session")
 def sas_exports_dir(repo_paths: RepoPaths) -> Path:
-    """The default directory of user-supplied full-precision SAS exports; a read-only input."""
+    """The default directory of user-supplied full-precision SAS exports; a read-only input.
+
+    Session scope; returns a ``Path``; no teardown: it only builds the path.
+    """
     return repo_paths.sas_exports_dir
 
 
 @pytest.fixture(scope="session")
 def sas_exports(sas_exports_dir: Path) -> Mapping[str, pd.DataFrame | None]:
-    """Each ``schemas.SAS_EXPORT_FILES`` name mapped to its loaded export, ``None`` when absent."""
+    """Each ``schemas.SAS_EXPORT_FILES`` name mapped to its loaded export, ``None`` when absent.
+
+    Session scope; returns a read-only ``Mapping`` of file name to a ``pd.DataFrame`` or ``None``;
+    no teardown: it only reads the exports present.
+    """
     return MappingProxyType(sas_reference.load_sas_exports(sas_exports_dir))
 
 
@@ -201,6 +247,9 @@ def comparisons(
     """Per program, every comparison group of its default run, in report order.
 
     ``compare_program`` receives all seven export entries and uses only its program's files.
+
+    Session scope; returns a read-only ``Mapping`` of program ID to a tuple of
+    ``compare.ComparisonGroup``; no teardown: it only compares in memory.
     """
     return MappingProxyType(
         {
@@ -227,6 +276,10 @@ def write_paths(tmp_path: Path) -> RepoPaths:
     the checkout, so inputs and references are still read from it, and the write guard applies its
     single rule under the new root. Neither ``python/wpct/outputs`` nor ``python/wpct/reports`` is
     created: the writers create them, and the symlink tests plant their own links there.
+
+    Function scope; returns a ``RepoPaths``; no teardown: the fixture deletes nothing, and
+    ``tmp_path`` is pytest-managed temporary storage that pytest keeps or removes under its own
+    retention policy (``tmp_path_retention_count``, ``tmp_path_retention_policy``).
     """
     root = tmp_path / "write_root"
     root.mkdir()
@@ -239,5 +292,8 @@ def file_state() -> Callable[[str | Path], Snapshot]:
 
     Two snapshots of a file are equal only when its bytes and ``st_mtime_ns`` are both unchanged;
     two snapshots of a directory are equal only when it lists the same entry names.
+
+    Function scope; returns a ``Callable[[str | Path], Snapshot]``; no teardown: the callable only
+    reads and holds no resource.
     """
     return _snapshot

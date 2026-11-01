@@ -77,13 +77,11 @@ from wpct.programs import (
 from wpct.sas_semantics import SAS_BLANK, is_char_missing, sas_sort
 from wpct.schemas import (
     ANA_VARIABLES,
-    BOOL,
     CHAR,
-    INT,
+    COLUMN_DTYPES,
     LMM_GRPVARS,
     LMM_INCL,
     LMM_ORDVARS,
-    NULLABLE_INT,
     NUM,
     POOLED_STUDYID,
     PROGRAM_07_07,
@@ -124,9 +122,6 @@ _ATPTN = "ATPTN"
 #: The record key ``%assert_unique_keys`` checks on the pooled analysis set (S07-FLT-05)
 #: [whitepapers/WPCT/WPCT-F.07.07.sas:244].
 _UNIQUE_KEYS = (_STUDYID, _USUBJID, _PARAMCD, _ATPTN)
-
-#: pandas dtypes of the ``schemas`` column type codes, for header-only frames of empty runs.
-_EMPTY_DTYPES = {CHAR: object, NUM: "float64", INT: "int64", NULLABLE_INT: "Int64", BOOL: bool}
 
 
 @dataclass(frozen=True)
@@ -595,7 +590,7 @@ def _dataset(name: str, frames: list[pd.DataFrame], exclude: tuple[str, ...] = (
     if not filled:
         return pd.DataFrame(
             {
-                column: pd.Series(dtype=_EMPTY_DTYPES[spec.column_types[column]])
+                column: pd.Series(dtype=COLUMN_DTYPES[spec.column_types[column]])
                 for column in columns
             }
         )

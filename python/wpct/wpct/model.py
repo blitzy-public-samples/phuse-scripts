@@ -23,9 +23,12 @@ library defaults differ (Part C of the specification):
 - D-09: with zero error degrees of freedom the estimates stand and the standard error, t and p are
   missing.
 
-The design is built as an explicit numpy matrix and handed to ``statsmodels.api.OLS``. patsy and
-formulaic formulas are never used, because their treatment coding drops the reference column and
-orders it first, which would change the SAS parameterisation.
+The design is built as an explicit numpy matrix that keeps every SAS indicator, the reference
+included, in MODEL order with the reference level last (D-05, D-07); its non-aliased columns are
+handed to ``statsmodels.api.OLS`` (D-06). patsy and formulaic formulas are never used: their
+reduced-rank treatment coding with an intercept drops the reference column, and their level list
+keeps its sorted order, which puts ``TRTPN 0`` first in these data where SAS puts the reference
+last. Either would change the SAS parameterisation.
 
 DIV-01: the pooled records share one ``STUDYID``, so the pooled ``studynum`` is constant and aliased
 by the Intercept. The port reproduces that, and the pooled treatment estimates equal those of
@@ -44,7 +47,11 @@ import pandas as pd
 import statsmodels.api as sm
 
 from wpct.sas_semantics import format_level
-from wpct.schemas import PARAMETER_ESTIMATE_COLUMNS
+from wpct.schemas import (
+    COLUMN_DTYPES,
+    PARAMETER_ESTIMATE_COLUMNS,
+    PARAMETER_ESTIMATE_TYPES,
+)
 
 __all__ = [
     "ALIAS_TOLERANCE",
@@ -67,17 +74,6 @@ STATUS_NO_OBSERVATIONS = "no observations"
 
 _INTERCEPT_EFFECT = "INTERCEPT"
 _INTERCEPT_PARAMETER = "Intercept"
-
-_ESTIMATE_DTYPES = {
-    "EFFECT": object,
-    "LEVEL": object,
-    "PARAMETER": object,
-    "ESTIMATE": "float64",
-    "STDERR": "float64",
-    "TVALUE": "float64",
-    "PROBT": "float64",
-    "ALIASED": bool,
-}
 
 
 def status_reference_absent(ref_level: object) -> str:
@@ -142,16 +138,22 @@ def glm_solution(
       number, ``DFE = NOBS - RANK``, and PROBT is the two-sided t probability on ``DFE``.
     - D-09: when ``DFE`` is 0, STDERR, TVALUE and PROBT are NaN.
 
-    Returns the ParameterEstimates rows with the columns of
+    Returns ``(rows, model_record)``. ``rows`` holds the ParameterEstimates rows with the columns of
     :data:`wpct.schemas.PARAMETER_ESTIMATE_COLUMNS`, one per design column in design order. An
     aliased column has ``ESTIMATE`` 0.0, NaN ``STDERR``, ``TVALUE`` and ``PROBT``, and ``ALIASED``
     true. ``EFFECT`` is ``INTERCEPT`` or the upper-cased term, ``LEVEL`` the CLASS level label
     (``54``) or ``''``, and ``PARAMETER`` the SAS label: ``Intercept``, the term as passed, or
-    ``TRTPN 54``.
+    ``TRTPN 54``. ``model_record`` is the :class:`GlmFitRecord` of the fit: ``NOBS`` the complete
+    records, ``RANK`` the retained columns, ``DFE = NOBS - RANK`` and ``STATUS``
+    :data:`STATUS_FITTED`. With ``DFE`` 0 every row is still emitted, with NaN ``STDERR``,
+    ``TVALUE`` and ``PROBT`` (D-09).
 
-    No rows are returned, and nothing is fitted, when no record is complete
-    (:data:`STATUS_NO_OBSERVATIONS`) or when ``ref_level`` has no complete record (U-02,
-    :func:`status_reference_absent`).
+    Nothing is fitted in two cases. ``rows`` is then empty but keeps the schema columns, and
+    ``model_record`` has ``DFE`` None and ``RANK`` 0:
+
+    - no record is complete: ``NOBS`` 0 and ``STATUS`` :data:`STATUS_NO_OBSERVATIONS` (D-08, D-09);
+    - ``ref_level`` has no complete record: ``NOBS`` the number of complete records and ``STATUS``
+      ``status_reference_absent(ref_level)`` (U-02, :func:`status_reference_absent`).
 
     Raises ``TypeError`` when ``terms`` is a single string or a model variable names several
     columns or holds character values, ``ValueError`` when ``class_var`` is not one of ``terms``,
@@ -328,6 +330,13 @@ def _fit(
 
 
 def _estimates_frame(rows: list[tuple]) -> pd.DataFrame:
-    """Return ParameterEstimates rows as a frame with the schema columns and dtypes."""
+    """Return ParameterEstimates rows as a frame with the schema columns and dtypes.
+
+    The columns are :data:`wpct.schemas.PARAMETER_ESTIMATE_COLUMNS`, and each takes the
+    :data:`wpct.schemas.COLUMN_DTYPES` dtype of its :data:`wpct.schemas.PARAMETER_ESTIMATE_TYPES`
+    code, with or without rows.
+    """
     frame = pd.DataFrame.from_records(rows, columns=list(PARAMETER_ESTIMATE_COLUMNS))
-    return frame.astype({name: _ESTIMATE_DTYPES[name] for name in PARAMETER_ESTIMATE_COLUMNS})
+    return frame.astype(
+        {name: COLUMN_DTYPES[PARAMETER_ESTIMATE_TYPES[name]] for name in PARAMETER_ESTIMATE_COLUMNS}
+    )

@@ -41,6 +41,7 @@ __all__ = [
     "ANA_VARIABLES",
     "BOOL",
     "CHAR",
+    "COLUMN_DTYPES",
     "COLUMN_TYPES",
     "EXPORTS",
     "INT",
@@ -51,6 +52,7 @@ __all__ = [
     "NULLABLE_INT",
     "NUM",
     "PARAMETER_ESTIMATE_COLUMNS",
+    "PARAMETER_ESTIMATE_TYPES",
     "POOLED_STUDYID",
     "PROGRAMS",
     "PROGRAM_07_02",
@@ -105,6 +107,24 @@ INT = "int"
 NULLABLE_INT = "Int64"
 BOOL = "bool"
 COLUMN_TYPES = (CHAR, NUM, INT, NULLABLE_INT, BOOL)
+#: The pandas dtype that holds each type code in memory; character values are Python strings in
+#: ``object`` columns. The drivers' header-only frames of empty runs take their dtypes from it.
+COLUMN_DTYPES: Mapping[str, object] = MappingProxyType(
+    {CHAR: object, NUM: "float64", INT: "int64", NULLABLE_INT: "Int64", BOOL: bool}
+)
+#: Type code of each :data:`PARAMETER_ESTIMATE_COLUMNS` column, in that order (S02-MOD-02,
+#: S07-MOD-02, S07-MOD-03): the character labels, the numeric estimate, standard error, t and p,
+#: and the bool aliasing flag. The rows of ``model.glm_solution`` and both ``parameter_estimates``
+#: exports take their ParameterEstimates column types from it.
+PARAMETER_ESTIMATE_TYPES: Mapping[str, str] = MappingProxyType(
+    dict(
+        zip(
+            PARAMETER_ESTIMATE_COLUMNS,
+            (CHAR, CHAR, CHAR, NUM, NUM, NUM, NUM, BOOL),
+            strict=True,
+        )
+    )
+)
 
 
 # --- Input and analysis variable lists -----------------------------------------------------------
@@ -174,12 +194,16 @@ _FIELD_LISTS = (
 class ExportSpec:
     """Shape of one exported intermediate dataset of one program.
 
-    ``name`` is both the export name and the key of ``ProgramResult.datasets``; ``file_name`` is the
-    CSV written under ``python/wpct/outputs/<program_id>/``. ``columns`` is the SAS dataset order,
-    with any stratum columns first. ``column_types`` maps every column to one of
-    :data:`COLUMN_TYPES`. ``key`` identifies a record. ``categorical`` fields are compared exactly,
-    ``record_numeric`` fields as record-level numbers, and ``count_fields``, ``summary_fields``,
-    ``glm_fields`` and ``p_value_fields`` under the tolerance classes of the same meaning.
+    ``name`` is the export name; for the stored intermediate frames (``css_anadata``, ``css_stats``,
+    ``parameter_estimates``, and ``advs_min`` in 07.07) it is also the key of
+    ``ProgramResult.datasets``, while the ``models`` and ``checkpoints`` exports are built from the
+    ``ProgramResult.models`` and ``ProgramResult.checkpoints`` records and have no ``datasets``
+    entry. ``file_name`` is the CSV written under ``python/wpct/outputs/<program_id>/``.
+    ``columns`` is the SAS dataset order, with any stratum columns first. ``column_types`` maps
+    every column to one of :data:`COLUMN_TYPES`. ``key`` identifies a record. ``categorical``
+    fields are compared exactly, ``record_numeric`` fields as record-level numbers, and
+    ``count_fields``, ``summary_fields``, ``glm_fields`` and ``p_value_fields`` under the tolerance
+    classes of the same meaning.
     ``count_strata`` lists the fields whose combinations carry per-stratum record counts (empty when
     none apply). ``optional_columns`` may be absent from a frame: ``pval`` when the GLM is skipped
     by setting. ``sas_export_file`` names the user-supplied full-precision SAS export, or is None
@@ -297,8 +321,20 @@ def _spec(
 # The statistics after ``n``: float64 summary statistics (``n`` is an int64 count).
 _SUMMARY_FIELDS = " ".join(STATISTICS[1:])
 _PE_COLUMNS = " ".join(PARAMETER_ESTIMATE_COLUMNS)
-_PE_NUM = "ESTIMATE STDERR TVALUE PROBT"
 _MODELS_COUNTERPART = "Model-level context; no direct SAS dataset"
+
+
+def _with_parameter_estimate_types(stratum_types: Mapping[str, str]) -> dict[str, str]:
+    """Return the ``types`` argument of :func:`_spec` for a ``parameter_estimates`` export.
+
+    ``stratum_types`` maps a type code to the blank-separated stratum columns of that type. Each
+    :data:`PARAMETER_ESTIMATE_COLUMNS` column is appended under its code in
+    :data:`PARAMETER_ESTIMATE_TYPES`, so those columns are typed there alone.
+    """
+    types = dict(stratum_types)
+    for column, code in PARAMETER_ESTIMATE_TYPES.items():
+        types[code] = " ".join((*_names(types.get(code, "")), column))
+    return types
 
 
 def _checkpoints(program_id: str) -> ExportSpec:
@@ -359,7 +395,7 @@ EXPORTS: Mapping[str, tuple[ExportSpec, ...]] = MappingProxyType(
                 PROGRAM_07_02,
                 "parameter_estimates",
                 columns=f"PARAMCD ATPTN {_PE_COLUMNS}",
-                types={NUM: f"ATPTN {_PE_NUM}", BOOL: "ALIASED"},
+                types=_with_parameter_estimate_types({NUM: "ATPTN"}),
                 key="PARAMCD ATPTN EFFECT LEVEL",
                 categorical="EFFECT LEVEL",
                 glm_fields="ESTIMATE STDERR TVALUE",
@@ -432,7 +468,7 @@ EXPORTS: Mapping[str, tuple[ExportSpec, ...]] = MappingProxyType(
                 PROGRAM_07_07,
                 "parameter_estimates",
                 columns=f"PARAMCD ATPTN STUDYNUM {_PE_COLUMNS}",
-                types={NUM: f"ATPTN {_PE_NUM}", INT: "STUDYNUM", BOOL: "ALIASED"},
+                types=_with_parameter_estimate_types({NUM: "ATPTN", INT: "STUDYNUM"}),
                 key="PARAMCD ATPTN STUDYNUM EFFECT LEVEL",
                 categorical="EFFECT LEVEL",
                 glm_fields="ESTIMATE STDERR TVALUE",

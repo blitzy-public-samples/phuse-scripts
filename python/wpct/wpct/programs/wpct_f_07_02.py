@@ -49,10 +49,8 @@ from wpct.programs import MODEL_ENDPOINT, Checkpoint, ModelRecord, ProgramResult
 from wpct.sas_semantics import SAS_BLANK, is_char_missing, sas_sort
 from wpct.schemas import (
     ANA_VARIABLES,
-    BOOL,
     CHAR,
-    INT,
-    NULLABLE_INT,
+    COLUMN_DTYPES,
     NUM,
     PROGRAM_07_02,
     REQUIRED_INPUT_VARIABLES,
@@ -78,9 +76,6 @@ _VISIT_NUMBER = "AVISITN"
 _VISIT_LABEL = "AVISIT"
 _PARAMCD = "PARAMCD"
 _ATPTN = "ATPTN"
-
-#: pandas dtypes of the ``schemas`` column type codes, for header-only frames of empty runs.
-_EMPTY_DTYPES = {CHAR: object, NUM: "float64", INT: "int64", NULLABLE_INT: "Int64", BOOL: bool}
 
 
 @dataclass(frozen=True)
@@ -360,7 +355,7 @@ def _dataset(name: str, frames: list[pd.DataFrame], exclude: tuple[str, ...] = (
     if not filled:
         return pd.DataFrame(
             {
-                column: pd.Series(dtype=_EMPTY_DTYPES[spec.column_types[column]])
+                column: pd.Series(dtype=COLUMN_DTYPES[spec.column_types[column]])
                 for column in columns
             }
         )

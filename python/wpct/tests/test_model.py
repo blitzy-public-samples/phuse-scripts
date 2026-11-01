@@ -21,7 +21,11 @@ import pytest
 from scipy import stats
 
 from wpct import compare, model
-from wpct.schemas import PARAMETER_ESTIMATE_COLUMNS
+from wpct.schemas import (
+    COLUMN_DTYPES,
+    PARAMETER_ESTIMATE_COLUMNS,
+    PARAMETER_ESTIMATE_TYPES,
+)
 
 RESPONSE = "CHG"
 CLASS_VAR = "TRTPN"
@@ -484,3 +488,35 @@ def test_reference_absent(make_absent: Callable[[pd.DataFrame, pd.Series], pd.Da
     assert fit == model.GlmFitRecord(
         NOBS=2 * N_PER_LEVEL, DFE=None, RANK=0, STATUS=model.status_reference_absent(REF_LEVEL)
     )
+
+
+@pytest.mark.parametrize(
+    ("prepare", "status"),
+    [
+        (lambda frame: frame, model.STATUS_FITTED),
+        (lambda frame: frame.assign(**{RESPONSE: np.nan}), model.STATUS_NO_OBSERVATIONS),
+        (
+            lambda frame: _without_records(frame, frame[CLASS_VAR] == REF_LEVEL),
+            model.status_reference_absent(REF_LEVEL),
+        ),
+    ],
+    ids=["fitted", "no-observations", "reference-absent"],
+)
+def test_s02_mod_02_s07_mod_02_s07_mod_03_row_dtypes(
+    prepare: Callable[[pd.DataFrame], pd.DataFrame], status: str
+) -> None:
+    """S02-MOD-02, S07-MOD-02, S07-MOD-03: the rows carry the schema's ParameterEstimates types.
+
+    Whether the fit produces rows or, with no complete record or no reference-level record, none,
+    every :data:`wpct.schemas.PARAMETER_ESTIMATE_COLUMNS` column has the ``COLUMN_DTYPES`` dtype of
+    its ``PARAMETER_ESTIMATE_TYPES`` code.
+    """
+    rows, fit = _fit(prepare(_analysis_frame()))
+
+    assert fit.STATUS == status
+    assert rows.empty == (status != model.STATUS_FITTED)
+    assert list(rows.columns) == list(PARAMETER_ESTIMATE_COLUMNS)
+    assert rows.dtypes.to_dict() == {
+        column: pd.api.types.pandas_dtype(COLUMN_DTYPES[PARAMETER_ESTIMATE_TYPES[column]])
+        for column in PARAMETER_ESTIMATE_COLUMNS
+    }
