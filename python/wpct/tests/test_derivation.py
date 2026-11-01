@@ -521,8 +521,9 @@ def test_lmm_trn_02_last_mode(caplog: pytest.LogCaptureFixture) -> None:
 
     ``LAST`` is ``MAX(ADT)`` [whitepapers/ADaM/derive_lastminmax_measure.sas:123-128] and is valid,
     so no warning is logged [whitepapers/ADaM/derive_lastminmax_measure.sas:124]. Its post-baseline
-    ``AVISIT`` ``Post-baseline (LAST)`` has 20 characters, the length the macro guarantees
-    [whitepapers/ADaM/derive_lastminmax_measure.sas:97-106].
+    ``AVISIT`` ``Post-baseline (LAST)`` has 20 characters, the length the macro sets when the input
+    ``AVISIT`` is shorter than 20 and the last input record survives LMM-FLT-01
+    [whitepapers/ADaM/derive_lastminmax_measure.sas:92-106].
     """
     caplog.set_level(logging.WARNING, logger=LOGGER)
 

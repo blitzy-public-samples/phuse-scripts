@@ -188,10 +188,15 @@ def derive_lastminmax_measure(
     TRTPN PARAMCD PARAM ATPTN ATPT AVISITN trtp_short AVAL ADT BASE CHG ANL02FL``.
 
     ``AVISIT`` is never truncated (LMM-TRN-07). SAS declares it ``$20`` when the input ``AVISIT`` is
-    shorter than 20 [whitepapers/ADaM/derive_lastminmax_measure.sas:97-106], as in the repository
-    data (length 16), and then cuts no derived value either. For a longer input ``AVISIT`` SAS
+    shorter than 20 and the last input record survives LMM-FLT-01
+    [whitepapers/ADaM/derive_lastminmax_measure.sas:92-106], as in the repository data (length 16,
+    last record kept), and then cuts no derived value either. For a longer input ``AVISIT`` SAS
     writes no LENGTH statement, so ``retain avisit ' '`` would leave it ``$1``; the port does not
-    reproduce that legacy truncation.
+    reproduce that legacy truncation. SAS sets AVLEN only when the last input record survives
+    LMM-FLT-01, because its ``delete`` [whitepapers/ADaM/derive_lastminmax_measure.sas:92] skips
+    the ``call symput`` [whitepapers/ADaM/derive_lastminmax_measure.sas:98] for a deleted record.
+    Otherwise AVLEN stays blank as in U-03, and the port's untruncated ``AVISIT`` is a Python
+    decision.
 
     SAS behaviour for empty derivation input not established (U-03): AVLEN stays blank when
     ``%if &avlen < 20`` is evaluated [whitepapers/ADaM/derive_lastminmax_measure.sas:98-102]; this

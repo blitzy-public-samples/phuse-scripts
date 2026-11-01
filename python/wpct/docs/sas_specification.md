@@ -1047,8 +1047,13 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
 - `Category:` TRN
 - `SAS source:` [whitepapers/ADaM/derive_lastminmax_measure.sas:97-110,197-206], CALL SYMPUT of the
   AVISIT length, DATA `&dsout` structure step and append step
-- `Rule:` `avlen` receives the storage length of the input `AVISIT`
-  [whitepapers/ADaM/derive_lastminmax_measure.sas:98]. When it is below 20, `AVISIT` is declared `$20`
+- `Rule:` `avlen` receives the storage length of the input `AVISIT` only when the last input record
+  survives LMM-FLT-01 [whitepapers/ADaM/derive_lastminmax_measure.sas:98]: the LMM-FLT-01 `delete`
+  [whitepapers/ADaM/derive_lastminmax_measure.sas:92] runs before the CALL SYMPUT and skips it for a
+  deleted record. Otherwise the local `avlen` [whitepapers/ADaM/derive_lastminmax_measure.sas:79] is
+  still blank, as in U-03, when `%if &avlen < 20` is evaluated
+  [whitepapers/ADaM/derive_lastminmax_measure.sas:101-102], and the resulting `AVISIT` length is not
+  established. When `avlen` is below 20, `AVISIT` is declared `$20`
   [whitepapers/ADaM/derive_lastminmax_measure.sas:101,106,178], so `Post-baseline (LAST)` (20 characters)
   is not truncated; otherwise no LENGTH statement is generated
   [whitepapers/ADaM/derive_lastminmax_measure.sas:102]. DSOUT starts with no rows, as `AVISIT` followed
@@ -1063,8 +1068,11 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
 - `Disposition:` Ported → `derivation.derive_lastminmax_measure`
 - `Relies on:` D-12
 - `Port notes:` Empty input returns an empty frame with these columns and zero counts (U-03 guard). The
-  port never truncates `AVISIT`; the repository inputs store `AVISIT` with length 16, so SAS takes the
-  `$20` branch, under which no value written by LMM-TRN-05 or LMM-TRN-06 is truncated.
+  port never truncates `AVISIT`. When the last input record fails LMM-FLT-01, `avlen` stays blank
+  and the untruncated `AVISIT` is a Python decision, not a proven SAS equivalent. On the repository
+  inputs LMM-FLT-01 deletes only record 1242 of 5926, so the last record survives; with `AVISIT` at
+  storage length 16, SAS takes the `$20` branch, under which no value written by LMM-TRN-05 or
+  LMM-TRN-06 is truncated.
 
 ### B.4 Dependency list for 07.07
 
@@ -1479,7 +1487,7 @@ setting the port uses to follow SAS, and the items that rely on it.
 - `Python default:` `pyreadstat.read_xport` converts `DATE9.` values to `datetime.date`.
 - `Port setting:` `read_xport(path, disable_datetime_conversion=True)`, which keeps the day numbers.
 - `Relied on by:` S07-TRN-03, LMM-FLT-01, LMM-TRN-01, S02-DEP-util_access_test_data,
-  S07-DEP-util_access_test_data
+  S07-DEP-util_access_test_data, S07-DEP-derive_lastminmax_measure
 
 #### D-11 — Character missing values and trailing blanks
 
@@ -1507,7 +1515,8 @@ setting the port uses to follow SAS, and the items that rely on it.
 - `Python default:` pandas `NaN != 0` is True and `isin` is False for NaN, which match SAS.
 - `Port setting:` The same expressions, asserted in tests; comparisons on dates run only after
   LMM-FLT-01, and duplicate-key counting follows SAS `count`.
-- `Relied on by:` S02-FLT-01, S02-FLT-03, S07-FLT-01, S07-FLT-05, LMM-FLT-01, LMM-TRN-01
+- `Relied on by:` S02-FLT-01, S02-FLT-03, S07-FLT-01, S07-FLT-05, LMM-FLT-01, LMM-TRN-01,
+  S07-DEP-assert_unique_keys
 
 #### D-14 — Sort stability
 
@@ -1518,7 +1527,8 @@ setting the port uses to follow SAS, and the items that rely on it.
   presence flag and the value (character values blank-padded and ranked by code point), and orders them
   with `numpy.lexsort`, which is stable: rows equal on every key keep their input order, the guarantee
   pandas `sort_values` documents only for a stable `kind` such as `'stable'`.
-- `Relied on by:` S02-TRN-04, S02-MOD-01, S07-TRN-03, S07-TRN-06, S07-TRN-07, S07-MOD-01, LMM-TRN-04
+- `Relied on by:` S02-TRN-04, S02-MOD-01, S07-TRN-03, S07-TRN-06, S07-TRN-07, S07-MOD-01,
+  LMM-TRN-04, S07-DEP-derive_lastminmax_measure
 
 #### D-15 — SQL tie order
 
@@ -1527,7 +1537,7 @@ setting the port uses to follow SAS, and the items that rely on it.
 - `Port setting:` Keep every row equal to the group extremum, `sas_semantics.sas_sort` by
   GRPVARS + ORDVARS + `_ROW` (input order), then keep the first row per group. Input order is the stated
   tie rule (U-01).
-- `Relied on by:` S07-TRN-03, LMM-TRN-03, LMM-TRN-04
+- `Relied on by:` S07-TRN-03, LMM-TRN-03, LMM-TRN-04, S07-DEP-derive_lastminmax_measure
 
 #### D-16 — The `'A0'x` pooled identifier
 
