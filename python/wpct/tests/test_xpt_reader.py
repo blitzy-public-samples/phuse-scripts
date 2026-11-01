@@ -2,7 +2,8 @@
 
 Spec items verified (``python/wpct/docs/sas_specification.md``):
 
-- S02-DEP-util_access_test_data, S07-DEP-util_access_test_data: the local read of ``ADVS`` and its
+- S02-DEP-util_access_test_data, S07-DEP-util_access_test_data: the local read of ``ADVS``, the
+  variable labels and storage widths it reports, checked against the raw transport header, and its
   failure messages for a missing or unreadable input (AAP 0.6.4).
 - S02-DEP-assert_dset_exist, S07-DEP-assert_dset_exist: the file-existence check.
 - S02-DEP-assert_depend, S07-DEP-assert_depend, S02-DEP-assert_var_exist,
@@ -16,8 +17,10 @@ The repository transport files are only read. The tests write only under ``tmp_p
 from __future__ import annotations
 
 import datetime
+import struct
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -54,6 +57,81 @@ DATE_VARIABLES = ("ADT", "TRTSDT", "TRTEDT")
 
 #: Day 0 of the SAS date scale.
 SAS_EPOCH = datetime.date(1960, 1, 1)
+
+#: Layout of a version 5 transport file, after SAS Institute TS-140, "The Record Layout of a Data
+#: Set in SAS Transport (XPORT) Format": 80-byte header records, the first member's header at
+#: record 3, holding its NAMESTR length at bytes 74:78, and its NAMESTR header at record 7, holding
+#: the variable count at bytes 54:58. One NAMESTR record per variable follows at record 8. Each
+#: opens with the big-endian shorts ``ntype`` (1 numeric, 2 character), ``nhfun``, ``nlng`` (the
+#: storage width) and ``nvar0``, then the blank-padded ``nname`` (8 bytes) and ``nlabel`` (40).
+XPT_RECORD_LENGTH = 80
+XPT_MEMBER_RECORD = 3
+XPT_MEMBER_TAG = b"HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!"
+XPT_NAMESTR_RECORD = 7
+XPT_NAMESTR_TAG = b"HEADER RECORD*******NAMESTR HEADER RECORD!!!!!!!"
+XPT_NAMESTR_FIELDS = struct.Struct(">hhhh8s40s")
+XPT_NUMERIC, XPT_CHARACTER = 1, 2
+
+#: Label and storage width of ADVS variables as the NAMESTR records of both repository files hold
+#: them (``data/adam/cdisc/advs.xpt``, ``data/adam/cdisc-split/advs.xpt``). They pin the header
+#: parser below, so the parser cannot drift together with the reader.
+ADVS_LABELS_AND_WIDTHS: Mapping[str, tuple[str, int]] = {
+    "STUDYID": ("Study Identifier", 12),
+    "USUBJID": ("Unique Subject Identifier", 11),
+    "PARAMCD": ("Parameter Code", 8),
+    "PARAM": ("Parameter", 100),
+    "AVISIT": ("Analysis Visit", 16),
+    "SAFFL": ("Safety Population Flag", 1),
+    "ANL01FL": ("Analysis Record Flag 01", 1),
+    "ADT": ("Analysis Date", 8),
+    "BASE": ("Baseline Value", 8),
+    "CHG": ("Change from Baseline", 8),
+}
+
+#: Storage width of every numeric variable in ADVS and in a file ``pyreadstat`` writes: the full
+#: 8-byte value. The layout also allows shorter, truncated numerics, which neither holds.
+XPT_NUMERIC_WIDTH = 8
+
+
+class _Namestr(NamedTuple):
+    """The fields of one NAMESTR record that :class:`XptMetadata` reports or depends on."""
+
+    ntype: int
+    label: str
+    width: int
+
+
+def _namestr_records(path: Path) -> dict[str, _Namestr]:
+    """Per variable, in NAMESTR order, its type, label and storage width from the raw header.
+
+    An oracle independent of ``pyreadstat``: the first member's header of a version 5 transport
+    file is decoded byte by byte as ``XPT_*`` lays it out. Only the header is read, read-only.
+
+    Raises:
+        ValueError: The member or NAMESTR header is not where the layout puts it, the file ends
+            inside the NAMESTR records, or two records carry the same name.
+    """
+    with path.open("rb") as stream:
+        head = stream.read((XPT_NAMESTR_RECORD + 1) * XPT_RECORD_LENGTH)
+        member = head[XPT_MEMBER_RECORD * XPT_RECORD_LENGTH :][:XPT_RECORD_LENGTH]
+        namestr = head[XPT_NAMESTR_RECORD * XPT_RECORD_LENGTH :][:XPT_RECORD_LENGTH]
+        if not member.startswith(XPT_MEMBER_TAG) or not namestr.startswith(XPT_NAMESTR_TAG):
+            raise ValueError(f"{path}: no version 5 member and NAMESTR header records")
+        record_length, count = int(member[74:78]), int(namestr[54:58])
+        if record_length < XPT_NAMESTR_FIELDS.size:
+            raise ValueError(f"{path}: NAMESTR length {record_length} is too short")
+        body = stream.read(record_length * count)
+    if len(body) != record_length * count:
+        raise ValueError(f"{path}: file ends inside its {count} NAMESTR records")
+
+    records: dict[str, _Namestr] = {}
+    for offset in range(0, len(body), record_length):
+        ntype, _nhfun, width, _nvar0, name, label = XPT_NAMESTR_FIELDS.unpack_from(body, offset)
+        variable = name.decode("ascii").rstrip(" ")
+        if variable in records:
+            raise ValueError(f"{path}: NAMESTR records repeat variable {variable!r}")
+        records[variable] = _Namestr(ntype, label.decode("ascii").rstrip(" "), width)
+    return records
 
 
 @pytest.fixture(scope="module")
@@ -307,6 +385,88 @@ def test_s02_and_s07_dep_util_access_test_data_reads_advs(
     assert frame["STUDYID"].value_counts().to_dict() == study_counts
     assert "ANL02FL" not in frame.columns
     require_variables(frame, REQUIRED_INPUT_VARIABLES[program_id], path, program_id)
+
+
+@pytest.mark.parametrize("program_id", PROGRAMS)
+def test_s02_and_s07_dep_util_access_test_data_reads_labels_and_storage_widths(
+    program_id: str,
+    advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
+    repo_paths: RepoPaths,
+) -> None:
+    """Each ADVS variable's label and storage width read back as its NAMESTR record holds them.
+
+    Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data: the variable
+    attributes of ``WORK.ADVS`` are those the transport member carries
+    [whitepapers/utilities/util_access_test_data.sas:62-66]. The expected mappings come from the
+    file's header bytes, decoded without ``pyreadstat``, and both mappings cover every variable in
+    dataset order with nothing more.
+    """
+    _, metadata = advs[program_id]
+    header = _namestr_records(repo_paths.input_xpt(program_id))
+
+    assert len(header) == ADVS_SHAPE[1]
+    assert tuple(header) == metadata.column_names
+    for name, pinned in ADVS_LABELS_AND_WIDTHS.items():
+        assert (header[name].label, header[name].width) == pinned, name
+    numeric = [name for name, record in header.items() if record.ntype == XPT_NUMERIC]
+    assert {"ADT", "BASE", "CHG"} <= set(numeric)
+    assert {header[name].width for name in numeric} == {XPT_NUMERIC_WIDTH}
+
+    assert tuple(metadata.labels) == metadata.column_names
+    assert tuple(metadata.storage_widths) == metadata.column_names
+    assert dict(metadata.labels) == {name: record.label for name, record in header.items()}
+    assert dict(metadata.storage_widths) == {
+        name: record.width for name, record in header.items()
+    }
+    assert all(type(label) is str for label in metadata.labels.values())
+    assert all(type(width) is int for width in metadata.storage_widths.values())
+
+
+def test_s02_and_s07_dep_util_access_test_data_reads_supplied_labels_and_storage_widths(
+    tmp_path: Path,
+) -> None:
+    """Labels and storage widths written into a transport file read back exactly.
+
+    Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data on the cases ADVS does
+    not hold: a variable written without a label reads back as ``''``, and a character variable is
+    as wide as its longest value, not its first. The header bytes must hold the supplied metadata
+    too, which checks the header parser on known input.
+    """
+    path = tmp_path / "labelled.xpt"
+    frame = pd.DataFrame(
+        {
+            "USUBJID": ["01-701-1015", "01-701-1023"],
+            "AVAL": [64.0, np.nan],
+            "AVISIT": ["Week 2", "Week 24"],
+        }
+    )
+    pyreadstat.write_xport(
+        frame,
+        str(path),
+        table_name="ADVS",
+        column_labels=["Unique Subject Identifier", "Analysis Value", None],
+        file_format_version=5,
+    )
+
+    assert _namestr_records(path) == {
+        "USUBJID": _Namestr(XPT_CHARACTER, "Unique Subject Identifier", 11),
+        "AVAL": _Namestr(XPT_NUMERIC, "Analysis Value", XPT_NUMERIC_WIDTH),
+        "AVISIT": _Namestr(XPT_CHARACTER, "", 7),
+    }
+
+    _, metadata = read_xpt(path, PROGRAM_07_02)
+
+    assert metadata.column_names == ("USUBJID", "AVAL", "AVISIT")
+    assert tuple(metadata.labels) == metadata.column_names
+    assert tuple(metadata.storage_widths) == metadata.column_names
+    assert dict(metadata.labels) == {
+        "USUBJID": "Unique Subject Identifier",
+        "AVAL": "Analysis Value",
+        "AVISIT": "",
+    }
+    assert dict(metadata.storage_widths) == {"USUBJID": 11, "AVAL": 8, "AVISIT": 7}
+    assert all(type(label) is str for label in metadata.labels.values())
+    assert all(type(width) is int for width in metadata.storage_widths.values())
 
 
 @pytest.mark.parametrize("program_id", PROGRAMS)
