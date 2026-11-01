@@ -36,8 +36,9 @@ plus the stratum columns, without ``EFFECT`` or ``LEVEL``. Each control then loa
 ``sas_reference.load_sas_exports`` and compares it with ``compare.compare_program``. These files
 echo Python output and are not SAS reference evidence: they show only that the loader and the
 comparator work, and no SAS value is invented (AAP 0.7.3). An unedited echo must pass everything and
-meet the coverage check. Editing one cell or record, by offsets taken from ``tolerances.json``, must
-fail exactly the rows it targets. The coverage check must reject groups with rows removed. The
+meet the coverage check. Editing one cell or record, by offsets taken from ``tolerances.json``, or
+repeating one record, must fail exactly the rows it targets, and the key-set agreement row must
+give exactly the reason expected. The coverage check must reject groups with rows removed. The
 session frames are read, never altered: an edit applies to the written text or to a copy.
 """
 
@@ -108,6 +109,7 @@ _EXPORT_COUNTS: Mapping[str | None, int] = MappingProxyType({**_RECORD_COUNTS, *
 #: Row quantities that ``compare`` writes for the record-key comparison of AAP 0.7.2.
 _KEY_ONLY_IN_SAS = "record key only in SAS"
 _KEY_ONLY_IN_PYTHON = "record key only in Python"
+_KEY_REPEATED_IN_SAS = "repeated record key in SAS"
 _KEY_SET_AGREEMENT = "key-set agreement"
 _RECORD_COUNT = "record count"
 _STRATUM_RECORD_COUNT = "stratum record count"
@@ -415,9 +417,20 @@ _EDIT_OFFSET = "offset"
 _EDIT_MISSING = "missing"
 _EDIT_RELABEL = "relabel"
 _EDIT_DROP = "drop"
+_EDIT_DUPLICATE = "duplicate"
 _EDIT_PYTHON_OFFSET = "python offset"
-_EDITS = (_EDIT_OFFSET, _EDIT_MISSING, _EDIT_RELABEL, _EDIT_DROP, _EDIT_PYTHON_OFFSET)
+_EDITS = (
+    _EDIT_OFFSET,
+    _EDIT_MISSING,
+    _EDIT_RELABEL,
+    _EDIT_DROP,
+    _EDIT_DUPLICATE,
+    _EDIT_PYTHON_OFFSET,
+)
 _OFFSET_EDITS = (_EDIT_OFFSET, _EDIT_PYTHON_OFFSET)
+#: The edits that change which SAS records the export holds rather than a cell, so they need no
+#: column and change the record count.
+_RECORD_EDITS = (_EDIT_DROP, _EDIT_DUPLICATE)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -432,13 +445,16 @@ class _Mutation:
         edit: ``offset`` moves the SAS number by ``factor`` times the limit of ``class_key``, under
             that class's rule (see :func:`_offset`). ``missing`` writes the SAS number as ``.``.
             ``relabel`` appends a suffix to the SAS text. ``drop`` leaves the SAS record out.
-            ``python offset`` moves the Python number, on a copy of the run's dataset, by
-            ``factor`` times the limit of ``class_key``, absolute.
-        column: The upper-case column edited; empty for ``drop``.
+            ``duplicate`` writes the SAS record twice, the copy right after it. ``python offset``
+            moves the Python number, on a copy of the run's dataset, by ``factor`` times the limit
+            of ``class_key``, absolute.
+        column: The upper-case column edited; empty for ``drop`` and ``duplicate``.
         class_key: The ``tolerances.json`` class whose limit sizes an offset.
         factor: The multiple of that limit; above 1 lies beyond it, below 1 within it.
         fails: The exact ``(quantity, stratum)`` pairs of the rows that must FAIL. Every other row
             must PASS.
+        key_set_reason: The exact reason of the key-set agreement row; empty when the key set
+            agrees.
     """
 
     label: str
@@ -449,11 +465,12 @@ class _Mutation:
     class_key: str = ""
     factor: float = 0.0
     fails: frozenset[tuple[str, str]] = frozenset()
+    key_set_reason: str = ""
 
     def __post_init__(self) -> None:
         if self.edit not in _EDITS:
             raise ValueError(f"{self.label}: unknown edit {self.edit!r}")
-        if self.edit != _EDIT_DROP and not self.column:
+        if self.edit not in _RECORD_EDITS and not self.column:
             raise ValueError(f"{self.label}: the {self.edit} edit needs a column")
         if self.edit in _OFFSET_EDITS and (not self.class_key or self.factor <= 0):
             raise ValueError(f"{self.label}: an offset needs a tolerance class and a factor")
@@ -587,6 +604,22 @@ _MUTATIONS = (
                 (_STRATUM_RECORD_COUNT, _ADVS_MIN_STRATUM),
             }
         ),
+        key_set_reason="0 keys only in SAS, 1 only in Python",
+    ),
+    _Mutation(
+        "07.07-advs_min-record-repeated-in-SAS",
+        _FILE_07_07_ADVS_MIN,
+        _ADVS_MIN_RECORD,
+        _EDIT_DUPLICATE,
+        fails=frozenset(
+            {
+                (_KEY_REPEATED_IN_SAS, _ADVS_MIN_KEY),
+                _key_set(_FILE_07_07_ADVS_MIN),
+                (_RECORD_COUNT, _ALL_STRATA),
+                (_STRATUM_RECORD_COUNT, _ADVS_MIN_STRATUM),
+            }
+        ),
+        key_set_reason="1 repeated SAS key, 0 repeated Python keys",
     ),
     _Mutation(
         "07.07-css_anadata-pooled-key-only-in-SAS-and-only-in-Python",
@@ -601,6 +634,7 @@ _MUTATIONS = (
                 _key_set(_FILE_07_07_ANADATA),
             }
         ),
+        key_set_reason="1 key only in SAS, 1 only in Python",
     ),
     _Mutation(
         "07.02-css_stats-mean-beyond-summary_statistics",
@@ -828,6 +862,9 @@ def _sas_edited(
     if mutation.edit == _EDIT_DROP:
         del edited[position]
         return edited
+    if mutation.edit == _EDIT_DUPLICATE:
+        edited.insert(position + 1, list(edited[position]))
+        return edited
     index = schemas.upper_columns(columns).index(mutation.column)
     before = edited[position][index]
     if mutation.edit == _EDIT_MISSING:
@@ -960,10 +997,12 @@ def test_synthetic_export_mismatch_fails_targeted_rows(
     The edits are sized from the ``tolerances.json`` limits (AAP 0.7.1). A value beyond its limit
     fails, and one within it passes. A changed label, or a number missing on one side only, fails
     its field. A record left out of SAS fails its key, the key set, the record count and its
-    stratum count. A changed key fails on both sides. Against a SAS-side 0, the value SAS gives
-    the aliased pooled ``studynum`` (S07-MOD-03, D-06), a non-zero Python estimate fails, however
-    small. Every other row must PASS. An edit that leaves the keys alone must also leave the
-    coverage of :func:`_assert_export_coverage` complete.
+    stratum count, and so does a record repeated in SAS. A changed key fails on both sides.
+    Against a SAS-side 0, the value SAS gives the aliased pooled ``studynum`` (S07-MOD-03, D-06),
+    a non-zero Python estimate fails, however small. Every other row must PASS. The one key-set
+    agreement row gives exactly the reason expected, which is empty when the key set agrees. An
+    edit that leaves the keys and the records alone must also leave the coverage of
+    :func:`_assert_export_coverage` complete.
     """
     group = synthetic_export_group(mutation.file_name, mutation)
     rows = group.rows
@@ -974,8 +1013,17 @@ def test_synthetic_export_mismatch_fails_targeted_rows(
     )
     not_compared = [row for row in rows if row.status == compare.NOT_COMPARED]
     assert not not_compared, f"{mutation.label}: rows not compared:\n{_describe(not_compared)}"
+    key_set = [row for row in rows if row.quantity == _KEY_SET_AGREEMENT]
+    assert len(key_set) == 1, (
+        f"{mutation.label}: expected one {_KEY_SET_AGREEMENT!r} row, found {len(key_set)}"
+    )
+    assert key_set[0].reason == mutation.key_set_reason, (
+        f"{mutation.label}: {_KEY_SET_AGREEMENT} reason {key_set[0].reason!r}, expected "
+        f"{mutation.key_set_reason!r}"
+    )
     spec = schemas.sas_export_spec(mutation.file_name)
-    if mutation.edit != _EDIT_DROP and mutation.column not in schemas.upper_columns(spec.key):
+    key_columns = schemas.upper_columns(spec.key)
+    if mutation.edit not in _RECORD_EDITS and mutation.column not in key_columns:
         _assert_export_coverage(
             mutation.file_name, rows, results[spec.program_id].datasets[spec.name]
         )

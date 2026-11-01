@@ -1553,11 +1553,14 @@ def _key_set_rows(
             )
     problems = []
     if only_sas or only_python:
-        problems.append(f"{len(only_sas)} keys only in SAS, {len(only_python)} only in Python")
+        noun = "key" if len(only_sas) == 1 else "keys"
+        problems.append(f"{len(only_sas)} {noun} only in SAS, {len(only_python)} only in Python")
     if sas.duplicates or python.duplicates:
+        sas_noun = "key" if len(sas.duplicates) == 1 else "keys"
+        python_noun = "key" if len(python.duplicates) == 1 else "keys"
         problems.append(
-            f"{len(sas.duplicates)} repeated SAS keys, "
-            f"{len(python.duplicates)} repeated Python keys"
+            f"{len(sas.duplicates)} repeated SAS {sas_noun}, "
+            f"{len(python.duplicates)} repeated Python {python_noun}"
         )
     builder.add(
         "key-set agreement",
