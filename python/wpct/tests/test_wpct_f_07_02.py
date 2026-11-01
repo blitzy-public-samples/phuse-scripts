@@ -362,12 +362,15 @@ def test_unset_reference_skips_glm(
     listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
     sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
     tolerances: compare.Tolerances,
+    groups_07_02: tuple[compare.ComparisonGroup, ...],
 ) -> None:
     """S02-MOD-02, S02-TRN-01: a blank ``ref_trtn`` or ``b_var`` skips the GLM and the merge.
 
     No model is fitted, ``parameter_estimates`` is empty and ``css_stats`` has no ``pval``
-    column, while the statistics themselves are those of the default run. No model quantity of
-    the comparison passes.
+    column, while the statistics themselves are those of the default run. The comparison still
+    holds exactly the 40 listing ParameterEstimates rows and the 6 merged-pval rows of the default
+    run, in its order, and none of them passes: each carries the skip reason and no Python value.
+    Pinning both counts (AAP 0.7.4, no silent pass) makes an empty or truncated group fail.
     """
     result = wpct_f_07_02.run(wpct_f_07_02.Config(**{setting: None}), repo_paths)
 
@@ -388,13 +391,25 @@ def test_unset_reference_skips_glm(
         result, listing_tables[PROGRAM], sas_checkpoints[PROGRAM], None, tolerances
     )
     # wpct.compare reports each listing value of a skipped model as a non-PASS row carrying the
-    # skip reason and lists the skip under not compared. The test pins that no model quantity
-    # passes and why, not which non-PASS status compare assigns to the listing rows.
-    for key in _MODEL_GROUPS:
+    # skip reason and lists the skip under not compared. The test pins how many rows each model
+    # group holds, which quantities they are, that none passes and why, not which non-PASS status
+    # compare assigns to the listing rows.
+    for key, count in zip(_MODEL_GROUPS, (40, 6), strict=True):
         group = _group(groups, key)
-        assert group.n_pass == 0, _describe(group.rows)
+        assert len(group.rows) == count, (
+            f"{PROGRAM} {key}: {len(group.rows)} comparison rows ran, expected {count}:\n"
+            f"{_describe(group.rows)}"
+        )
+        default_rows = _group(groups_07_02, key).rows
+        assert [(row.quantity, row.stratum) for row in group.rows] == [
+            (row.quantity, row.stratum) for row in default_rows
+        ], _describe(group.rows)
+        passing = [row for row in group.rows if row.status == compare.PASS]
+        assert not passing, _describe(passing)
         unexplained = [row for row in group.rows if _GLM_SKIPPED not in row.reason]
         assert not unexplained, _describe(unexplained)
+        with_python_value = [row for row in group.rows if row.python_value != ""]
+        assert not with_python_value, _describe(with_python_value)
     not_compared = _group(groups, compare.GROUP_NOT_COMPARED)
     assert any(
         row.status == compare.NOT_COMPARED and row.reason == _GLM_SKIPPED
@@ -622,6 +637,450 @@ def test_s02_dep_assert_var_exist_lower_case_variable_names(
         pd.testing.assert_frame_equal(frame, result_07_02.dataset(name), check_exact=True)
     assert result.checkpoints == result_07_02.checkpoints
     assert result.models == result_07_02.models
+
+
+# --- Rounded listing values: numeric negative controls --------------------------------------------
+
+#: The exact row count of each listing group: 2 tables x 5 rows x 4 values, and 2 strata x 3 levels.
+_LISTING_COUNTS = {
+    compare.GROUP_LISTING_PARAMETER_ESTIMATES: 40,
+    compare.GROUP_LISTING_MERGED_PVAL: 6,
+}
+
+#: The reasons ``wpct.compare`` gives a rounded listing value that fails, by cause.
+_BEYOND_PRECISION = "values differ beyond the displayed precision ({decimals} dp)"
+_OUTSIDE_BOUND = "Python value outside the bound "
+_PYTHON_MISSING = "Python value missing, SAS not"
+_SAS_MISSING = "SAS value missing, Python not"
+
+#: The stratum and fitted TRTPN level whose values most controls alter: DIABP/815, level 54.
+_TARGET_PARAMCD = _STRATA[0][0]
+_TARGET_LEVEL = "54"
+
+
+def _listing_token(
+    tables: Iterable[sas_reference.ListingTable],
+    paramcd: str,
+    effect: str,
+    level: str,
+    field: str,
+) -> str:
+    """The token the SAS listing displays for one ParameterEstimates value, parsed at run time."""
+    (table,) = [table for table in tables if table.spec and table.spec.PARAMCD == paramcd]
+    (row,) = [row for row in table.rows if (row.EFFECT, row.LEVEL) == (effect, level)]
+    return getattr(row, field)
+
+
+def _displayed_decimals(token: str) -> int:
+    """The number of decimals of a displayed listing number; fails for any other token."""
+    whole, point, fraction = token.strip(" ").partition(".")
+    digits = whole.removeprefix("-")
+    assert point, f"not a displayed number: {token!r}"
+    assert fraction.isdigit(), f"not a displayed number: {token!r}"
+    assert digits.isdigit() or not digits, f"not a displayed number: {token!r}"
+    return len(fraction)
+
+
+def _assert_displayed_as(token: str, kind: str, tolerances: compare.Tolerances) -> None:
+    """Assert that the listing shows ``token`` as ``kind``: number, bound, dot or blank."""
+    if kind == "number":
+        _displayed_decimals(token)
+        return
+    expected = {"bound": tolerances.bound_token, "dot": ".", "blank": ""}[kind]
+    assert token.strip(" ") == expected, f"listing token {token!r} is not {kind}"
+
+
+def _endpoint_stratum(paramcd: str) -> str:
+    """The report stratum of the endpoint table of ``paramcd``, as ``wpct.compare`` writes it."""
+    return f"PARAMCD={paramcd} ATPTN={dict(_STRATA)[paramcd]:g} AVISITN={_DEFAULT.e_visn:g}"
+
+
+def _estimate_cell(paramcd: str, effect: str, level: str) -> dict[str, object]:
+    """The ``parameter_estimates`` row of one parameter of the endpoint model of ``paramcd``."""
+    return {"PARAMCD": paramcd, "ATPTN": dict(_STRATA)[paramcd], "EFFECT": effect, "LEVEL": level}
+
+
+def _pval_cell(paramcd: str, level: str) -> dict[str, object]:
+    """The ``css_stats`` endpoint row of one TRTPN level of ``paramcd``, which the merge fills."""
+    return {
+        "PARAMCD": paramcd,
+        "ATPTN": dict(_STRATA)[paramcd],
+        "AVISITN": _DEFAULT.e_visn,
+        "TRTPN": float(level),
+    }
+
+
+def _compare_altered(
+    result: ProgramResult,
+    name: str,
+    cell: Mapping[str, object],
+    column: str,
+    value: float,
+    listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> tuple[compare.ComparisonGroup, ...]:
+    """Compare a copy of ``result`` holding ``value`` in one cell of dataset ``name``.
+
+    ``cell`` names the one row by its column values, and ``column`` of that row is set on a private
+    deep copy of the dataset; every other dataset is the session's own. The comparison uses the
+    parsed SAS references and the shared tolerances, and afterwards every dataset of ``result`` is
+    shown to equal its state before the call, so the session run is never altered.
+    """
+    before = {key: frame.copy(deep=True) for key, frame in result.datasets.items()}
+    frame = result.dataset(name).copy(deep=True)
+    mask = pd.Series(True, index=frame.index)
+    for cell_column, wanted in cell.items():
+        mask &= frame[cell_column] == wanted
+    assert int(mask.sum()) == 1, f"{name}: {int(mask.sum())} rows match {dict(cell)}"
+    frame.loc[mask, column] = value
+    altered = dataclasses.replace(result, datasets={**result.datasets, name: frame})
+    groups = compare.compare_program(
+        altered, listing_tables[PROGRAM], sas_checkpoints[PROGRAM], None, tolerances
+    )
+    assert list(result.datasets) == list(before)
+    for key, original in before.items():
+        pd.testing.assert_frame_equal(result.dataset(key), original, check_exact=True)
+    return groups
+
+
+def _assert_listing_verdicts(
+    groups: tuple[compare.ComparisonGroup, ...],
+    target: tuple[str, str, str],
+    status: str,
+    reason: str,
+    python_value: float,
+) -> None:
+    """Assert the altered row's verdict and that every other listing row still passes.
+
+    ``target`` is the ``(group key, quantity, stratum)`` of the row whose Python value was set to
+    ``python_value``. Both listing groups hold exactly their 40 and 6 rows, the target occurs once
+    and shows ``python_value``, its status is ``status`` and its reason starts with ``reason`` (is
+    empty for a PASS), and every other row of both groups is PASS.
+    """
+    key, quantity, stratum = target
+    for group_key, count in _LISTING_COUNTS.items():
+        group = _group(groups, group_key)
+        assert len(group.rows) == count, (
+            f"{PROGRAM} {group_key}: {len(group.rows)} comparison rows ran, expected {count}"
+        )
+        is_target = [(group_key, row.quantity, row.stratum) == target for row in group.rows]
+        assert sum(is_target) == (1 if group_key == key else 0), _describe(group.rows)
+        others = [row for row, hit in zip(group.rows, is_target, strict=True) if not hit]
+        failing = [row for row in others if row.status != compare.PASS]
+        assert not failing, _describe(failing)
+        expected_pass = count - 1 if group_key == key and status != compare.PASS else count
+        assert group.n_pass == expected_pass, _describe(group.rows)
+
+    rows = _group(groups, key).rows
+    (row,) = [row for row in rows if (row.quantity, row.stratum) == (quantity, stratum)]
+    assert row.status == status, _describe([row])
+    if reason:
+        assert row.reason.startswith(reason), _describe([row])
+    else:
+        assert row.reason == "", _describe([row])
+    if math.isnan(python_value):
+        assert row.python_value == ".", _describe([row])
+    else:
+        assert float(row.python_value) == python_value, _describe([row])
+
+
+@pytest.mark.parametrize(
+    ("field", "decimals"),
+    [("ESTIMATE", 8), ("TVALUE", 2), ("PROBT", 4)],
+    ids=["estimate", "tvalue", "probt"],
+)
+@pytest.mark.parametrize(
+    ("half_units", "epsilons", "status"),
+    [
+        (-1.1, 0.0, compare.FAIL),
+        (-1.0, -2.0, compare.FAIL),
+        (-1.0, -0.5, compare.PASS),
+        (-1.0, 0.0, compare.PASS),
+        (-0.9, 0.0, compare.PASS),
+        (0.9, 0.0, compare.PASS),
+        (1.0, 0.0, compare.PASS),
+        (1.0, 0.5, compare.PASS),
+        (1.0, 2.0, compare.FAIL),
+        (1.1, 0.0, compare.FAIL),
+    ],
+    ids=[
+        "below-by-1.1-half-units",
+        "below-edge-by-2-epsilon",
+        "below-edge-within-epsilon",
+        "lower-edge",
+        "below-by-0.9-half-units",
+        "above-by-0.9-half-units",
+        "upper-edge",
+        "above-edge-within-epsilon",
+        "above-edge-by-2-epsilon",
+        "above-by-1.1-half-units",
+    ],
+)
+def test_s02_mod_02_listing_value_judged_at_displayed_precision(
+    field: str,
+    decimals: int,
+    half_units: float,
+    epsilons: float,
+    status: str,
+    result_07_02: ProgramResult,
+    listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """S02-MOD-02: a fitted value agrees with its listing token only within the displayed precision.
+
+    A token with d decimals stands for every value that rounds to it, so the rounded listing rule
+    passes a Python value only when its distance from the token is at most the half unit of the
+    last displayed digit, ``half_unit x 10^-d``, plus the configured epsilon. The DIABP/815
+    ``TRTPN 54`` value of ``field`` (8, 2 and 4 decimals) is set, on a private copy of the run, to
+    the token moved by ``half_units`` half units and ``epsilons`` epsilons: up to the edge and
+    within epsilon beyond it passes, while 1.1 half units or the edge plus twice epsilon fails with
+    the displayed-precision reason. The other 39 ParameterEstimates rows and the 6 merged cells
+    still pass.
+    """
+    token = _listing_token(listing_tables[PROGRAM], _TARGET_PARAMCD, "TRTPN", _TARGET_LEVEL, field)
+    assert _displayed_decimals(token) == decimals, token
+    half_unit = tolerances.half_unit * 10.0**-decimals
+    value = float(token) + half_units * half_unit + epsilons * tolerances.epsilon
+
+    groups = _compare_altered(
+        result_07_02,
+        "parameter_estimates",
+        _estimate_cell(_TARGET_PARAMCD, "TRTPN", _TARGET_LEVEL),
+        field,
+        value,
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+    )
+    target = (
+        compare.GROUP_LISTING_PARAMETER_ESTIMATES,
+        f"TRTPN {_TARGET_LEVEL} {field}",
+        _endpoint_stratum(_TARGET_PARAMCD),
+    )
+    reason = "" if status == compare.PASS else _BEYOND_PRECISION.format(decimals=decimals)
+    _assert_listing_verdicts(groups, target, status, reason, value)
+
+
+@pytest.mark.parametrize(
+    ("bound_fraction", "steps_down", "status"),
+    [
+        (0.0, 0, compare.PASS),
+        (1.0, 1, compare.PASS),
+        (1.0, 0, compare.FAIL),
+        (0.0, 1, compare.FAIL),
+    ],
+    ids=["zero", "just-below-upper-bound", "upper-bound", "just-below-zero"],
+)
+def test_s02_mod_02_bound_token_passes_only_zero_up_to_upper_bound(
+    bound_fraction: float,
+    steps_down: int,
+    status: str,
+    result_07_02: ProgramResult,
+    listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """S02-MOD-02: a Probt the listing prints as the bound token passes only in [0, upper bound).
+
+    SAS prints a p-value too small to display as ``<.0001``, so the rounded listing rule accepts a
+    Python value from zero inclusive to the configured upper bound exclusive. The DIABP/815
+    Intercept Probt is set, on a private copy of the run, to ``bound_fraction`` times the upper
+    bound, moved ``steps_down`` floats toward minus infinity: zero and the largest float below the
+    upper bound pass, while the upper bound itself and the largest float below zero fail with the
+    bound reason. Every other listing row still passes.
+    """
+    token = _listing_token(listing_tables[PROGRAM], _TARGET_PARAMCD, "INTERCEPT", "", "PROBT")
+    assert token == tolerances.bound_token
+    value = bound_fraction * tolerances.bound_upper
+    for _ in range(steps_down):
+        value = math.nextafter(value, -math.inf)
+
+    groups = _compare_altered(
+        result_07_02,
+        "parameter_estimates",
+        _estimate_cell(_TARGET_PARAMCD, "INTERCEPT", ""),
+        "PROBT",
+        value,
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+    )
+    target = (
+        compare.GROUP_LISTING_PARAMETER_ESTIMATES,
+        "INTERCEPT PROBT",
+        _endpoint_stratum(_TARGET_PARAMCD),
+    )
+    reason = "" if status == compare.PASS else _OUTSIDE_BOUND
+    _assert_listing_verdicts(groups, target, status, reason, value)
+
+
+@pytest.mark.parametrize(
+    ("paramcd", "effect", "level", "field", "sas_shows", "value", "reason"),
+    [
+        (_TARGET_PARAMCD, "TRTPN", _TARGET_LEVEL, "ESTIMATE", "number", math.nan, _PYTHON_MISSING),
+        (_TARGET_PARAMCD, "INTERCEPT", "", "PROBT", "bound", math.nan, _PYTHON_MISSING),
+        (_TARGET_PARAMCD, "TRTPN", _REF_LEVEL, "STDERR", "dot", 0.0, _SAS_MISSING),
+        (_STRATA[1][0], "TRTPN", _REF_LEVEL, "STDERR", "blank", 0.0, _SAS_MISSING),
+    ],
+    ids=[
+        "python-missing-sas-number",
+        "python-missing-sas-bound",
+        "python-number-sas-dot",
+        "python-number-sas-blank",
+    ],
+)
+def test_s02_mod_02_value_missing_on_one_side_fails(
+    paramcd: str,
+    effect: str,
+    level: str,
+    field: str,
+    sas_shows: str,
+    value: float,
+    reason: str,
+    result_07_02: ProgramResult,
+    listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """S02-MOD-02: a ParameterEstimates value missing on exactly one side fails.
+
+    Under the missing-value rule both sides missing pass and exactly one side missing fails,
+    whatever the other side holds. On a private copy of the run, a Python NaN against a displayed
+    number or against the ``<.0001`` bound fails as Python missing, and a Python number against
+    the reference level's missing SE, printed ``.`` in the DIABP table and blank in the SYSBP table
+    after ``options missing=' '``, fails as SAS missing. Every other listing row still passes.
+    """
+    token = _listing_token(listing_tables[PROGRAM], paramcd, effect, level, field)
+    _assert_displayed_as(token, sas_shows, tolerances)
+
+    groups = _compare_altered(
+        result_07_02,
+        "parameter_estimates",
+        _estimate_cell(paramcd, effect, level),
+        field,
+        value,
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+    )
+    label = f"{effect} {level}" if level else effect
+    target = (
+        compare.GROUP_LISTING_PARAMETER_ESTIMATES,
+        f"{label} {field}",
+        _endpoint_stratum(paramcd),
+    )
+    _assert_listing_verdicts(groups, target, compare.FAIL, reason, value)
+
+
+@pytest.mark.parametrize(
+    ("paramcd", "level", "half_units", "status"),
+    [
+        (_TARGET_PARAMCD, _TARGET_LEVEL, -1.1, compare.FAIL),
+        (_TARGET_PARAMCD, _TARGET_LEVEL, -0.9, compare.PASS),
+        (_TARGET_PARAMCD, _TARGET_LEVEL, 0.9, compare.PASS),
+        (_TARGET_PARAMCD, _TARGET_LEVEL, 1.0, compare.PASS),
+        (_TARGET_PARAMCD, _TARGET_LEVEL, 1.1, compare.FAIL),
+        (_STRATA[1][0], "81", -1.1, compare.FAIL),
+    ],
+    ids=[
+        "diabp-54-below-by-1.1-half-units",
+        "diabp-54-below-by-0.9-half-units",
+        "diabp-54-above-by-0.9-half-units",
+        "diabp-54-upper-edge",
+        "diabp-54-above-by-1.1-half-units",
+        "sysbp-81-below-by-1.1-half-units",
+    ],
+)
+def test_s02_trn_05_merged_pval_cell_judged_at_displayed_precision(
+    paramcd: str,
+    level: str,
+    half_units: float,
+    status: str,
+    result_07_02: ProgramResult,
+    listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """S02-TRN-05: the merged-pval group judges the CSS_STATS cell itself, not the model row.
+
+    Only a private copy of ``css_stats`` is altered; ``parameter_estimates`` keeps the model's
+    Probt. One endpoint cell is set to its level's listing Probt moved by ``half_units`` half units
+    of the last displayed digit. Under the rounded listing rule, within the half unit all 6 cells
+    pass and the cell shows the value set, so the cell was what was compared; beyond it exactly
+    that cell, at its own stratum and level, fails with the displayed-precision reason, while the
+    other 5 cells and all 40 ParameterEstimates rows pass.
+    """
+    token = _listing_token(listing_tables[PROGRAM], paramcd, "TRTPN", level, "PROBT")
+    decimals = _displayed_decimals(token)
+    value = float(token) + half_units * tolerances.half_unit * 10.0**-decimals
+
+    groups = _compare_altered(
+        result_07_02,
+        "css_stats",
+        _pval_cell(paramcd, level),
+        "pval",
+        value,
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+    )
+    target = (
+        compare.GROUP_LISTING_MERGED_PVAL,
+        "CSS_STATS.pval",
+        f"{_endpoint_stratum(paramcd)} TRTPN={level}",
+    )
+    reason = "" if status == compare.PASS else _BEYOND_PRECISION.format(decimals=decimals)
+    _assert_listing_verdicts(groups, target, status, reason, value)
+
+
+@pytest.mark.parametrize(
+    ("paramcd", "level", "sas_shows", "value", "reason"),
+    [
+        (_TARGET_PARAMCD, _TARGET_LEVEL, "number", math.nan, _PYTHON_MISSING),
+        (_TARGET_PARAMCD, _REF_LEVEL, "dot", 0.0, _SAS_MISSING),
+        (_STRATA[1][0], _REF_LEVEL, "blank", 0.0, _SAS_MISSING),
+    ],
+    ids=["python-missing-sas-number", "python-number-sas-dot", "python-number-sas-blank"],
+)
+def test_s02_trn_05_merged_pval_missing_on_one_side_fails(
+    paramcd: str,
+    level: str,
+    sas_shows: str,
+    value: float,
+    reason: str,
+    result_07_02: ProgramResult,
+    listing_tables: Mapping[str, tuple[sas_reference.ListingTable, ...]],
+    sas_checkpoints: Mapping[str, tuple[sas_reference.SasCheckpoint, ...]],
+    tolerances: compare.Tolerances,
+) -> None:
+    """S02-TRN-05: a merged pval cell missing on exactly one side fails.
+
+    Under the missing-value rule exactly one side missing fails. On a private copy of
+    ``css_stats`` alone, a NaN in a fitted level's cell fails as Python missing, and a number in
+    the reference level's cell, whose listing Probt is ``.`` (DIABP) or blank (SYSBP), fails as SAS
+    missing. The other 5 cells and all 40 ParameterEstimates rows still pass.
+    """
+    token = _listing_token(listing_tables[PROGRAM], paramcd, "TRTPN", level, "PROBT")
+    _assert_displayed_as(token, sas_shows, tolerances)
+
+    groups = _compare_altered(
+        result_07_02,
+        "css_stats",
+        _pval_cell(paramcd, level),
+        "pval",
+        value,
+        listing_tables,
+        sas_checkpoints,
+        tolerances,
+    )
+    target = (
+        compare.GROUP_LISTING_MERGED_PVAL,
+        "CSS_STATS.pval",
+        f"{_endpoint_stratum(paramcd)} TRTPN={level}",
+    )
+    _assert_listing_verdicts(groups, target, compare.FAIL, reason, value)
 
 
 # --- Settings (S02-TRN-01) ------------------------------------------------------------------------
