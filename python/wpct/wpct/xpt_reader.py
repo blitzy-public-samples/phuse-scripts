@@ -19,6 +19,10 @@ Spec items realised here (``python/wpct/docs/sas_specification.md``):
   S07-DEP-assert_var_exist: :func:`require_variables` ports the ``vars=`` check
   [whitepapers/utilities/assert_depend.sas:102-128], which halts the program when a variable is
   absent. The OS, SASV, SYSPROD, macros and symbols checks test the SAS session and are not ported.
+  The :class:`InputDataError` that :func:`require_variables` raises is also the port of the
+  ``%assert_continue`` halt after the dependency assertion: S02-DEP-assert_continue
+  [whitepapers/WPCT/WPCT-F.07.02.sas:158] and S07-DEP-assert_continue for its line-204 call
+  [whitepapers/WPCT/WPCT-F.07.07.sas:204].
 - D-10: dates stay SAS day numbers (days since 1960-01-01) as floats.
 - D-11: a blank character value reads back as ``''``, with trailing blanks and NULs stripped.
 """

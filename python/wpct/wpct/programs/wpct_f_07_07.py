@@ -24,8 +24,11 @@ Spec items (``python/wpct/docs/sas_specification.md``):
   S07-MOD-03 (``model.glm_solution``).
 - Dependencies: S07-DEP-util_access_test_data, S07-DEP-assert_dset_exist,
   S07-DEP-assert_depend and S07-DEP-assert_var_exist through ``xpt_reader``;
-  S07-DEP-derive_lastminmax_measure through ``derivation``; S07-DEP-assert_var_nonmissing,
-  S07-DEP-assert_unique_keys and S07-DEP-assert_continue through the halting checks;
+  S07-DEP-derive_lastminmax_measure through ``derivation``; S07-DEP-assert_var_nonmissing and
+  S07-DEP-assert_unique_keys through the halting checks; S07-DEP-assert_continue through
+  ``xpt_reader`` for the call after the dependency assertion
+  [whitepapers/WPCT/WPCT-F.07.07.sas:204] and through the halting checks (S07-FLT-04, S07-FLT-05)
+  for the data-content calls [whitepapers/WPCT/WPCT-F.07.07.sas:220,245];
   S07-DEP-util_labels_from_var and S07-DEP-util_count_unique_values through the stratum order and
   ``&stdyn``; S07-DEP-boxplot_each_param_tp through the loops, statistics, models and merge.
 

@@ -54,9 +54,12 @@ fields suited to their kind.
 ### Citations
 
 `[path:a-b]` cites lines a to b, counted from 1, of the file at upstream commit
-`398a6d33ced9359ffb58c46650a6d488811176b1`. Paths are repository-relative. The SAS programs and macros
-are stored with CRLF line endings; line numbers count lines, so they are the same after LF
-normalisation. A `.docx` citation names the XML part and the paragraph.
+`398a6d33ced9359ffb58c46650a6d488811176b1`. Paths are repository-relative. The two program files,
+`whitepapers/WPCT/WPCT-F.07.02.sas` and `whitepapers/WPCT/WPCT-F.07.07.sas`, are stored with CRLF line
+endings. `whitepapers/ADaM/derive_lastminmax_measure.sas`, the 17 `whitepapers/utilities/` macros of
+the dependency closure, the two `_sas.yml` manifests and the four reference listings and logs use LF.
+Line numbers count lines, so they are the same after LF normalisation. A `.docx` citation names the XML
+part and the paragraph.
 
 ### Disposition rule
 
@@ -344,7 +347,7 @@ another macro. 07.02 reaches 19 macros. It does not reach `derive_lastminmax_mea
 |----|-------|-------------|
 | S02-DEP-util_access_test_data | [whitepapers/WPCT/WPCT-F.07.02.sas:85] | Ported (local read) → `xpt_reader.read_xpt`; remote-URL branch excluded |
 | S02-DEP-assert_depend | [whitepapers/WPCT/WPCT-F.07.02.sas:147-156]; nested | Partly ported → `xpt_reader.require_variables`; session checks excluded |
-| S02-DEP-assert_continue | [whitepapers/WPCT/WPCT-F.07.02.sas:158] | Ported → `errors.AnalysisHalted` |
+| S02-DEP-assert_continue | [whitepapers/WPCT/WPCT-F.07.02.sas:158] | Ported → `xpt_reader.require_variables`, raising `errors.InputDataError` (exit 2) |
 | S02-DEP-assert_dset_exist | nested | Ported → `xpt_reader.read_xpt` |
 | S02-DEP-assert_var_exist | nested | Ported → `xpt_reader.require_variables` |
 | S02-DEP-assert_macro_exist | nested | Excluded — SAS autocall path |
@@ -421,7 +424,10 @@ another macro. 07.02 reaches 19 macros. It does not reach `derive_lastminmax_mea
   (`set css_does_not_exist`), forcing syntax-checking mode so that no later step processes data
   [whitepapers/utilities/assert_continue.sas:22-36]. When `CONTINUE` does not exist it only logs an
   ERROR [whitepapers/utilities/assert_continue.sas:38]. In 07.02 only the dependency assertion feeds it.
-- `Disposition:` Ported → `errors.AnalysisHalted` stops the driver before any export
+- `Disposition:` Ported → `xpt_reader.require_variables`: the halt after the failed dependency
+  assertion [whitepapers/WPCT/WPCT-F.07.02.sas:158] is the `errors.InputDataError` it raises
+  (S02-DEP-assert_depend), which the CLI reports on stderr with exit code 2 before anything is
+  written; 07.02 has no data-content check, so it never raises `errors.AnalysisHalted`.
 - `Relies on:` —
 
 #### S02-DEP-assert_dset_exist — Dataset existence
@@ -832,8 +838,15 @@ The 22 dependency items `S07-DEP-*` follow in B.4.
   [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:859,936,1295].
 - `Disposition:` Ported → `programs.wpct_f_07_07.run`
 - `Relies on:` D-04, D-14, D-16
-- `Port notes:` An empty population after the derivation gives zero strata, exports with header rows
-  only, and checkpoints of 0.
+- `Port notes:` An empty safety population after the derivation (no `SAFFL='Y'` record) is no error; it
+  differs from an empty derivation input (U-03). The derivation and S07-FLT-02 precede S07-POP-01, so
+  `advs_min` keeps its derived records, and the `ADVS`, `ADVS_SUB`, `LMM_*` and both `ADVS_MIN`
+  checkpoints keep their counts. From S07-POP-01 on, the `CSS_SAFANA` and both `CSS_ANADATA`
+  checkpoints record 0, neither S07-FLT-04 nor S07-FLT-05 halts, and `&stdyn` is 0, so no pooled
+  `studynum` is set. `%util_labels_from_var` gives `PARAMCD_N = 0`
+  [whitepapers/utilities/util_labels_from_var.sas:59-82], so the loop runs zero times: zero strata, no
+  `CSS_NEXTPARAM`, `CSS_NEXTTIMEPT`, `CSS_STATS` or `CSS_PVAL_*` checkpoint (absent, not 0), and
+  `css_anadata`, `css_stats`, `parameter_estimates` and `models` are exported with header rows only.
 
 #### S07-MOD-01 — Summary statistics by study and treatment
 
@@ -1056,7 +1069,7 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
 | S07-DEP-util_access_test_data | [whitepapers/WPCT/WPCT-F.07.07.sas:141] | Ported (local read) → `xpt_reader.read_xpt`; remote-URL branch excluded |
 | S07-DEP-derive_lastminmax_measure | [whitepapers/WPCT/WPCT-F.07.07.sas:161-166] | Ported → `derivation.derive_lastminmax_measure` |
 | S07-DEP-assert_depend | [whitepapers/WPCT/WPCT-F.07.07.sas:193-202]; nested | Partly ported → `xpt_reader.require_variables`; session checks excluded |
-| S07-DEP-assert_continue | [whitepapers/WPCT/WPCT-F.07.07.sas:204,220,245] | Ported → `errors.AnalysisHalted` |
+| S07-DEP-assert_continue | [whitepapers/WPCT/WPCT-F.07.07.sas:204,220,245] | Ported → `xpt_reader.require_variables` raising `errors.InputDataError` (line 204); `selection.assert_var_nonmissing` and `selection.assert_unique_keys` raising `errors.AnalysisHalted` (lines 220, 245) |
 | S07-DEP-assert_var_nonmissing | [whitepapers/WPCT/WPCT-F.07.07.sas:219] | Ported → `selection.assert_var_nonmissing` |
 | S07-DEP-assert_unique_keys | [whitepapers/WPCT/WPCT-F.07.07.sas:244] | Ported → `selection.assert_unique_keys` |
 | S07-DEP-assert_dset_exist | nested | Ported → `xpt_reader.read_xpt` |
@@ -1136,7 +1149,11 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
 - `Rule:` As S02-DEP-assert_continue. 07.07 tests `CONTINUE` after the dependency assertion (line 204),
   after the missing-value assertion (S07-FLT-04, line 220) and after the unique-key assertion
   (S07-FLT-05, line 245).
-- `Disposition:` Ported → `errors.AnalysisHalted` stops the driver before any export
+- `Disposition:` Ported → `xpt_reader.require_variables` after the dependency assertion (line 204),
+  raising `errors.InputDataError` (S07-DEP-assert_depend; the CLI exits 2 with nothing written);
+  ported → `selection.assert_var_nonmissing` (S07-FLT-04) and `selection.assert_unique_keys`
+  (S07-FLT-05) after the data-content assertions (lines 220, 245), raising `errors.AnalysisHalted`,
+  which stops the driver before any export (the CLI records the halt in the report and exits 1).
 - `Relies on:` —
 
 #### S07-DEP-assert_var_nonmissing — Non-missing assertion
@@ -1412,8 +1429,10 @@ setting the port uses to follow SAS, and the items that rely on it.
 - `SAS behaviour:` Levels of an unformatted numeric CLASS variable are ordered by value (the default
   `ORDER=FORMATTED` reduces to value order). `REF="0"` matches the formatted value, here the raw value,
   and moves that level last; its indicator is dependent on the Intercept and its sibling indicators.
-- `Python default:` patsy `Treatment(reference=0)` drops the reference column and orders the reference
-  level first.
+- `Python default:` patsy `Treatment(reference=0)` picks level 0 as the reference but does not reorder
+  the levels, which keep their sorted order; 0 is the lowest `TRTPN`, so in these data the reference
+  comes first, where SAS puts it last. With an intercept (reduced-rank coding) the reference column is
+  dropped; in full-rank coding every level keeps an indicator.
 - `Port setting:` Ascending numeric levels with the reference level last, all indicators retained;
   parameter labels such as `TRTPN 54` through `sas_semantics.format_level`.
 - `Relied on by:` S02-MOD-02, S02-TRN-05, S07-MOD-02, S07-MOD-03, S07-TRN-08
@@ -1422,7 +1441,10 @@ setting the port uses to follow SAS, and the items that rely on it.
 
 - `SAS behaviour:` An observation with a missing value in the response or in any variable of the
   current MODEL statement is excluded from that fit.
-- `Python default:` statsmodels defaults to `missing='none'`, which propagates NaN.
+- `Python default:` statsmodels defaults to `missing='none'`, which does no complete-case handling: a
+  NaN response propagates into NaN estimates, and a NaN or `+inf` design (`exog`) value raises
+  `MissingDataError("exog contains inf or nans")` when the model is built. That check reads column
+  maxima, so a lone `-inf` passes it and fails only at `fit()`.
 - `Port setting:` Complete-case exclusion over the response and the terms of the current fit only:
   `CHG BASE TRTPN` for the 07.02 and per-study 07.07 fits, plus `studynum` for the pooled fit. A frame
   without a `studynum` column fits normally. In 07.02 each endpoint model uses 226 of 227 records.
@@ -1478,7 +1500,10 @@ setting the port uses to follow SAS, and the items that rely on it.
 - `SAS behaviour:` PROC SORT is stable (`EQUALS`), and NODUPKEY keeps the first record of each key in
   that order.
 - `Python default:` pandas `sort_values` is not stable by default.
-- `Port setting:` `kind='stable'` inside `sas_semantics.sas_sort`.
+- `Port setting:` `sas_semantics.sas_sort` builds SAS-compatible keys, per BY variable a missing-first
+  presence flag and the value (character values blank-padded and ranked by code point), and orders them
+  with `numpy.lexsort`, which is stable: rows equal on every key keep their input order, the guarantee
+  pandas `sort_values` documents only for a stable `kind` such as `'stable'`.
 - `Relied on by:` S02-TRN-04, S02-MOD-01, S07-TRN-03, S07-TRN-06, S07-TRN-07, S07-MOD-01, LMM-TRN-04
 
 #### D-15 — SQL tie order

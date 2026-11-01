@@ -5,15 +5,19 @@ import them and never define their own. It imports nothing from the package,
 so any module may depend on it.
 
 * ``InputDataError`` ports the failures of ``%util_access_test_data`` and the
-  ``vars=`` check of ``%assert_depend``: a missing input file, an unreadable SAS
-  transport file, a dataset lacking required variables, or a dataset storing a
-  required variable under more than one spelling, in columns that differ only
-  in case (S02-DEP-util_access_test_data, S07-DEP-util_access_test_data,
-  S02-DEP-assert_depend, S07-DEP-assert_depend).
+  ``vars=`` check of ``%assert_depend``, and the halt ``%assert_continue`` makes
+  after it: a missing input file, an unreadable SAS transport file, a dataset
+  lacking required variables, or a dataset storing a required variable under
+  more than one spelling, in columns that differ only in case
+  (S02-DEP-util_access_test_data, S07-DEP-util_access_test_data,
+  S02-DEP-assert_depend, S07-DEP-assert_depend; S02-DEP-assert_continue and
+  S07-DEP-assert_continue for the call after the dependency assertion
+  [whitepapers/WPCT/WPCT-F.07.02.sas:158; whitepapers/WPCT/WPCT-F.07.07.sas:204]).
 * ``AnalysisHalted`` ports ``%assert_continue`` forcing syntax-checking mode
-  after a failed assertion (S02-DEP-assert_continue, S07-DEP-assert_continue),
-  in particular the data halts S07-FLT-04 (missing ``CHG``) and S07-FLT-05
-  (duplicate keys). A driver raising it exports nothing.
+  after a failed data-content assertion (S07-DEP-assert_continue
+  [whitepapers/WPCT/WPCT-F.07.07.sas:220,245]): the data halts S07-FLT-04
+  (missing ``CHG``) and S07-FLT-05 (duplicate keys). A driver raising it
+  exports nothing.
 * ``OutputPathError`` reports a target refused by the write policy: the package
   writes only below ``python/wpct/outputs/`` and to
   ``python/wpct/reports/equivalence_report.md`` under the write root, so every
@@ -82,9 +86,10 @@ class InputDataError(WpctError):
 class AnalysisHalted(WpctError):
     """A halting check failed, so the program stops before producing any output.
 
-    Python counterpart of ``%assert_continue``, which on ``CONTINUE = 0`` runs an
-    invalid DATA step to force syntax-checking mode, so no later step processes
-    data [whitepapers/utilities/assert_continue.sas:22-39].
+    Python counterpart of ``%assert_continue`` after a failed data-content
+    assertion: on ``CONTINUE = 0`` the macro runs an invalid DATA step to force
+    syntax-checking mode, so no later step processes data
+    [whitepapers/utilities/assert_continue.sas:22-39].
 
     Attributes:
         message: The full halt message, also returned by ``str(exc)``, e.g.

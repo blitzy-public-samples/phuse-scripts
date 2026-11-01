@@ -18,7 +18,9 @@ Spec items (``python/wpct/docs/sas_specification.md``):
   (``selection.exclude_visit``), S02-MOD-01 (``summary.proc_summary``) and S02-MOD-02
   (``model.glm_solution``).
 - Dependencies: S02-DEP-util_access_test_data, S02-DEP-assert_dset_exist,
-  S02-DEP-assert_depend and S02-DEP-assert_var_exist through ``xpt_reader``;
+  S02-DEP-assert_depend, S02-DEP-assert_var_exist and S02-DEP-assert_continue through
+  ``xpt_reader``, whose ``InputDataError`` is the halt after the dependency assertion
+  [whitepapers/WPCT/WPCT-F.07.02.sas:158];
   S02-DEP-util_labels_from_var and S02-DEP-util_count_unique_values through the stratum order of
   S02-TRN-04; S02-DEP-boxplot_each_param_tp through the loops, statistics, model and merge.
 
