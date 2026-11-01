@@ -89,8 +89,11 @@ The shipped programs overwrite `CSS_STATS` and the ODS ParameterEstimates output
   * Run both commands from `python/wpct/`. See [`python/wpct/README.md`](../../README.md) for setup.
 * **Read-only.** The folder is read, never written: the port writes only below `python/wpct/outputs/` and to `python/wpct/reports/equivalence_report.md`.
 * **Load errors.** `python -m wpct reproduce` stops with an input error (exit code 2) and writes nothing, and the tests that use the exports error, when:
+  * the export folder exists but is not a directory;
   * the export folder, or an entry named as one of the files, is a broken or looping symlink (a link to nothing is not an absent file);
-  * a present file cannot be parsed as CSV (an unterminated quote or a NUL byte, for example) or has no header row;
+  * the export folder, or an entry named as one of the files, cannot be examined (access is denied or its path is too long, for example);
+  * an entry named as one of the files is not a regular file (a directory or a FIFO, for example);
+  * a present file cannot be read or parsed as CSV (an unterminated quote or a NUL byte, for example) or has no header row;
   * a header column has no name;
   * a file has two columns with the same name ignoring case, whether identical or case variants;
   * a record has more or fewer fields than the header;
@@ -98,7 +101,7 @@ The shipped programs overwrite `CSS_STATS` and the ODS ParameterEstimates output
   * a numeric column holds a number beyond double precision: one that overflows to infinity (`1E999`), or a nonzero one that underflows to zero (`1E-999`). Zero written in any form, `-0` or `0E999` for example, still loads as zero;
   * a ParameterEstimates file has no usable `Parameter` column.
 
-  The one-line message names the file and the header field, column or data row at fault, never a value from the file.
+  The one-line message names the folder or file at fault, and the header field, column or data row where there is one, never a value from the file.
 * **Comparisons.** Each present file is compared on its record key with the in-memory Python result:
   * Key sets must be equal. Each key present on one side only is listed individually in the report and counted as FAIL, and so is each repeated key.
   * Record counts must match exactly, and so must the per-stratum record counts of `css_anadata` and `advs_min`.
@@ -117,7 +120,7 @@ The shipped programs overwrite `CSS_STATS` and the ODS ParameterEstimates output
 
   Skip reasons are printed because `pyproject.toml` sets `-ra`.
 * **Present files.** A present file passes only when its comparisons number more than zero and every one is PASS. A FAIL fails the case, and so does a NOT COMPARED row.
-  * For `css_anadata` and `advs_min`, both sides must also hold the record count the SAS log reports.
+  * Every present file must also hold the count the shipped SAS log reports, as listed under [Row counts reported by the shipped SAS logs](#row-counts-reported-by-the-shipped-sas-logs): the records of `css_anadata` and `advs_min`, and the keyed rows of `css_stats` and the ParameterEstimates files. Its key-set comparison and its record-count comparison must each show that count on both the SAS and the Python side.
   * The report gains one comparison group per present file, `Export <file>`, and NOT COMPARED is never counted as PASS.
   * When a halting check stops a program, that program's present exports are listed as NOT COMPARED with the halt message.
 * **Scope.** Full-precision agreement is established only for the quantities a supplied file carries.

@@ -28,11 +28,12 @@ or log that is missing, not a regular file or unreadable raises
 
 The exports are optional: an absent export file maps to ``None``, and an absent export directory
 maps every file to ``None``. An export directory or entry that is present but unusable (not a
-directory, not a regular file, or a broken or looping symlink) raises ``InputDataError``, and so
-does a supplied export that is malformed: one that cannot be parsed as CSV, has no header row,
-has an unnamed column, two columns with the same name ignoring case or a record of the wrong
-width, holds a numeric value that is not a SAS number or lies beyond double precision, or is a
-parameter-estimates export without a usable ``Parameter`` column.
+directory, not a regular file, or a broken or looping symlink), or that cannot be examined,
+raises ``InputDataError``, and so does a supplied export that is malformed: one that cannot be
+read or parsed as CSV, has no header row, has an unnamed column, two columns with the same name
+ignoring case or a record of the wrong width, holds a numeric value that is not a SAS number or
+lies beyond double precision, or is a parameter-estimates export without a usable ``Parameter``
+column.
 """
 
 from __future__ import annotations
@@ -1159,16 +1160,17 @@ def load_sas_exports(
 
     Raises:
         InputDataError: When ``dir`` exists but is not a directory, or is a broken or looping
-            symlink; or when an export: is a broken or looping symlink; is not a regular file;
-            cannot be read or parsed as CSV (an unterminated quote or a NUL byte, for example);
-            has no header row; has a header column without a name; has two columns with the
-            same name ignoring case, spelled identically (``CHG,CHG``) or in different case
-            (``CHG,chg``); has a record with more or fewer fields than the header; holds a
-            numeric value that is not a SAS number, or one beyond double precision (``1E999``
-            overflowing to infinity, or a nonzero ``1E-999`` underflowing to zero); or is a
-            parameter-estimates export without a usable ``Parameter`` column. Every message is
-            one line naming the file and the header field, column or data row at fault, never a
-            value from the file.
+            symlink; when ``dir`` or an export cannot be examined (access is denied or its path
+            is too long, for example); or when an export: is a broken or looping symlink; is not
+            a regular file; cannot be read or parsed as CSV (an unterminated quote or a NUL byte,
+            for example); has no header row; has a header column without a name; has two
+            columns with the same name ignoring case, spelled identically (``CHG,CHG``) or in
+            different case (``CHG,chg``); has a record with more or fewer fields than the
+            header; holds a numeric value that is not a SAS number, or one beyond double
+            precision (``1E999`` overflowing to infinity, or a nonzero ``1E-999`` underflowing
+            to zero); or is a parameter-estimates export without a usable ``Parameter`` column.
+            Every message is one line naming the directory or file at fault, and the header
+            field, column or data row where there is one, never a value from the file.
     """
     root = Path(dir).absolute()
     exports: dict[str, pd.DataFrame | None] = dict.fromkeys(SAS_EXPORT_FILES)
