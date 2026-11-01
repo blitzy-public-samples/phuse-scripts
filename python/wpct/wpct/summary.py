@@ -96,9 +96,9 @@ def _group_statistics(values: np.ndarray) -> "dict[str, float | int]":
     n = int(values.size)
     if n == 0:
         return {"n": 0, **{name: math.nan for name in STATISTICS if name != "n"}}
-    mean = math.fsum(values) / n
-    # Two-pass corrected sum of squares with divisor n - 1 (VARDEF=DF).
-    std = math.sqrt(math.fsum((values - mean) ** 2) / (n - 1)) if n >= 2 else math.nan
+    mean = float(np.mean(values))
+    # numpy's ddof=1 is SAS VARDEF=DF (divisor n - 1); STD stays missing below n = 2 (D-02).
+    std = float(np.std(values, ddof=1)) if n >= 2 else math.nan
     statistics: dict[str, float | int] = {
         "n": n,
         "mean": mean,
