@@ -11,10 +11,17 @@ network access. The git commands of one :func:`collect`, or of one call of a pub
 share one time budget, and each command has a timeout of its own. Once git times out, exhausts the
 budget, cannot be started or exits 0 with output that is not what the command prints (an object id
 that is not 40 or 64 hex digits, for instance), it is treated as unavailable and not run again, so
-a slow, hanging or misbehaving git cannot stall the run. The module writes nothing. When git, the
-repository or the upstream commit is unavailable, every function returns :data:`UNAVAILABLE`,
-``None`` or ``False`` instead of raising, and the integrity rows say so, so the report can state
-that integrity was not verified.
+a slow, hanging or misbehaving git cannot stall the run. The module writes nothing.
+
+No function raises because git, the repository or the upstream commit is unavailable. A lookup
+that git cannot answer returns a sentinel instead: :data:`UNAVAILABLE` from :func:`head_commit`,
+``None`` from :func:`blob_at` and :func:`working_blob`, and ``False`` from :func:`git_available`
+and :func:`commit_available`. Only the integrity check needs the upstream commit:
+:func:`source_integrity`, which :func:`collect` uses for the integrity of its :class:`Provenance`,
+returns one :class:`IntegrityRow` per input. Every row is :data:`UNAVAILABLE` when git, the
+repository or the upstream commit is unavailable, and so is every row from the one where git became
+unusable onwards, so the report can state that integrity was not verified.
+:func:`library_versions` reads installed package metadata, not git.
 
 The reference constants restate the Sources section of ``python/wpct/docs/sas_specification.md``.
 Returned facts are deterministic for a given checkout and environment: no timestamps, host names
@@ -165,24 +172,44 @@ def _root(repo_root: Path | None) -> Path:
 class _GitSession:
     """The git commands of one run in one repository: one time budget, one verdict on git.
 
-    The session is ``broken`` once git turns out to be unusable: no ``git`` is on ``PATH``, git
-    cannot be started, a command outlives its timeout or the session's budget, or git exits 0 with
-    output that is not what the command prints. From then on every command returns None at once
-    without starting a process. A non-zero exit is an answer (no such object, not a repository) and
-    leaves the session usable.
+    The session fixes, when it is created, the absolute path of the ``git`` that ``PATH`` names
+    and the absolute repository root ``repo_root``. A relative ``PATH`` entry or root is made
+    absolute against the working directory of that moment, the one ``PATH`` was searched from.
+    Every command starts that git with the root as its working directory, so the caller's working
+    directory takes no part in which git runs or where it starts.
+
+    The session is ``broken`` once git turns out to be unusable: no ``git`` is on ``PATH``, the
+    working directory a relative ``PATH`` entry or root is resolved against no longer exists, git
+    cannot be started (in a root that does not exist or cannot be entered, for instance), a command
+    outlives its timeout or the session's budget, or git exits 0 with output that is not what the
+    command prints. From then on every command returns None at once without starting a process. A
+    non-zero exit is an answer (no such object, not a repository) and leaves the session usable.
     """
 
     def __init__(self, repo_root: Path) -> None:
-        self.repo_root = repo_root
+        self.repo_root = Path(repo_root)
         self._git = shutil.which("git")
         self._deadline = time.monotonic() + _GIT_DEADLINE_SECONDS
+        try:
+            # Commands start in the root, so a relative git would be looked up from the root
+            # rather than from where ``which`` found it, and a relative root would be applied
+            # twice, as the working directory and again as ``-C``.
+            self.repo_root = self.repo_root.absolute()
+            if self._git is not None:
+                self._git = str(Path(self._git).absolute())
+        except OSError:  # No working directory left to make a relative path absolute against.
+            self._git = None
         self.broken = self._git is None
 
     def run(self, args: Sequence[str]) -> str | None:
         """Run one read-only git command in the repository; its stripped stdout on exit 0.
 
+        Git is started from the session's absolute executable path as ``git -C <root> <args>``,
+        with the absolute root also as its working directory.
+
         Returns None when git exits non-zero, and when the session is broken or this command
-        breaks it: git cannot be started, or the command runs longer than
+        breaks it: git cannot be started, which includes a root that does not exist, is not a
+        directory or cannot be entered, or the command runs longer than
         ``_GIT_CALL_TIMEOUT_SECONDS`` or than what is left of the session's budget. A command that
         times out, or is interrupted, is killed. No shell is involved and stdin is closed, so git
         can neither interpret metacharacters nor wait for input.
@@ -200,6 +227,7 @@ class _GitSession:
         try:
             completed = subprocess.run(
                 [self._git, "-C", str(self.repo_root), *args],
+                cwd=self.repo_root,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,

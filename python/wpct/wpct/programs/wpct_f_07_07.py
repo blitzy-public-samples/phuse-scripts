@@ -115,13 +115,8 @@ _STUDYNUM = "studynum"
 _PE_STUDYNUM = "STUDYNUM"
 
 _STUDYID = "STUDYID"
-_USUBJID = "USUBJID"
 _PARAMCD = "PARAMCD"
 _ATPTN = "ATPTN"
-
-#: The record key ``%assert_unique_keys`` checks on the pooled analysis set (S07-FLT-05)
-#: [whitepapers/WPCT/WPCT-F.07.07.sas:244].
-_UNIQUE_KEYS = (_STUDYID, _USUBJID, _PARAMCD, _ATPTN)
 
 
 @dataclass(frozen=True)
@@ -647,8 +642,9 @@ def run(
             stores a required variable under more than one spelling, as columns that differ only
             in case (S07-DEP-assert_depend ``vars=``).
         AnalysisHalted: ``CHG`` is missing in ``CSS_SAFANA`` (S07-FLT-04) or the pooled analysis
-            set repeats a ``STUDYID USUBJID PARAMCD ATPTN`` key (S07-FLT-05). The exception carries
-            the checkpoints recorded before the halt.
+            set repeats a value of the ``css_anadata`` record key of ``wpct.schemas``,
+            ``STUDYID USUBJID PARAMCD ATPTN`` (S07-FLT-05). The exception carries the checkpoints
+            recorded before the halt.
     """
     if not isinstance(config, Config):
         raise TypeError(f"{PROGRAM_ID}: config must be a Config, got {type(config).__name__}")
@@ -710,9 +706,15 @@ def run(
     log.record("CSS_ANADATA", css_anadata, nvars=True)
     css_anadata = selection.assign_studynum(css_anadata, (_STUDYID, config.tn_var), _STUDYNUM)
     log.record("CSS_ANADATA", css_anadata, nvars=True)
-    # S07-FLT-05 [whitepapers/WPCT/WPCT-F.07.07.sas:244-245].
+    # S07-FLT-05 [whitepapers/WPCT/WPCT-F.07.07.sas:244-245]. The checked key is the css_anadata
+    # record key of wpct.schemas.
     _halting_check(
-        log, selection.assert_unique_keys, css_anadata, _UNIQUE_KEYS, "CSS_ANADATA", PROGRAM_ID
+        log,
+        selection.assert_unique_keys,
+        css_anadata,
+        export_spec(PROGRAM_ID, _CSS_ANADATA).key,
+        "CSS_ANADATA",
+        PROGRAM_ID,
     )
 
     # %util_count_unique_values(css_anadata, studyid, stdyn) (S07-TRN-07)

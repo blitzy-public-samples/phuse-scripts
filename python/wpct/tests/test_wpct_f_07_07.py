@@ -9,7 +9,9 @@ the ADVS frame (``advs_07_07``), so none re-reads the transport file or writes i
   ``whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log`` and the 128 ParameterEstimates values plus the
   18 merged ``pval`` cells of ``WPCT-F.07.07.lst``, 146 listing-based values in all. Every SAS value
   is parsed by ``wpct.sas_reference`` and judged by ``wpct.compare`` under ``tolerances.json``; this
-  module states no listing value and no tolerance.
+  module states no listing value, no log count and no tolerance. Where a test checks a record or
+  variable count, it reads it at run time from the parsed log line (the ``sas_checkpoints``
+  fixture) by its ``LOG_CHECKPOINT_MAP`` dataset name and occurrence.
 - No silent pass (AAP 0.7.4): each equivalence test asserts the exact number of comparison rows and
   that every one is PASS, so a FAIL or a NOT COMPARED row fails the test.
 - Edge states (AAP 0.6.4): the halt on a missing ``CHG`` (S07-FLT-04), the GLM skipped by setting,
@@ -21,7 +23,9 @@ the ADVS frame (``advs_07_07``), so none re-reads the transport file or writes i
 
 from __future__ import annotations
 
+import itertools
 import math
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -31,7 +35,7 @@ from wpct import compare, derivation, model
 from wpct.errors import AnalysisHalted
 from wpct.export import write_program_outputs
 from wpct.programs import MODEL_POOLED, MODEL_STUDY, ProgramResult, wpct_f_07_07
-from wpct.sas_reference import GLM_TABLE_MAP, LOG_CHECKPOINT_MAP
+from wpct.sas_reference import GLM_TABLE_MAP, LOG_CHECKPOINT_MAP, SasCheckpoint
 from wpct.schemas import ANA_VARIABLES, POOLED_STUDYID, PROGRAM_07_07, export_spec
 
 PROGRAM = PROGRAM_07_07
@@ -44,44 +48,6 @@ REF_TRTN = 0.0
 DATASETS = ("advs_min", "css_anadata", "css_stats", "parameter_estimates")
 #: The run note of an empty derivation input, spelled out as the plan words it for the report.
 U03_NOTE = "SAS behaviour for empty derivation input not established (U-03)"
-
-
-def _timepoint_checkpoints(atptn: float, nexttimept: int) -> tuple[tuple, ...]:
-    """The six checkpoints of one ATPTN stratum: records, statistics, models, merged statistics."""
-    return (
-        ("CSS_NEXTTIMEPT", PARAMCD, atptn, nexttimept, None),
-        ("CSS_STATS", PARAMCD, atptn, 9, 12),
-        ("CSS_PVAL_STDY", PARAMCD, atptn, 10, None),
-        ("CSS_PVAL_POOL", PARAMCD, atptn, 6, None),
-        ("CSS_PVAL_STDY", PARAMCD, atptn, 9, None),
-        ("CSS_STATS", PARAMCD, atptn, 9, 13),
-    )
-
-
-#: ``(SAS_DATASET, PARAMCD, ATPTN, NOBS, NVARS)`` of every checkpoint the default run records, in
-#: SAS log order [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:32-1581]. NVARS is ``None`` where
-#: the log line is not compared as ``obs/vars``.
-EXPECTED_CHECKPOINTS = (
-    ("ADVS", None, None, 32139, 44),
-    ("ADVS_SUB", None, None, 5926, 45),
-    ("LMM_BASE", None, None, 1514, None),
-    ("LMM_POST", None, None, 4411, None),
-    ("LMM_BASE_ANL", None, None, 629, None),
-    ("LMM_POST_ANL", None, None, 794, None),
-    ("LMM_BASE_ANL", None, None, 508, None),
-    ("LMM_POST_ANL", None, None, 498, None),
-    ("LMM_BASE_OMITTED", None, None, 10, None),
-    ("LMM_BASE_ANL", None, None, 498, None),
-    ("LMM_POST_ANL", None, None, 498, None),
-    ("ADVS_MIN", None, None, 996, 16),
-    ("ADVS_MIN", None, None, 498, 16),
-    ("CSS_SAFANA", None, None, 498, 12),
-    ("CSS_ANADATA", None, None, 996, 12),
-    ("CSS_ANADATA", None, None, 996, 13),
-    ("CSS_NEXTPARAM", PARAMCD, None, 996, None),
-    *_timepoint_checkpoints(815.0, 500),
-    *_timepoint_checkpoints(817.0, 496),
-)
 
 
 # --- Helpers --------------------------------------------------------------------------------------
@@ -108,6 +74,27 @@ def _group(groups: tuple[compare.ComparisonGroup, ...], key: str) -> compare.Com
     matches = [group for group in groups if group.key == key]
     assert len(matches) == 1, f"expected one {key} group, found {len(matches)}"
     return matches[0]
+
+
+def _sas_checkpoint(
+    sas_checkpoints: Mapping[str, tuple[SasCheckpoint, ...]], dataset: str, occurrence: int = 1
+) -> SasCheckpoint:
+    """The one parsed 07.07 log checkpoint named ``dataset`` at ``occurrence``, verified.
+
+    ``dataset`` and ``occurrence`` are the ``LOG_CHECKPOINT_MAP`` identifiers; the counts are those
+    ``wpct.sas_reference.parse_log_checkpoints`` reads from the pinned line of
+    ``whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log`` at run time, so no test states a SAS count
+    (AAP 0.7.3). A line that failed verification carries no count and fails with its problem.
+    """
+    matches = [
+        sas
+        for sas in sas_checkpoints[PROGRAM]
+        if (sas.spec.SAS_DATASET, sas.spec.OCCURRENCE) == (dataset, occurrence)
+    ]
+    assert len(matches) == 1, f"expected one {dataset} #{occurrence} checkpoint, found {matches}"
+    (sas,) = matches
+    assert sas.ok, sas.problem
+    return sas
 
 
 def _where(frame: pd.DataFrame, **values: object) -> pd.DataFrame:
@@ -190,18 +177,44 @@ def _assert_pval_mapping(result: ProgramResult) -> None:
 # --- Equivalence against the repository references ------------------------------------------------
 
 
-def test_s07_flt_01_to_trn_08_log_checkpoints_all_pass(result_07_07, comparisons):
+def test_s07_flt_01_to_trn_08_log_checkpoints_all_pass(result_07_07, comparisons, sas_checkpoints):
     """The 29 pinned log record counts agree exactly (S07-FLT-01 to S07-TRN-08, LMM-*).
 
     The driver records its checkpoints in log order under the names and occurrences of
-    ``LOG_CHECKPOINT_MAP``, with the counts of
-    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:32-1581].
+    ``LOG_CHECKPOINT_MAP``, with the counts that ``wpct.sas_reference`` reads at run time from
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:32-1581]: the observation count of every line
+    and the variable count where the line is compared as ``obs/vars``. Every pinned line must pass
+    verification, so a missing reference count can never match a missing driver count. The
+    program-level checkpoints come first, then the parameter's, then each ATPTN stratum's in SAS
+    loop order (S07-TRN-07).
     """
     assert_all_pass(_group(comparisons[PROGRAM], compare.GROUP_LOG_CHECKPOINTS), 29)
+    references = sas_checkpoints[PROGRAM]
+    unverified = [sas.problem for sas in references if not sas.ok]
+    assert unverified == [], f"pinned SAS log lines failed verification: {unverified}"
+    assert len(references) == 29
     observed = [
-        (cp.SAS_DATASET, cp.PARAMCD, cp.ATPTN, cp.NOBS, cp.NVARS) for cp in result_07_07.checkpoints
+        (cp.SAS_DATASET, cp.OCCURRENCE, cp.PARAMCD, cp.ATPTN, cp.NOBS, cp.NVARS)
+        for cp in result_07_07.checkpoints
     ]
-    assert observed == list(EXPECTED_CHECKPOINTS)
+    expected = [
+        (
+            sas.spec.SAS_DATASET,
+            sas.spec.OCCURRENCE,
+            sas.spec.PARAMCD,
+            sas.spec.ATPTN,
+            sas.NOBS,
+            sas.NVARS,
+        )
+        for sas in references
+    ]
+    assert observed == expected
+    strata = [(cp.PARAMCD, cp.ATPTN) for cp in result_07_07.checkpoints]
+    assert [stratum for stratum, _ in itertools.groupby(strata)] == [
+        (None, None),
+        (PARAMCD, None),
+        *((PARAMCD, atptn) for atptn in TIMEPOINTS),
+    ]
     recorded = [
         (cp.SAS_DATASET, cp.OCCURRENCE, cp.PARAMCD, cp.ATPTN) for cp in result_07_07.checkpoints
     ]
@@ -308,16 +321,20 @@ def test_s07_mod_03_pooled_studynum_aliased(result_07_07, tolerances):
         assert (pooled_model.NOBS, pooled_model.DFE) == (fit.NOBS, fit.DFE)
 
 
-def test_s07_mod_02_03_model_records(result_07_07):
+def test_s07_mod_02_03_model_records(result_07_07, sas_checkpoints):
     """Per timepoint, studies 1 and 2 are fitted, then the pooled model (S07-MOD-02, S07-MOD-03).
 
-    The pooled records are a copy of both studies' records, so the pooled ``NOBS`` is their sum;
-    each fit retains the Intercept, BASE and two TRTPN indicators, so ``DFE = NOBS - 4`` (D-05).
-    The pooled ``studynum`` is ``&stdyn``, the 3 studies including the pooled one (S07-TRN-07).
+    The pooled records are a copy of both studies' records, so the pooled ``NOBS`` is their sum
+    and half the timepoint's records, the CSS_NEXTTIMEPT count of the same ATPTN read at run time
+    from [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:936,1295] (S07-TRN-07); each fit retains
+    the Intercept, BASE and two TRTPN indicators, so ``DFE = NOBS - 4`` (D-05). The pooled
+    ``studynum`` is ``&stdyn``, the 3 studies including the pooled one (S07-TRN-07).
     """
     assert result_07_07.pooled_studynum == 3
     assert len(result_07_07.models) == 3 * len(TIMEPOINTS)
-    for atptn, pooled_nobs in zip(TIMEPOINTS, (250, 248), strict=True):
+    for occurrence, atptn in enumerate(TIMEPOINTS, start=1):
+        timepoint = _sas_checkpoint(sas_checkpoints, "CSS_NEXTTIMEPT", occurrence)
+        assert (timepoint.spec.PARAMCD, timepoint.spec.ATPTN) == (PARAMCD, atptn)
         records = [record for record in result_07_07.models if record.ATPTN == atptn]
         assert [(record.STUDYNUM, record.MODEL) for record in records] == [
             (1, MODEL_STUDY),
@@ -325,7 +342,8 @@ def test_s07_mod_02_03_model_records(result_07_07):
             (result_07_07.pooled_studynum, MODEL_POOLED),
         ]
         first, second, pooled = records
-        assert pooled.NOBS == pooled_nobs == first.NOBS + second.NOBS
+        assert 2 * pooled.NOBS == timepoint.NOBS
+        assert pooled.NOBS == first.NOBS + second.NOBS
         for record in records:
             assert record.PARAMCD == PARAMCD
             assert record.STATUS == model.STATUS_FITTED
@@ -348,28 +366,37 @@ def test_pval_merge_mapping(result_07_07):
     _assert_pval_mapping(result_07_07)
 
 
-def test_s07_trn_03_to_06_derived_and_analysis_sets(result_07_07):
+def test_s07_trn_03_to_06_derived_and_analysis_sets(result_07_07, sas_checkpoints):
     """The derived MIN records and the pooled analysis set have the SAS shapes and keys.
 
-    ``advs_min`` (S07-TRN-03, LMM-TRN-05 to LMM-TRN-07, S07-FLT-02): the 498 post-baseline MIN
-    records, 16 variables, flagged ``ANL02FL='Y'``, ``AVISITN = 9900 + 10*1 + 2`` and
-    ``CHG = AVAL - BASE``. ``css_anadata`` (S07-TRN-04 to S07-TRN-06, D-16): 996 records, 13
-    variables, half of them the pooled copy with ``USUBJID`` starting ``P``, numbered 1, 2 and
-    pooled last. LMM-FLT-02 omits 10 baseline records without a post-baseline record and no
-    post-baseline record.
+    Every count is that of the cited log line, read at run time. ``advs_min`` (S07-TRN-03,
+    LMM-TRN-05 to LMM-TRN-07, S07-FLT-02): the post-baseline MIN records and variables of
+    ADVS_MIN after the post-baseline filter [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:229],
+    flagged ``ANL02FL='Y'``, ``AVISITN = 9900 + 10*1 + 2`` and ``CHG = AVAL - BASE``.
+    ``css_anadata`` (S07-TRN-04 to S07-TRN-06, D-16): the records and variables of CSS_ANADATA
+    numbered by study [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:427], half of them the pooled
+    copy with ``USUBJID`` starting ``P``, numbered 1, 2 and pooled last. LMM-FLT-02 omits one
+    baseline record per omitted-baseline WARNING line
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:124-178], as many as LMM_BASE_ANL loses
+    between NODUPKEY and the both-phases merge
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:108,186], and as many post-baseline records as
+    LMM_POST_ANL loses between the same steps
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:117,195] (LMM-TRN-04, LMM-TRN-06).
     """
+    sas_advs_min = _sas_checkpoint(sas_checkpoints, "ADVS_MIN", 2)
     advs_min = result_07_07.dataset("advs_min")
-    _assert_schema_shape(result_07_07, "advs_min", 498)
-    assert advs_min.shape == (498, 16)
+    _assert_schema_shape(result_07_07, "advs_min", sas_advs_min.NOBS)
+    assert advs_min.shape == (sas_advs_min.NOBS, sas_advs_min.NVARS)
     assert advs_min["AVISIT"].str.startswith("Post-baseline").all()
     assert (advs_min["ANL02FL"] == "Y").all()
     assert (advs_min["AVISITN"] == 9912.0).all()
     assert (advs_min["CHG"] == advs_min["AVAL"] - advs_min["BASE"]).all()
     assert not advs_min.duplicated(list(export_spec(PROGRAM, "advs_min").key)).any()
 
+    sas_css_anadata = _sas_checkpoint(sas_checkpoints, "CSS_ANADATA", 2)
     css_anadata = result_07_07.dataset("css_anadata")
-    _assert_schema_shape(result_07_07, "css_anadata", 996)
-    assert css_anadata.shape == (996, 13)
+    _assert_schema_shape(result_07_07, "css_anadata", sas_css_anadata.NOBS)
+    assert css_anadata.shape == (sas_css_anadata.NOBS, sas_css_anadata.NVARS)
     assert "studynum" in css_anadata.columns
     assert not css_anadata.duplicated(list(export_spec(PROGRAM, "css_anadata").key)).any()
     pooled = (css_anadata["STUDYID"] == POOLED_STUDYID).to_numpy(dtype=bool)
@@ -385,18 +412,31 @@ def test_s07_trn_03_to_06_derived_and_analysis_sets(result_07_07):
         POOLED_STUDYID: [3],
     }
 
-    assert dict(result_07_07.omission_counts) == {"LMM_BASE_OMITTED": 10, "LMM_POST_OMITTED": 0}
+    omitted_base = _sas_checkpoint(sas_checkpoints, "LMM_BASE_OMITTED").NOBS
+    base_nodupkey, base_merged = (
+        _sas_checkpoint(sas_checkpoints, "LMM_BASE_ANL", occurrence).NOBS for occurrence in (2, 3)
+    )
+    post_nodupkey, post_merged = (
+        _sas_checkpoint(sas_checkpoints, "LMM_POST_ANL", occurrence).NOBS for occurrence in (2, 3)
+    )
+    assert base_nodupkey - base_merged == omitted_base
+    assert dict(result_07_07.omission_counts) == {
+        "LMM_BASE_OMITTED": omitted_base,
+        "LMM_POST_OMITTED": post_nodupkey - post_merged,
+    }
 
 
 # --- Edge states ----------------------------------------------------------------------------------
 
 
-def test_missing_chg_halts(monkeypatch, advs_07_07, repo_paths, write_paths):
+def test_missing_chg_halts(monkeypatch, advs_07_07, repo_paths, write_paths, sas_checkpoints):
     """A missing CHG in CSS_SAFANA halts the run before anything is exported (S07-FLT-04).
 
     ``%assert_var_nonmissing`` and ``%assert_continue`` stop all later steps
     [whitepapers/WPCT/WPCT-F.07.07.sas:219-220]: the halt carries the checkpoints up to
-    CSS_SAFANA, and the export of the halted result writes nothing under the tmp write root.
+    CSS_SAFANA, whose record count is that of
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:367] read at run time, since blanking one CHG
+    removes no record, and the export of the halted result writes nothing under the tmp write root.
     """
     derive = derivation.derive_lastminmax_measure
 
@@ -415,7 +455,7 @@ def test_missing_chg_halts(monkeypatch, advs_07_07, repo_paths, write_paths):
     assert str(stop) == "WPCT-F.07.07: assert_var_nonmissing failed: 1 missing CHG in CSS_SAFANA"
     assert (stop.program_id, stop.check) == (PROGRAM, "assert_var_nonmissing")
     assert stop.checkpoints[-1].SAS_DATASET == "CSS_SAFANA"
-    assert stop.checkpoints[-1].NOBS == 498
+    assert stop.checkpoints[-1].NOBS == _sas_checkpoint(sas_checkpoints, "CSS_SAFANA").NOBS
 
     result = ProgramResult.from_halt(stop)
     assert result.halted
@@ -459,10 +499,11 @@ def test_unset_baseline_skips_glm(
     assert any(row.reason == "not produced: GLM skipped by setting" for row in not_compared.rows)
 
 
-def test_empty_population_after_derivation(advs_07_07, repo_paths):
+def test_empty_population_after_derivation(advs_07_07, repo_paths, sas_checkpoints):
     """No safety-population record after the derivation is no error (S07-POP-01, S07-TRN-07).
 
-    The derivation precedes the population filter, so ``advs_min`` keeps its 498 records while
+    The derivation precedes the population filter, so ``advs_min`` keeps the post-baseline record
+    count of [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:229], read at run time, while
     CSS_SAFANA is empty; ``%util_labels_from_var`` then lists no parameter and the loop runs zero
     times. Every later dataset is header-only, with its schema columns.
     """
@@ -472,7 +513,7 @@ def test_empty_population_after_derivation(advs_07_07, repo_paths):
     (safana,) = [cp for cp in result.checkpoints if cp.SAS_DATASET == "CSS_SAFANA"]
     assert safana.NOBS == 0
     _assert_no_strata(result)
-    _assert_schema_shape(result, "advs_min", 498)
+    _assert_schema_shape(result, "advs_min", _sas_checkpoint(sas_checkpoints, "ADVS_MIN", 2).NOBS)
     assert (result.dataset("advs_min")["SAFFL"] == "N").all()
     assert result.pooled_studynum is None
     assert result.notes == ()
@@ -513,7 +554,8 @@ def test_single_study_numbering(advs_07_07, repo_paths):
     pooled statistics take their p-values through it (S07-TRN-08). The statistics hold exactly the
     12 cells DIABP x ATPTN 815, 817 x ``studynum`` 1 (CDISCPILOT01), 2 (pooled) x TRTPN 0, 54, 81,
     in timepoint loop order and sorted BY ``STUDYID TRTPN`` within each timepoint, the pooled study
-    last (S07-TRN-07, D-16); each cell carries its own model's TRTPN Probt.
+    last (S07-TRN-07, D-16); each cell is compared on the ``css_stats`` record key of
+    ``wpct.schemas`` and its ``STUDYID``, and carries its own model's TRTPN Probt.
     """
     advs = advs_07_07.loc[(advs_07_07["STUDYID"] != "CDISCPILOT02").to_numpy(dtype=bool)]
     result = _run(advs, repo_paths)
@@ -525,12 +567,23 @@ def test_single_study_numbering(advs_07_07, repo_paths):
     ]
     assert all(record.STATUS == model.STATUS_FITTED for record in result.models)
     stats = result.dataset("css_stats")
-    columns = ("PARAMCD", "ATPTN", "STUDYID", "studynum", "TRTPN")
-    assert list(zip(*(stats[column] for column in columns), strict=True)) == [
-        (PARAMCD, atptn, studyid, studynum, trtpn)
+    # The record key's fields and order come from wpct.schemas alone; a key field no cell below
+    # names fails with a KeyError rather than being left uncompared.
+    columns = (*export_spec(PROGRAM, "css_stats").key, "STUDYID")
+    cells = [
+        {
+            "PARAMCD": PARAMCD,
+            "ATPTN": atptn,
+            "STUDYID": studyid,
+            "studynum": studynum,
+            "TRTPN": trtpn,
+        }
         for atptn in TIMEPOINTS
         for studyid, studynum in (("CDISCPILOT01", 1), (POOLED_STUDYID, 2))
         for trtpn in (0.0, 54.0, 81.0)
+    ]
+    assert list(zip(*(stats[column] for column in columns), strict=True)) == [
+        tuple(cell[column] for column in columns) for cell in cells
     ]
     _assert_pval_mapping(result)
 
