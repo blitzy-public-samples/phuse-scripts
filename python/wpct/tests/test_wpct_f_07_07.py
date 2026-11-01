@@ -510,7 +510,10 @@ def test_single_study_numbering(advs_07_07, repo_paths):
     """With CDISCPILOT02 removed, study 1 is numbered 1 and the pooled study 2 (S07-TRN-06).
 
     ``&stdyn`` counts the studies present, so the pooled model carries ``studynum = 2`` and the
-    pooled statistics take their p-values through it (S07-TRN-08).
+    pooled statistics take their p-values through it (S07-TRN-08). The statistics hold exactly the
+    12 cells DIABP x ATPTN 815, 817 x ``studynum`` 1 (CDISCPILOT01), 2 (pooled) x TRTPN 0, 54, 81,
+    in timepoint loop order and sorted BY ``STUDYID TRTPN`` within each timepoint, the pooled study
+    last (S07-TRN-07, D-16); each cell carries its own model's TRTPN Probt.
     """
     advs = advs_07_07.loc[(advs_07_07["STUDYID"] != "CDISCPILOT02").to_numpy(dtype=bool)]
     result = _run(advs, repo_paths)
@@ -522,10 +525,13 @@ def test_single_study_numbering(advs_07_07, repo_paths):
     ]
     assert all(record.STATUS == model.STATUS_FITTED for record in result.models)
     stats = result.dataset("css_stats")
-    assert set(stats["studynum"]) == {1, 2}
-    pooled_rows = (stats["STUDYID"] == POOLED_STUDYID).to_numpy(dtype=bool)
-    assert (stats.loc[pooled_rows, "studynum"] == 2).all()
-    assert (stats.loc[~pooled_rows, "studynum"] == 1).all()
+    columns = ("PARAMCD", "ATPTN", "STUDYID", "studynum", "TRTPN")
+    assert list(zip(*(stats[column] for column in columns), strict=True)) == [
+        (PARAMCD, atptn, studyid, studynum, trtpn)
+        for atptn in TIMEPOINTS
+        for studyid, studynum in (("CDISCPILOT01", 1), (POOLED_STUDYID, 2))
+        for trtpn in (0.0, 54.0, 81.0)
+    ]
     _assert_pval_mapping(result)
 
 
