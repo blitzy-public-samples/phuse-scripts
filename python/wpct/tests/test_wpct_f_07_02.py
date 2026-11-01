@@ -579,7 +579,7 @@ def test_u02_reference_level_absent(
     ],
     ids=["parameter_estimates", "css_stats"],
 )
-def test_python_columns_colliding_in_case_fail_every_value(
+def test_s02_mod_02_python_columns_colliding_in_case_fail_every_value(
     dataset: str,
     column: str,
     failing: str,
@@ -625,7 +625,7 @@ def test_python_columns_colliding_in_case_fail_every_value(
     assert_all_pass(other, len(_group(groups_07_02, passing).rows))
 
 
-def test_listing_problem_keeps_python_values(
+def test_s02_mod_02_listing_problem_keeps_python_values(
     tmp_path: Path,
     repo_paths,
     groups_07_02: tuple[compare.ComparisonGroup, ...],

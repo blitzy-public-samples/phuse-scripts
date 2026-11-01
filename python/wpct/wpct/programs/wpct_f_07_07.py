@@ -630,17 +630,15 @@ def run(
             :class:`Config` refuses only a ``param_timepoints`` that cannot be iterated or names a
             code that ``param`` does not list, so the pairs are checked once the input is read,
             before any record is selected. A setting that :class:`Config` refuses raises when the
-            ``Config`` is built, before ``run`` is called. An input variable whose SAS type does not
-            fit its use, such as a character ``ATPTN`` or ``AVAL`` or a numeric ``PARAMCD`` or
-            ``USUBJID``, raises it too, from the step that relies on its type (``selection``,
-            ``derivation.derive_lastminmax_measure`` or ``model.glm_solution``), before any record
-            is exported.
+            ``Config`` is built, before ``run`` is called.
         ValueError: ``config.param_timepoints`` lists a NaN timepoint, the SAS missing value,
             which would otherwise select the records whose ``ATPTN`` is missing (S07-FLT-01);
             raised at the same point as the ``param_timepoints`` ``TypeError``.
-        InputDataError: The input file is missing or unreadable, lacks a required variable, or
+        InputDataError: The input file is missing or unreadable, lacks a required variable,
             stores a required variable under more than one spelling, as columns that differ only
-            in case (S07-DEP-assert_depend ``vars=``).
+            in case (S07-DEP-assert_depend ``vars=``), or stores one with the other SAS type, such
+            as a character ``ATPTN`` or ``AVAL`` or a numeric ``PARAMCD`` or ``USUBJID``
+            (``schemas.REQUIRED_INPUT_TYPES``), before any record is selected.
         AnalysisHalted: ``CHG`` is missing in ``CSS_SAFANA`` (S07-FLT-04) or the pooled analysis
             set repeats a value of the ``css_anadata`` record key of ``wpct.schemas``,
             ``STUDYID USUBJID PARAMCD ATPTN`` (S07-FLT-05). The exception carries the checkpoints

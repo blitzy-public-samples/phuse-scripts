@@ -177,7 +177,7 @@ def test_s07_mod_02_03_listing_row_counts(
 
 
 @pytest.mark.parametrize("program_id", PROGRAMS)
-def test_listing_default_map_from_file_name(
+def test_s02_mod_02_listing_default_map_from_file_name(
     program_id: str,
     repo_paths: RepoPaths,
     listing_tables: Mapping[str, tuple[ListingTable, ...]],
@@ -241,7 +241,7 @@ _SYNTHETIC_LISTING = (
 )
 
 
-def test_listing_tokens(tmp_path: Path) -> None:
+def test_s02_mod_02_listing_tokens(tmp_path: Path) -> None:
     """Displayed tokens are kept as printed: ``<.0001``, ``.`` and blank all survive the parse.
 
     ``_SYNTHETIC_LISTING`` is parsed against its own map: a per-study table of ``MODEL CHG = BASE
@@ -423,7 +423,7 @@ def test_s02_trn_04_and_s07_trn_07_glm_table_map_order() -> None:
     ],
     ids=["by-line", "dependent", "parameter-row"],
 )
-def test_listing_mismatch_reported(
+def test_s07_mod_02_listing_mismatch_reported(
     old: str,
     new: str,
     table_index: int,
@@ -798,7 +798,7 @@ def test_s02_mod_02_rejected_listing_tokens_fail(
     ],
     ids=["class-level", "intercept", "lower-case-base", "upper-case-base", "pooled-studynum"],
 )
-def test_split_parameter(label: str, expected: tuple[str, str]) -> None:
+def test_d05_split_parameter(label: str, expected: tuple[str, str]) -> None:
     """Labels key on the canonical ``(EFFECT, LEVEL)`` pair whatever case SAS printed.
 
     The labels are those of the SOLUTION rows (D-05): the Intercept, ``BASE`` in either case, a
@@ -812,7 +812,7 @@ def test_split_parameter(label: str, expected: tuple[str, str]) -> None:
     [("", ValueError), ("   ", ValueError), ("TRTPN 54 extra", ValueError), (None, TypeError)],
     ids=["empty", "blank", "three-words", "not-a-string"],
 )
-def test_split_parameter_rejects(label: object, error: type[Exception]) -> None:
+def test_d05_split_parameter_rejects(label: object, error: type[Exception]) -> None:
     """A label that is not one effect word, optionally followed by a CLASS level, is refused.
 
     A SOLUTION row names one design column (D-05): a term, or a CLASS variable and its level
@@ -952,7 +952,7 @@ def _assert_pinned(
 
 
 
-def test_log_checkpoint_map_sizes() -> None:
+def test_s02_dep_util_access_test_data_log_checkpoint_map_sizes() -> None:
     """AAP 0.7.3 pins 15 log lines of WPCT-F.07.02 and 29 of WPCT-F.07.07.
 
     The 07.02 lines count the S02-DEP-util_access_test_data input, the S02-FLT-01 subset, the
@@ -1091,7 +1091,7 @@ def test_lmm_trn_03_lmm_flt_02_synthetic_log_counts(tmp_path: Path) -> None:
     ],
     ids=["07.02-log202-dataset", "07.07-log178-warning-range"],
 )
-def test_log_mismatch_reported(
+def test_s02_pop_01_log_mismatch_reported(
     program_id: str,
     line: int,
     old: str,
@@ -1144,7 +1144,7 @@ def test_log_mismatch_reported(
     ],
     ids=["listing", "log"],
 )
-def test_missing_reference_raises(
+def test_s02_mod_02_missing_reference_raises(
     parse: Callable[[Path], object], file_name: str, message: str, tmp_path: Path
 ) -> None:
     """Only a missing or unreadable reference raises, naming its absolute path.
@@ -1334,7 +1334,7 @@ def test_lmm_flt_02_parse_log_warning_records_rejects(
 
 
 @pytest.mark.parametrize("create", [True, False], ids=["empty-dir", "absent-dir"])
-def test_load_sas_exports_empty_dir(create: bool, tmp_path: Path) -> None:
+def test_s02_trn_03_load_sas_exports_empty_dir(create: bool, tmp_path: Path) -> None:
     """Without exports every ``schemas.SAS_EXPORT_FILES`` name is present and maps to None.
 
     The seven names cover the record exports of S02-TRN-03, LMM-TRN-07 and S07-TRN-06, the merged
@@ -1496,7 +1496,7 @@ def test_s02_mod_02_load_sas_exports_parameter_estimates(tmp_path: Path) -> None
     assert frame[["STDERR", "TVALUE", "PROBT"]].iloc[1].isna().all()
 
 
-def test_load_sas_exports_csv_quoting(tmp_path: Path) -> None:
+def test_s07_trn_06_load_sas_exports_csv_quoting(tmp_path: Path) -> None:
     """Standard CSV quoting, CRLF records and blank lines load as written.
 
     The file is the S07-TRN-06 ``css_anadata`` export. A quoted comma, a quoted line break and a
@@ -1531,7 +1531,7 @@ def test_load_sas_exports_csv_quoting(tmp_path: Path) -> None:
     assert frame["CHG"].iloc[2] == 2.5
 
 
-def test_load_sas_exports_header_only(tmp_path: Path) -> None:
+def test_s07_trn_06_load_sas_exports_header_only(tmp_path: Path) -> None:
     """A header without records loads as an empty frame that keeps its columns.
 
     An S07-TRN-06 ``css_anadata`` export with no records is a loaded, empty frame, not an absent
@@ -1547,7 +1547,7 @@ def test_load_sas_exports_header_only(tmp_path: Path) -> None:
     assert frame.empty
 
 
-def test_load_sas_exports_one_column_quoted_empty(tmp_path: Path) -> None:
+def test_s07_trn_06_load_sas_exports_one_column_quoted_empty(tmp_path: Path) -> None:
     """In a one-column export a lone ``""`` is a record holding a missing value, not a blank line.
 
     Only the empty physical line at the end is skipped. In the S07-TRN-06 ``css_anadata`` export a
@@ -1643,7 +1643,7 @@ _ONE_FIELD_ROW_2 = ": data row 2, ending at line 3, has 1 fields but the header 
         "blank-file",
     ],
 )
-def test_load_sas_exports_rejects(content: bytes, message: str, tmp_path: Path) -> None:
+def test_s07_trn_06_load_sas_exports_rejects(content: bytes, message: str, tmp_path: Path) -> None:
     """A malformed export raises one line naming the file, never loading an altered frame.
 
     pandas would rename an identical duplicate header to ``CHG.1``, take surplus leading fields
@@ -1788,7 +1788,7 @@ _ANADATA_HEAD = b"studyid,usubjid,base,chg\nCDISCPILOT01,01-701-1023,80,-4\n"
         "s07-mod-03-div-01-aliased-studynum-negative-underflow",
     ],
 )
-def test_load_sas_exports_redacts_rejected_values(
+def test_d05_load_sas_exports_redacts_rejected_values(
     program_id: str,
     name: str,
     content: bytes,

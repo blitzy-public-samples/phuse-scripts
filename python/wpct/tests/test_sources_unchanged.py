@@ -112,7 +112,7 @@ def upstream_root(repo_paths: RepoPaths) -> Path:
 
 
 @pytest.mark.parametrize("path", provenance.READ_ONLY_INPUTS, ids=str)
-def test_read_only_input_unchanged(path: str, upstream_root: Path) -> None:
+def test_s02_trn_01_read_only_input_unchanged(path: str, upstream_root: Path) -> None:
     """The working-tree bytes of ``path`` are the blob committed at the upstream commit.
 
     Each input is a source the specification items cite, so the case protects those items:
@@ -149,7 +149,7 @@ def test_read_only_input_unchanged(path: str, upstream_root: Path) -> None:
     assert working == upstream, f"{path}: changed since the upstream commit ({blobs})"
 
 
-def test_read_only_inputs_cover_aap_list() -> None:
+def test_s02_dep_util_access_test_data_read_only_inputs_cover_aap_list() -> None:
     """``READ_ONLY_INPUTS`` names each planned read-only input once, and no file of the port.
 
     An input left out would escape the integrity cases, so the list holds the whole dependency
@@ -167,7 +167,7 @@ def test_read_only_inputs_cover_aap_list() -> None:
     assert not under_python, f"READ_ONLY_INPUTS includes port files: {', '.join(under_python)}"
 
 
-def test_upstream_commit_constant(repo_paths: RepoPaths) -> None:
+def test_s02_trn_01_upstream_commit_constant(repo_paths: RepoPaths) -> None:
     """The upstream commit is the one the specification cites; checking it needs no git.
 
     Every ``SAS source:`` line range of the specification counts lines of the files at this commit:
@@ -272,7 +272,7 @@ def _process_ended(pid: int, within: float = 5.0) -> bool:
 @pytest.mark.parametrize(
     "output", [b"garbage-not-a-sha\n", b"\377\376\000bad"], ids=["text", "binary"]
 )
-def test_git_output_not_an_object_id_verifies_nothing(
+def test_s02_dep_util_access_test_data_git_output_not_an_object_id_verifies_nothing(
     output: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_paths: RepoPaths
 ) -> None:
     """A git that exits 0 with something other than an object id is unusable.
@@ -319,7 +319,7 @@ def test_git_output_not_an_object_id_verifies_nothing(
     ],
     ids=["every-command", "hash-object-only"],
 )
-def test_hanging_git_is_given_up_after_one_timeout(
+def test_s02_dep_util_access_test_data_hanging_git_is_given_up_after_one_timeout(
     hang_on: str,
     expected_calls: list[str],
     tmp_path: Path,
@@ -366,7 +366,7 @@ def test_hanging_git_is_given_up_after_one_timeout(
 
 
 @_posix_only
-def test_slow_git_is_bounded_by_the_time_budget(
+def test_s02_dep_util_access_test_data_slow_git_is_bounded_by_the_time_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_paths: RepoPaths, upstream_root: Path
 ) -> None:
     """A git that answers every command, but slowly, is given up once the budget is spent.
@@ -400,7 +400,7 @@ def test_slow_git_is_bounded_by_the_time_budget(
 
 
 @_posix_only
-def test_timed_out_git_is_ended(
+def test_s02_dep_util_access_test_data_timed_out_git_is_ended(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_paths: RepoPaths
 ) -> None:
     """A git command that outlives its timeout is ended, and the lookup returns soon after.
@@ -429,7 +429,7 @@ def test_timed_out_git_is_ended(
 
 
 @_posix_only
-def test_git_starts_in_the_repository_root_from_an_absolute_path(
+def test_s02_dep_util_access_test_data_git_starts_in_the_repository_root_from_an_absolute_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_paths: RepoPaths, upstream_root: Path
 ) -> None:
     """Git starts in the repository root, from an absolute path, whatever the caller's directory.

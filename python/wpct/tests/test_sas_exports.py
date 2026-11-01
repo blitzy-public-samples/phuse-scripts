@@ -28,6 +28,11 @@ compared field of every matched key. So a group of key-set and count rows alone,
 a field, a key or a stratum, fails. File names, keys and field lists come from ``wpct.schemas``
 alone (AAP 0.9.5). The export directory is a read-only input, and nothing here writes into it.
 
+A README sync check, one case per file, needs no export and never skips: the "Expected files"
+table of ``python/wpct/reference/sas_exports/README.md`` quotes each file's
+``schemas.SAS_EXPORT_SOURCES`` entry verbatim as its SAS source, so the capture points are
+described in ``wpct.schemas`` alone.
+
 Synthetic mechanics controls run on a clean checkout, without the optional SAS files. Each one
 writes a SAS-format export of the default run's own dataset under ``tmp_path``. The file follows the
 README contract: Latin-1, a header of SAS names in lower and mixed case, and round-trip numbers with
@@ -47,6 +52,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import itertools
+import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -55,6 +61,7 @@ import pandas as pd
 import pytest
 
 from wpct import compare, sas_reference, schemas
+from wpct.paths import RepoPaths
 from wpct.programs import ProgramResult
 
 #: How many SAS exports the contract has: "the seven export files" of AAP 0.7.3 and 0.7.4. Only
@@ -125,6 +132,17 @@ _RELABEL_SUFFIX = "#"
 
 #: An assertion message lists at most this many rows, then the remainder's count.
 _MAX_LISTED_ROWS = 40
+
+#: The export contract, in the export directory of the checkout; read, never written.
+_EXPORT_README = "README.md"
+#: The heading of the README section whose first table names the expected files.
+_EXPECTED_FILES_HEADING = "### Expected files"
+#: The header of that table, in its column order.
+_EXPECTED_FILES_COLUMNS = ("File", "SAS source", "Content", "Stratum columns to add", "Record key")
+#: One cell of a Markdown table delimiter row, such as ``---`` or ``:---:``.
+_DELIMITER_CELL = re.compile(r":?-+:?")
+#: A cell holding one code span and nothing else; the group is the span's text.
+_CODE_SPAN_CELL = re.compile(r"`([^`]+)`")
 
 
 def _describe(rows: Sequence[compare.ComparisonRow]) -> str:
@@ -365,7 +383,7 @@ def test_d01_02_05_to_09_sas_export_equivalence(
     _assert_export_agrees(file_name, group, results[spec.program_id].datasets[spec.name])
 
 
-def test_export_parameter_list_matches_schemas(
+def test_s02_trn_03_export_parameter_list_matches_schemas(
     sas_exports: Mapping[str, pd.DataFrame | None],
 ) -> None:
     """The parameter list is exactly the SAS exports ``schemas.EXPORTS`` declares (AAP 0.9.5).
@@ -404,6 +422,71 @@ def test_export_parameter_list_matches_schemas(
     assert set(_RECORD_COUNTS) == record_level
     assert set(_KEY_COUNTS) == set(schemas.SAS_EXPORT_FILES) - record_level
     assert set(_EXPORT_COUNTS) == set(schemas.SAS_EXPORT_FILES)
+
+
+def _table_cells(readme: Path, line: str) -> tuple[str, ...]:
+    """The stripped cells of one Markdown table row, which opens and closes with a pipe."""
+    assert line.startswith("|") and line.endswith("|"), f"{readme}: not a table row: {line!r}"
+    return tuple(cell.strip() for cell in line[1:-1].split("|"))
+
+
+def _expected_files_rows(readme: Path) -> dict[str, tuple[str, ...]]:
+    """The body rows of the README's "Expected files" table, keyed by the file each row names.
+
+    The table is the first one in the section under :data:`_EXPECTED_FILES_HEADING`. Its header
+    must be :data:`_EXPECTED_FILES_COLUMNS` and its second row a delimiter row of as many cells.
+    Every body row must have that many cells, the first a code span naming a file not named before.
+    """
+    lines = readme.read_text(encoding="utf-8").splitlines()
+    assert _EXPECTED_FILES_HEADING in lines, f"{readme}: no {_EXPECTED_FILES_HEADING!r} section"
+    section = itertools.takewhile(
+        lambda line: not line.startswith("#"), lines[lines.index(_EXPECTED_FILES_HEADING) + 1 :]
+    )
+    table = list(
+        itertools.takewhile(
+            lambda line: line.startswith("|"),
+            itertools.dropwhile(lambda line: not line.startswith("|"), section),
+        )
+    )
+    assert len(table) > 2, f"{readme}: the {_EXPECTED_FILES_HEADING!r} section has no table rows"
+    header, delimiter, *body = (_table_cells(readme, line) for line in table)
+    assert header == _EXPECTED_FILES_COLUMNS, f"{readme}: table header {header}"
+    assert len(delimiter) == len(header), f"{readme}: delimiter row {delimiter}"
+    assert all(_DELIMITER_CELL.fullmatch(cell) for cell in delimiter), (
+        f"{readme}: delimiter row {delimiter}"
+    )
+    rows: dict[str, tuple[str, ...]] = {}
+    for cells in body:
+        assert len(cells) == len(header), f"{readme}: row of {len(cells)} cells: {cells}"
+        named = _CODE_SPAN_CELL.fullmatch(cells[0])
+        assert named, f"{readme}: the File cell is not one code span: {cells[0]!r}"
+        assert named.group(1) not in rows, f"{readme}: {named.group(1)} is named twice"
+        rows[named.group(1)] = cells
+    return rows
+
+
+@pytest.mark.parametrize("file_name", schemas.SAS_EXPORT_FILES)
+def test_s02_trn_03_export_readme_quotes_sas_export_source(
+    file_name: str, repo_paths: RepoPaths
+) -> None:
+    """The export README quotes ``schemas.SAS_EXPORT_SOURCES[file_name]`` verbatim.
+
+    The "Expected files" table of ``python/wpct/reference/sas_exports/README.md`` is a five-column
+    Markdown table naming the files of ``schemas.SAS_EXPORT_FILES``, each once and in that order.
+    The "SAS source" cell of ``file_name``'s row is its ``SAS_EXPORT_SOURCES`` entry as one code
+    span, so the capture point is stated in ``wpct.schemas`` alone and its
+    ``[whitepapers/WPCT/<program>.sas:<lines>]`` citations render as written. The seven entries
+    name the datasets of S02-TRN-03, of S02-MOD-01 with the S02-TRN-05 ``pval`` and of S02-MOD-02,
+    the LMM-TRN-07 records after S07-FLT-02, the analysis dataset of S07-TRN-04, S07-TRN-05 and
+    S07-TRN-06, the statistics of S07-MOD-01 with the S07-TRN-08 ``pval``, and the estimates of
+    S07-MOD-02 and S07-MOD-03. The README is read from the checkout and never written; the case
+    needs no SAS export and never skips.
+    """
+    rows = _expected_files_rows(repo_paths.sas_exports_dir / _EXPORT_README)
+    assert tuple(rows) == schemas.SAS_EXPORT_FILES
+    source = schemas.SAS_EXPORT_SOURCES[file_name]
+    assert source and "`" not in source and "|" not in source, f"unquotable source {source!r}"
+    assert rows[file_name][_EXPECTED_FILES_COLUMNS.index("SAS source")] == f"`{source}`"
 
 
 # --- Synthetic mechanics controls -----------------------------------------------------------------
@@ -968,7 +1051,7 @@ def synthetic_export_group(
 
 
 @pytest.mark.parametrize("file_name", schemas.SAS_EXPORT_FILES)
-def test_synthetic_export_mechanics_all_pass(
+def test_d16_synthetic_export_mechanics_all_pass(
     file_name: str,
     synthetic_export_group: Callable[..., compare.ComparisonGroup],
     results: Mapping[str, ProgramResult],
@@ -987,7 +1070,7 @@ def test_synthetic_export_mechanics_all_pass(
 
 
 @pytest.mark.parametrize("mutation", _MUTATIONS, ids=[mutation.label for mutation in _MUTATIONS])
-def test_synthetic_export_mismatch_fails_targeted_rows(
+def test_s07_mod_03_synthetic_export_mismatch_fails_targeted_rows(
     mutation: _Mutation,
     synthetic_export_group: Callable[..., compare.ComparisonGroup],
     results: Mapping[str, ProgramResult],
@@ -1055,7 +1138,7 @@ def _without(
     _REJECTIONS,
     ids=[f"{file_name}-{removal}" for file_name, removal in _REJECTIONS],
 )
-def test_export_coverage_rejects_incomplete_group(
+def test_s02_trn_03_export_coverage_rejects_incomplete_group(
     file_name: str,
     removal: str,
     synthetic_export_group: Callable[..., compare.ComparisonGroup],

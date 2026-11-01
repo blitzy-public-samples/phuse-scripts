@@ -571,7 +571,7 @@ def written(
 # --- Report content (Agent Action Plan 0.7.5) -----------------------------------------------------
 
 
-def test_write_report_writes_only_the_report(
+def test_env03_write_report_writes_only_the_report(
     written: _Written,
     write_paths: RepoPaths,
     results: Mapping[str, object],
@@ -596,7 +596,7 @@ def test_write_report_writes_only_the_report(
     assert written.path.read_bytes() == expected.encode("utf-8")
 
 
-def test_report_sections_in_order(written: _Written) -> None:
+def test_s02_mod_02_report_sections_in_order(written: _Written) -> None:
     """One title, then Provenance, Summary, both programs, Not compared and Source integrity.
 
     Each section heading appears once, in the order Agent Action Plan 0.7.5 fixes: the
@@ -614,7 +614,7 @@ def test_report_sections_in_order(written: _Written) -> None:
     assert "Tolerances" in [heading for heading, _ in provenance_blocks]
 
 
-def test_report_provenance(written: _Written) -> None:
+def test_env06_report_provenance(written: _Written) -> None:
     """Provenance names both commits, the Python and library versions and the SAS references.
 
     The upstream commit is ``398a6d33…``; ``HEAD`` is a full commit id or ``unavailable``. The
@@ -653,7 +653,7 @@ def test_report_provenance(written: _Written) -> None:
     assert {row["Package"]: row["Version"] for row in libraries} == dict(facts.library_versions)
 
 
-def test_tolerance_table_rendered_from_file(
+def test_s02_and_s07_mod_01_tolerance_table_rendered_from_file(
     written: _Written,
     results: Mapping[str, object],
     listing_tables: Mapping[str, Sequence[object]],
@@ -711,7 +711,7 @@ def test_tolerance_table_rendered_from_file(
     assert file_state(tolerance_file) == file_before
 
 
-def test_changed_tolerance_setting_rendered(
+def test_d11_changed_tolerance_setting_rendered(
     written: _Written,
     results: Mapping[str, object],
     listing_tables: Mapping[str, Sequence[object]],
@@ -814,7 +814,7 @@ def test_changed_tolerance_setting_rendered(
         ),
     ],
 )
-def test_load_tolerances_rejects_invalid_file(
+def test_s02_and_s07_mod_01_load_tolerances_rejects_invalid_file(
     edit: Callable[[dict[str, Any]], bytes],
     named: str | None,
     repo_paths: RepoPaths,
@@ -845,7 +845,7 @@ def test_load_tolerances_rejects_invalid_file(
     assert str(_HUGE_INTEGER) not in message
 
 
-def test_write_report_renders_applied_tolerances(
+def test_s02_and_s07_mod_01_write_report_renders_applied_tolerances(
     results: Mapping[str, object],
     listing_tables: Mapping[str, Sequence[object]],
     sas_checkpoints: Mapping[str, Sequence[object]],
@@ -882,7 +882,7 @@ def test_write_report_renders_applied_tolerances(
 
 
 @pytest.mark.parametrize("snapshots", ["mixed", "none"])
-def test_write_report_needs_one_applied_snapshot(
+def test_s02_and_s07_mod_01_write_report_needs_one_applied_snapshot(
     snapshots: str,
     results: Mapping[str, object],
     clean_comparisons: _Comparisons,
@@ -922,7 +922,7 @@ def test_write_report_needs_one_applied_snapshot(
     assert _tree(write_paths.write_root) == {}
 
 
-def test_render_report_rejects_other_tolerances(
+def test_s02_and_s07_mod_01_render_report_rejects_other_tolerances(
     results: Mapping[str, object],
     clean_comparisons: _Comparisons,
     tolerances: compare.Tolerances,
@@ -944,7 +944,7 @@ def test_render_report_rejects_other_tolerances(
     assert f"comparisons[{PROGRAM_07_02!r}][0] ({first.key})" in str(excinfo.value)
 
 
-def test_summary_counts(written: _Written, clean_comparisons: _Comparisons) -> None:
+def test_s02_mod_02_summary_counts(written: _Written, clean_comparisons: _Comparisons) -> None:
     """The Summary counts PASS, FAIL and NOT COMPARED apart, per program and overall.
 
     Each count equals the rows with exactly that status, counted row by row here. On a clean
@@ -987,7 +987,7 @@ def test_summary_counts(written: _Written, clean_comparisons: _Comparisons) -> N
     )
 
 
-def test_not_compared_rows_never_counted_as_pass(
+def test_s02_and_s07_mod_01_not_compared_rows_never_counted_as_pass(
     results: Mapping[str, object],
     clean_comparisons: _Comparisons,
     tolerances: compare.Tolerances,
@@ -1196,7 +1196,7 @@ _UNTRUSTED_TEXT = (
 
 
 @pytest.mark.parametrize(("text", "literal"), _UNTRUSTED_TEXT)
-def test_untrusted_text_rendered_literally(
+def test_s02_trn_03_untrusted_text_rendered_literally(
     text: str,
     literal: str,
     results: Mapping[str, object],
@@ -1465,7 +1465,7 @@ _RULE_CASES = (
 
 
 @pytest.mark.parametrize(("class_key", "python", "sas", "status", "reason"), _RULE_CASES)
-def test_rule_outcome_reasons(
+def test_d06_rule_outcome_reasons(
     class_key: str,
     python: Callable[[compare.Tolerances], object],
     sas: Callable[[compare.Tolerances], object],
@@ -1496,7 +1496,7 @@ def test_rule_outcome_reasons(
         assert str(value) not in outcome.reason, f"{outcome.reason!r} shows the value {value!r}"
 
 
-def test_failed_checkpoint_reason_in_report(
+def test_s02_dep_util_access_test_data_failed_checkpoint_reason_in_report(
     results: Mapping[str, object],
     clean_comparisons: _Comparisons,
     sas_checkpoints: Mapping[str, Sequence[object]],
@@ -1607,7 +1607,7 @@ def _rounded_note_pattern(listing: str, decimals: str, rule: str) -> re.Pattern[
 
 
 @pytest.mark.parametrize("limits", ["loaded", "sentinel"])
-def test_rounded_reference_wording(
+def test_s02_mod_02_rounded_reference_wording(
     limits: str,
     written: _Written,
     results: Mapping[str, object],
@@ -1722,7 +1722,7 @@ def test_s02_and_s07_mod_01_not_compared_section(
             assert listing in matches[0]["Reason"]
 
 
-def test_source_integrity_rows(written: _Written) -> None:
+def test_env02_source_integrity_rows(written: _Written) -> None:
     """Source integrity has one row per read-only input, in ``READ_ONLY_INPUTS`` order.
 
     Each row shows the input's blob at the upstream commit, its working-tree blob and the result
@@ -1938,7 +1938,7 @@ def test_s02_mod_02_and_s07_mod_02_03_default_models(
 
 
 @pytest.mark.parametrize("program", PROGRAMS)
-def test_glm_skipped_by_setting_state(
+def test_s02_mod_02_glm_skipped_by_setting_state(
     program: str,
     results: Mapping[str, Any],
     listing_tables: Mapping[str, Sequence[object]],
@@ -2233,7 +2233,7 @@ def test_s07_flt_04_halt_rendered(
         ),
     ],
 )
-def test_source_integrity_explanations(
+def test_env01_source_integrity_explanations(
     git_available: bool,
     head: str,
     head_shown: str,
@@ -2301,7 +2301,7 @@ def test_source_integrity_explanations(
     ] == [(path, *cells) for path, cells in expected.items()]
 
 
-def test_report_deterministic(
+def test_s02_and_s07_prs_01_report_deterministic(
     written: _Written,
     results: Mapping[str, object],
     clean_comparisons: _Comparisons,
@@ -2331,7 +2331,7 @@ def test_report_deterministic(
 
 
 @pytest.mark.parametrize("exports", ["default", "explicit_empty"])
-def test_reproduce_under_write_root(
+def test_env03_reproduce_under_write_root(
     exports: str,
     write_paths: RepoPaths,
     repo_paths: RepoPaths,
@@ -2403,7 +2403,7 @@ def test_reproduce_under_write_root(
         assert list(exports_dir.iterdir()) == []
 
 
-def test_reproduce_rejects_missing_sas_exports_dir(
+def test_s02_and_s07_dep_assert_continue_reproduce_rejects_missing_sas_exports_dir(
     write_paths: RepoPaths, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A ``--sas-exports`` that is not an existing directory is an input error: exit 2, no writes.
@@ -2697,7 +2697,7 @@ def test_reproduce_s07_flt_04_halt_exits_1(
     assert "merged CSS_STATS.pval" in pval
 
 
-def test_reproduce_failed_export_comparison_exits_1(
+def test_s02_mod_02_reproduce_failed_export_comparison_exits_1(
     write_paths: RepoPaths,
     clean_comparisons: _Comparisons,
     tmp_path: Path,
@@ -2777,7 +2777,7 @@ def test_reproduce_failed_export_comparison_exits_1(
 
 
 @pytest.mark.parametrize("failure", ["malformed_sas_export", "missing_07_07_input"])
-def test_reproduce_input_error_exits_2_writing_nothing(
+def test_s02_mod_02_reproduce_input_error_exits_2_writing_nothing(
     failure: str,
     write_paths: RepoPaths,
     tmp_path: Path,
@@ -2834,7 +2834,7 @@ def test_reproduce_input_error_exits_2_writing_nothing(
 
 
 @pytest.mark.parametrize("link", ["outputs_dir", "program_outputs_dir", "reports_dir"])
-def test_reproduce_rejected_destination_exits_2(
+def test_env03_reproduce_rejected_destination_exits_2(
     link: str,
     write_paths: RepoPaths,
     tmp_path: Path,
@@ -2899,7 +2899,7 @@ def test_reproduce_rejected_destination_exits_2(
     assert _tree(write_paths.write_root) == expected
 
 
-def test_reproduce_nul_byte_write_root_exits_2(
+def test_env03_reproduce_nul_byte_write_root_exits_2(
     write_paths: RepoPaths,
     tmp_path: Path,
     file_state: _FileState,
@@ -3056,7 +3056,7 @@ def test_rejects_symlinked_destination(
     assert _tree(write_paths.write_root) == planted
 
 
-def test_rejects_reports_dir_linked_into_outputs_tree(
+def test_env03_rejects_reports_dir_linked_into_outputs_tree(
     write_paths: RepoPaths,
     results: Mapping[str, object],
     clean_comparisons: _Comparisons,
@@ -3132,7 +3132,7 @@ def _use_strategy(strategy: str, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("entry", ["hard_link", "fifo", "directory"])
-def test_rejects_unsafe_existing_report(
+def test_env03_rejects_unsafe_existing_report(
     entry: str,
     write_paths: RepoPaths,
     results: Mapping[str, object],
@@ -3185,7 +3185,7 @@ def test_rejects_unsafe_existing_report(
 
 
 @pytest.mark.parametrize("strategy", _STRATEGIES)
-def test_rewrites_existing_report(
+def test_env03_rewrites_existing_report(
     strategy: str,
     monkeypatch: pytest.MonkeyPatch,
     write_paths: RepoPaths,
@@ -3223,7 +3223,7 @@ def test_rewrites_existing_report(
 
 @pytest.mark.parametrize("swap", list(_SWAP_REASONS))
 @pytest.mark.parametrize("strategy", _STRATEGIES)
-def test_refuses_report_replaced_after_vetting(
+def test_env03_refuses_report_replaced_after_vetting(
     strategy: str,
     swap: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -3354,7 +3354,7 @@ def _swap_ancestor_during_open(
 
 
 @pytest.mark.parametrize("case", _UNBOUND_OPENS)
-def test_path_fallback_refuses_unbound_report_open(
+def test_env03_path_fallback_refuses_unbound_report_open(
     case: str,
     monkeypatch: pytest.MonkeyPatch,
     write_paths: RepoPaths,
@@ -3486,7 +3486,9 @@ def test_cli_accepts_only_sas_exports(tmp_path: Path, repo_paths: RepoPaths) -> 
         pytest.param(["report"], id="unknown_command"),
     ],
 )
-def test_cli_rejects_other_arguments(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+def test_env03_cli_rejects_other_arguments(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
     """Any other option, an option prefix, an empty export directory or a missing or unknown
     subcommand is an ``argparse`` error with exit code 2, raised before anything runs.
 
@@ -3514,7 +3516,7 @@ def test_cli_rejects_other_arguments(argv: list[str], capsys: pytest.CaptureFixt
         pytest.param(logging.NullHandler(), logging.DEBUG, "", id="host_configured_root"),
     ],
 )
-def test_cli_logging_configuration(
+def test_lmm_flt_02_cli_logging_configuration(
     host_handler: logging.Handler | None,
     root_level: int,
     expected_err: str,

@@ -57,6 +57,7 @@ __all__ = [
     "PROGRAMS",
     "PROGRAM_07_02",
     "PROGRAM_07_07",
+    "REQUIRED_INPUT_TYPES",
     "REQUIRED_INPUT_VARIABLES",
     "SAS_EXPORT_FILES",
     "SAS_EXPORT_SOURCES",
@@ -143,6 +144,34 @@ REQUIRED_INPUT_VARIABLES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         ),
     }
 )
+
+#: SAS type, :data:`CHAR` or :data:`NUM`, of every :data:`REQUIRED_INPUT_VARIABLES` name, as both
+#: repository ADVS files store it [data/adam/cdisc/advs.xpt; data/adam/cdisc-split/advs.xpt].
+#: ``xpt_reader.require_variables`` checks it, so a required variable stored with the other type is
+#: an input error before any step relies on its type.
+REQUIRED_INPUT_TYPES: Mapping[str, str] = MappingProxyType(
+    {
+        **dict.fromkeys(_names("STUDYID USUBJID SAFFL ANL01FL TRTP PARAM PARAMCD AVISIT ATPT"), CHAR),
+        **dict.fromkeys(_names("TRTPN CHG BASE AVISITN ATPTN AVAL ADT TRTSDT"), NUM),
+    }
+)
+
+
+def _check_required_input_types() -> None:
+    """Type every required input variable as :data:`CHAR` or :data:`NUM` (fails at import on drift)."""
+    required = [name for names in REQUIRED_INPUT_VARIABLES.values() for name in names]
+    untyped = [name for name in dict.fromkeys(required) if name not in REQUIRED_INPUT_TYPES]
+    if untyped:
+        raise ValueError(f"REQUIRED_INPUT_TYPES lacks required variables: {' '.join(untyped)}")
+    extra = [name for name in REQUIRED_INPUT_TYPES if name not in required]
+    if extra:
+        raise ValueError(f"REQUIRED_INPUT_TYPES types variables no program requires: {' '.join(extra)}")
+    invalid = {name: code for name, code in REQUIRED_INPUT_TYPES.items() if code not in (CHAR, NUM)}
+    if invalid:
+        raise ValueError(f"REQUIRED_INPUT_TYPES holds codes other than {CHAR} and {NUM}: {invalid}")
+
+
+_check_required_input_types()
 
 #: The SAS ``&ana_variables`` keep lists, in the order the programs write them: S02-TRN-03
 #: [whitepapers/WPCT/WPCT-F.07.02.sas:144] and S07-TRN-04 [whitepapers/WPCT/WPCT-F.07.07.sas:190].
@@ -604,4 +633,3 @@ def _check_sas_export_tables() -> None:
 
 
 _check_sas_export_tables()
-

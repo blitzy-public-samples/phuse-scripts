@@ -398,7 +398,7 @@ def test_missing_chg_dropped(tolerances: compare.Tolerances) -> None:
     _assert_incomplete_record_dropped("CHG", tolerances)
 
 
-def test_missing_trtpn_dropped(tolerances: compare.Tolerances) -> None:
+def test_d08_missing_trtpn_dropped(tolerances: compare.Tolerances) -> None:
     """D-08: a record missing the CLASS variable TRTPN, with BASE and CHG present, is left out of
     S02-MOD-02 / S07-MOD-02 fits rather than entering with every TRTPN indicator 0."""
     _assert_incomplete_record_dropped(CLASS_VAR, tolerances)

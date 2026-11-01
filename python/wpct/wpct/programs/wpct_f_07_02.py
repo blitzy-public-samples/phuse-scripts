@@ -394,17 +394,15 @@ def run(
             sequence of numeric timepoints (S02-FLT-01, ``selection.subset_param_timepoints``).
             :class:`Config` does not check ``param_timepoints``, so it is checked once the input
             is read, before any record is selected. Any other setting that :class:`Config`
-            refuses raises when the ``Config`` is built, before ``run`` is called. An input
-            variable whose SAS type does not fit its use, such as a character ``ATPTN`` or ``CHG``
-            or a numeric ``PARAMCD`` or ``SAFFL``, raises it too, from the step that relies on its
-            type (``selection``, ``summary.proc_summary`` or ``model.glm_solution``), before any
-            record is exported.
+            refuses raises when the ``Config`` is built, before ``run`` is called.
         ValueError: ``config.param_timepoints`` lists a NaN timepoint, the SAS missing value,
             which would otherwise select the records whose ``ATPTN`` is missing (S02-FLT-01);
             raised at the same point as the ``param_timepoints`` ``TypeError``.
-        InputDataError: The input file is missing or unreadable, lacks a required variable, or
+        InputDataError: The input file is missing or unreadable, lacks a required variable,
             stores a required variable under more than one spelling, as columns that differ only
-            in case (S02-DEP-assert_depend ``vars=``).
+            in case (S02-DEP-assert_depend ``vars=``), or stores one with the other SAS type, such
+            as a character ``ATPTN`` or ``CHG`` or a numeric ``PARAMCD`` or ``SAFFL``
+            (``schemas.REQUIRED_INPUT_TYPES``), before any record is selected.
     """
     if not isinstance(config, Config):
         raise TypeError(f"{PROGRAM_ID}: config must be a Config, got {type(config).__name__}")

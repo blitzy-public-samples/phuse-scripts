@@ -393,7 +393,13 @@ another macro. 07.02 reaches 19 macros. It does not reach `derive_lastminmax_mea
   and one with bytes after the last observation's blank padding that do not begin another member raises
   `InputDataError("WPCT-F.07.02: cannot read SAS transport file <absolute path>: damaged transport file: <detail>")`.
   A cut exactly where both an observation and a record end cannot be detected, because a version 5
-  transport file records no observation count.
+  transport file records no observation count. SAS selects member `ADVS` by name among all the
+  members of the file (`set source.&ds`) [whitepapers/utilities/util_access_test_data.sas:64-66];
+  `pyreadstat` reads only the first member, so the port requires that member to be named `ADVS`,
+  ignoring case, and otherwise raises
+  `InputDataError("WPCT-F.07.02: cannot read SAS transport file <absolute path>: member ADVS not found (first member is <name>)")`,
+  or `... (the first member has no name)`. A file whose `ADVS` member is not its first is therefore
+  an input error where SAS would read it; `data/adam/cdisc/advs.xpt` holds member `ADVS` only.
 
 #### S02-DEP-assert_depend — Dependency assertion
 
@@ -421,6 +427,12 @@ another macro. 07.02 reaches 19 macros. It does not reach `derive_lastminmax_mea
   and are returned under their spelling in `schemas.REQUIRED_INPUT_VARIABLES`; a required variable
   stored under more than one spelling raises
   `InputDataError("WPCT-F.07.02: <absolute path> has variables that differ only in case: <columns>")`.
+  The port adds a type check that `assert_depend` lacks: it checks existence only, so SAS meets a
+  mistyped variable only in the later steps that use it. Each required variable must be stored with
+  its SAS type in `schemas.REQUIRED_INPUT_TYPES` (numeric: a numeric, non-bool dtype; character:
+  `str` or missing values only), otherwise
+  `InputDataError("WPCT-F.07.02: <absolute path> has required variables of the wrong type: SAFFL (numeric; character expected)")`
+  names every mistyped variable in the order given, never a value, and the CLI exits 2.
 
 #### S02-DEP-assert_continue — Halt on failed assertion
 
@@ -1129,7 +1141,13 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
   and one with bytes after the last observation's blank padding that do not begin another member raises
   `InputDataError("WPCT-F.07.07: cannot read SAS transport file <absolute path>: damaged transport file: <detail>")`.
   A cut exactly where both an observation and a record end cannot be detected, because a version 5
-  transport file records no observation count.
+  transport file records no observation count. SAS selects member `ADVS` (`&ds`) by name among all
+  the members of the file [whitepapers/utilities/util_access_test_data.sas:64-66]; `pyreadstat`
+  reads only the first member, so the port requires that member to be named `ADVS`, ignoring case,
+  and otherwise raises
+  `InputDataError("WPCT-F.07.07: cannot read SAS transport file <absolute path>: member ADVS not found (first member is <name>)")`,
+  or `... (the first member has no name)`. A file whose `ADVS` member is not its first is therefore
+  an input error where SAS would read it; `data/adam/cdisc-split/advs.xpt` holds member `ADVS` only.
 
 #### S07-DEP-derive_lastminmax_measure — Last/minimum/maximum derivation
 
@@ -1162,6 +1180,12 @@ at lines 77-213 and called by S07-TRN-03. GRPVARS, ORDVARS and INCL below are th
   and are returned under their spelling in `schemas.REQUIRED_INPUT_VARIABLES`; a required variable
   stored under more than one spelling raises
   `InputDataError("WPCT-F.07.07: <absolute path> has variables that differ only in case: <columns>")`.
+  The port adds a type check that `assert_depend` lacks: it checks existence only, so SAS meets a
+  mistyped variable only in the later steps that use it. Each required variable must be stored with
+  its SAS type in `schemas.REQUIRED_INPUT_TYPES` (numeric: a numeric, non-bool dtype; character:
+  `str` or missing values only), otherwise
+  `InputDataError("WPCT-F.07.07: <absolute path> has required variables of the wrong type: AVAL (character; numeric expected)")`
+  names every mistyped variable in the order given, never a value, and the CLI exits 2.
 
 #### S07-DEP-assert_continue — Halt on failed assertion
 

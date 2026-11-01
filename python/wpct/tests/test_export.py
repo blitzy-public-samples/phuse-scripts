@@ -284,7 +284,7 @@ def test_s07_flt_04_05_halted_result_writes_nothing(
         pytest.param('say "hi",\r\nthen\rbye', id="crlf_comma_quote"),
     ],
 )
-def test_round_trip_carriage_return(
+def test_s02_trn_03_round_trip_carriage_return(
     value: str, result_07_02: ProgramResult, write_paths: RepoPaths
 ) -> None:
     """A character value holding a carriage return is quoted and reads back exactly (AAP 0.6.4).
@@ -315,7 +315,7 @@ def test_round_trip_carriage_return(
         pytest.param("bad\ud800", UnicodeEncodeError, id="lone_surrogate"),
     ],
 )
-def test_rejects_unwritable_text(
+def test_s02_trn_03_rejects_unwritable_text(
     value: str,
     cause: type[Exception] | None,
     result_07_02: ProgramResult,
@@ -410,7 +410,7 @@ def test_rejects_protected_destination(
 
 
 @pytest.mark.parametrize("destination", ["output_file", "report_file"])
-def test_accepts_fixed_destinations(
+def test_env03_accepts_fixed_destinations(
     destination: str, repo_paths: RepoPaths, file_state: _FileState
 ) -> None:
     """Positive control: the guard accepts the checkout's two fixed destinations (AAP 0.8).
@@ -436,7 +436,7 @@ def test_accepts_fixed_destinations(
 
 
 @pytest.mark.parametrize("variant", ["output_file", "report_file", "sas_program", "write_root"])
-def test_rejects_nul_byte_destination(
+def test_env03_rejects_nul_byte_destination(
     variant: str, repo_paths: RepoPaths, write_paths: RepoPaths, file_state: _FileState
 ) -> None:
     """A NUL byte in the target or the write root is refused with ``OutputPathError`` (AAP 0.8).
@@ -555,7 +555,7 @@ def test_rejects_symlinked_destination(
     assert _tree(write_paths.write_root) == planted
 
 
-def test_rejects_symlink_inside_outputs_tree(
+def test_env03_rejects_symlink_inside_outputs_tree(
     write_paths: RepoPaths,
     result_07_02: ProgramResult,
     file_state: _FileState,
@@ -664,7 +664,7 @@ def _swap_after_last_vet(
 
 
 @pytest.mark.parametrize("entry", ["hard_link_first", "hard_link_last", "fifo", "directory"])
-def test_rejects_unsafe_existing_destination(
+def test_env03_rejects_unsafe_existing_destination(
     entry: str,
     write_paths: RepoPaths,
     result_07_02: ProgramResult,
@@ -718,7 +718,7 @@ def test_rejects_unsafe_existing_destination(
 
 
 @pytest.mark.parametrize("strategy", _STRATEGIES)
-def test_rewrites_existing_outputs(
+def test_env03_rewrites_existing_outputs(
     strategy: str,
     monkeypatch: pytest.MonkeyPatch,
     write_paths: RepoPaths,
@@ -753,7 +753,7 @@ def test_rewrites_existing_outputs(
 
 @pytest.mark.parametrize("swap", list(_SWAP_REASONS))
 @pytest.mark.parametrize("strategy", _STRATEGIES)
-def test_refuses_destination_replaced_after_vetting(
+def test_env03_refuses_destination_replaced_after_vetting(
     strategy: str,
     swap: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -877,7 +877,7 @@ def _swap_ancestor_during_open(
 
 
 @pytest.mark.parametrize("case", _UNBOUND_OPENS)
-def test_path_fallback_refuses_unbound_open(
+def test_env03_path_fallback_refuses_unbound_open(
     case: str,
     monkeypatch: pytest.MonkeyPatch,
     write_paths: RepoPaths,

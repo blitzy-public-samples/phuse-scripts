@@ -4,10 +4,12 @@ Spec items verified (``python/wpct/docs/sas_specification.md``):
 
 - S02-DEP-util_access_test_data, S07-DEP-util_access_test_data: the local read of ``ADVS``, the
   variable labels and storage widths it reports, checked against the raw transport header, and its
-  failure messages for a missing, unreadable, truncated or damaged input (AAP 0.6.4).
+  failure messages for a missing, unreadable, truncated or damaged input (AAP 0.6.4) and for one
+  whose first member is not ``ADVS``.
 - S02-DEP-assert_dset_exist, S07-DEP-assert_dset_exist: the file-existence check.
 - S02-DEP-assert_depend, S07-DEP-assert_depend, S02-DEP-assert_var_exist,
-  S07-DEP-assert_var_exist: the ``vars=`` check of :func:`require_variables`.
+  S07-DEP-assert_var_exist: the ``vars=`` check of :func:`require_variables`, and the SAS type
+  check it adds against ``schemas.REQUIRED_INPUT_TYPES``.
 - D-10: dates stay SAS day numbers, matching the dates the 07.07 log prints for the LMM-FLT-02
   omitted baseline records. D-11: a blank character value reads back as ``''`` and is missing.
 
@@ -40,9 +42,12 @@ from wpct.sas_reference import (
 )
 from wpct.sas_semantics import char_missing_mask, is_char_missing
 from wpct.schemas import (
+    CHAR,
+    NUM,
     PROGRAM_07_02,
     PROGRAM_07_07,
     PROGRAMS,
+    REQUIRED_INPUT_TYPES,
     REQUIRED_INPUT_VARIABLES,
 )
 from wpct.xpt_reader import XptMetadata, read_xpt, require_variables
@@ -388,9 +393,11 @@ def _header_only_advs(path: Path, repo_paths: RepoPaths) -> int:
     return 0
 
 
-def _written(frame: pd.DataFrame, version: int) -> Callable[[Path, RepoPaths], int]:
+def _written(
+    frame: pd.DataFrame, version: int, member: str = "ADVS"
+) -> Callable[[Path, RepoPaths], int]:
     def write(path: Path, repo_paths: RepoPaths) -> int:
-        pyreadstat.write_xport(frame, str(path), table_name="ADVS", file_format_version=version)
+        pyreadstat.write_xport(frame, str(path), table_name=member, file_format_version=version)
         return len(frame)
 
     return write
@@ -407,6 +414,7 @@ _PADDED = pd.DataFrame(
         pytest.param(_header_only_advs, id="advs-header-only"),
         pytest.param(_written(_PADDED, 5), id="padded"),
         pytest.param(_written(_PADDED, 8), id="padded-version-8"),
+        pytest.param(_written(_PADDED, 5, "advs"), id="member-lower-case"),
         pytest.param(
             _written(
                 pd.DataFrame({"AVAL": np.arange(float(XPT_RECORD_LENGTH // XPT_NUMERIC_WIDTH))}),
@@ -437,7 +445,8 @@ def test_s02_and_s07_dep_util_access_test_data_reads_whole_file(
     Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data: the layout check
     accepts a file whose observations end with or without blank padding, a version 8 file, a last
     observation ending in a blank value, and a member with no observations, including the
-    repository ADVS header up to its observation header record.
+    repository ADVS header up to its observation header record. The member check accepts ``advs``,
+    because SAS member names ignore case.
     """
     path = tmp_path / "whole.xpt"
     expected_rows = write_input(path, repo_paths)
@@ -447,6 +456,51 @@ def test_s02_and_s07_dep_util_access_test_data_reads_whole_file(
 
     assert metadata.n_rows == len(frame) == expected_rows
     pd.testing.assert_frame_equal(frame, direct, check_exact=True)
+
+
+#: Bytes 0:16 of the first member's descriptor record (record 5, after its member and descriptor
+#: header records, as ``XPT_*`` above): ``SAS`` and the member name, each blank-padded to 8 bytes.
+XPT_ADVS_DESCRIPTOR = b"SAS     ADVS    "
+
+
+def _member_adsl(path: Path) -> None:
+    pyreadstat.write_xport(pd.DataFrame({"AVAL": [64.0]}), str(path), table_name="ADSL")
+
+
+def _member_unnamed(path: Path) -> None:
+    pyreadstat.write_xport(pd.DataFrame({"AVAL": [64.0]}), str(path), table_name="ADVS")
+    data = path.read_bytes()
+    assert data.count(XPT_ADVS_DESCRIPTOR) == 1
+    path.write_bytes(data.replace(XPT_ADVS_DESCRIPTOR, b"SAS" + b" " * 13))
+
+
+@pytest.mark.parametrize(
+    ("write_input", "first"),
+    [
+        pytest.param(_member_adsl, "first member is ADSL", id="member-adsl"),
+        pytest.param(_member_unnamed, "the first member has no name", id="member-unnamed"),
+    ],
+)
+def test_s02_and_s07_dep_util_access_test_data_requires_member_advs(
+    write_input: Callable[[Path], None], first: str, tmp_path: Path
+) -> None:
+    """A transport file whose first member is not ``ADVS`` is unreadable, naming that member.
+
+    Verifies S02-DEP-util_access_test_data and S07-DEP-util_access_test_data: SAS copies member
+    ``ADVS`` by name (``set source.&ds``) and logs the ``UTIL_ACCESS_TEST_DATA`` error when it is
+    absent [whitepapers/utilities/util_access_test_data.sas:64-71]. ``pyreadstat`` reads the first
+    member whatever its name, so the port raises ``InputDataError`` naming the absolute path and
+    the member it found, as the port notes record.
+    """
+    path = tmp_path / "advs.xpt"
+    write_input(path)
+
+    with pytest.raises(InputDataError) as excinfo:
+        read_xpt(path, PROGRAM_07_02)
+
+    assert str(excinfo.value) == (
+        f"WPCT-F.07.02: cannot read SAS transport file {path}: member ADVS not found ({first})"
+    )
 
 
 def test_s02_and_s07_dep_util_access_test_data_layout_read_error(
@@ -527,7 +581,7 @@ def test_missing_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         ),
     ],
 )
-def test_require_variables_rejects_invalid_names(
+def test_s02_and_s07_dep_assert_depend_require_variables_rejects_invalid_names(
     names: object, error: type[Exception], message: str
 ) -> None:
     """``names`` must list each variable once, as strings; a lone string is not split.
@@ -582,7 +636,7 @@ def test_s02_and_s07_dep_assert_var_exist_require_variables_returns_given_spelli
     pd.testing.assert_frame_equal(frame, original, check_exact=True)
 
 
-def test_require_variables_rejects_case_duplicates(
+def test_s02_and_s07_dep_assert_var_exist_require_variables_rejects_case_duplicates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A required variable matching two columns that differ only in case is an input error.
@@ -610,6 +664,125 @@ def test_require_variables_rejects_case_duplicates(
     assert str(excinfo.value) == (
         f"WPCT-F.07.07: {tmp_path / 'advs.xpt'} lacks required variables: ADT"
     )
+
+
+@pytest.mark.parametrize(
+    ("columns", "names", "entries"),
+    [
+        pytest.param(
+            {"SAFFL": [1.0, np.nan]},
+            ("SAFFL",),
+            "SAFFL (numeric; character expected)",
+            id="character-stored-numeric",
+        ),
+        pytest.param(
+            {"CHG": ["-2", ""]},
+            ("CHG",),
+            "CHG (character; numeric expected)",
+            id="numeric-stored-character",
+        ),
+        pytest.param(
+            {"PARAMCD": pd.Series([], dtype="float64")},
+            ("PARAMCD",),
+            "PARAMCD (numeric; character expected)",
+            id="no-rows-numeric-character",
+        ),
+        pytest.param(
+            {"SAFFL": [True, False], "TRTPN": [True, False]},
+            ("SAFFL", "TRTPN"),
+            "SAFFL (boolean; character expected), TRTPN (boolean; numeric expected)",
+            id="boolean",
+        ),
+        pytest.param(
+            {"PARAMCD": pd.Series(["DIABP", 1.0, 2, None], dtype=object)},
+            ("PARAMCD",),
+            "PARAMCD (dtype object with float and int values; character expected)",
+            id="object-non-string-values",
+        ),
+        pytest.param(
+            {"ADT": pd.Series([19000.0, None], dtype=object)},
+            ("ADT",),
+            "ADT (dtype object with float values; numeric expected)",
+            id="numbers-in-object-column",
+        ),
+        pytest.param(
+            {"saffl": [1.0], "ATPTN": ["815"], "USUBJID": ["01-701-1015"]},
+            ("ATPTN", "USUBJID", "SAFFL"),
+            "ATPTN (character; numeric expected), SAFFL (numeric; character expected)",
+            id="every-offender-in-order-given",
+        ),
+    ],
+)
+def test_s02_and_s07_dep_assert_depend_rejects_wrong_type(
+    columns: Mapping[str, object],
+    names: tuple[str, ...],
+    entries: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A required variable stored with the other SAS type is an input error, naming no value.
+
+    Verifies S02-DEP-assert_depend and S07-DEP-assert_depend: the ``vars=`` check
+    [whitepapers/utilities/assert_depend.sas:102-128] checks existence only, so SAS meets a
+    mistyped variable only in the steps that use it; the port adds the type check its port notes
+    record, against ``schemas.REQUIRED_INPUT_TYPES``. Every offender is named as given, in the
+    order given and with the type it is stored with, so the CLI exits 2 instead of failing later
+    with a ``TypeError``. Names match ignoring case (S02-DEP-assert_var_exist,
+    S07-DEP-assert_var_exist).
+    """
+    monkeypatch.chdir(tmp_path)
+    frame = pd.DataFrame(columns)
+    original = frame.copy(deep=True)
+
+    with pytest.raises(InputDataError) as excinfo:
+        require_variables(frame, names, "advs.xpt", PROGRAM_07_02)
+
+    assert str(excinfo.value) == (
+        f"WPCT-F.07.02: {tmp_path / 'advs.xpt'} has required variables of the wrong type: "
+        f"{entries}"
+    )
+    pd.testing.assert_frame_equal(frame, original, check_exact=True)
+
+
+@pytest.mark.parametrize(
+    ("columns", "names"),
+    [
+        pytest.param(
+            {"SAFFL": ["Y", "", "   ", None, np.nan], "AVAL": [1.0, np.nan, 2.0, 3.0, 4.0]},
+            ("SAFFL", "AVAL"),
+            id="missing-character-values",
+        ),
+        pytest.param(
+            {"PARAMCD": pd.Series([None, np.nan], dtype=object)},
+            ("PARAMCD",),
+            id="all-missing-character",
+        ),
+        pytest.param(
+            {"TRTPN": pd.Series([0, 54, 81], dtype="int64"), "ATPTN": [815.0, 816.0, np.nan]},
+            ("TRTPN", "ATPTN"),
+            id="integer-and-float-numeric",
+        ),
+        pytest.param(
+            {"trtp_short": [1.0], "ANL02FL": [True], "NOPE": ["x"]},
+            ("trtp_short", "ANL02FL", "NOPE"),
+            id="names-without-schema-type",
+        ),
+    ],
+)
+def test_s02_and_s07_dep_assert_depend_accepts_stored_types(
+    columns: Mapping[str, object], names: tuple[str, ...]
+) -> None:
+    """Required variables stored with their SAS type pass; untyped names need only exist.
+
+    Verifies S02-DEP-assert_depend and S07-DEP-assert_depend: a character variable may hold
+    ``''``, blanks, ``None`` or NaN, all character-missing (D-11), and a numeric one any numeric
+    dtype other than bool. A name ``schemas.REQUIRED_INPUT_TYPES`` does not type, such as the
+    derived ``trtp_short`` and ``ANL02FL``, is checked for presence alone, and the frame comes back
+    itself.
+    """
+    frame = pd.DataFrame(columns)
+
+    assert require_variables(frame, names, "advs.xpt", PROGRAM_07_07) is frame
 
 
 # --- Repository inputs (read-only) ---------------------------------------------------------------
@@ -652,6 +825,52 @@ def test_s02_and_s07_dep_util_access_test_data_reads_advs(
     assert sum(study_rows.values()) == checkpoint.NOBS
     assert "ANL02FL" not in frame.columns
     require_variables(frame, REQUIRED_INPUT_VARIABLES[program_id], path, program_id)
+
+
+@pytest.mark.parametrize("program_id", PROGRAMS)
+def test_s02_and_s07_dep_assert_depend_required_types_match_namestr(
+    program_id: str, repo_paths: RepoPaths
+) -> None:
+    """``schemas.REQUIRED_INPUT_TYPES`` holds the SAS type each program's ADVS stores.
+
+    Verifies S02-DEP-assert_depend and S07-DEP-assert_depend: every variable the program requires
+    is typed, and its type is the ``ntype`` of its NAMESTR record in the program's ADVS, decoded
+    without ``pyreadstat`` (1 numeric, 2 character).
+    """
+    header = _namestr_records(repo_paths.input_xpt(program_id))
+    expected = {CHAR: XPT_CHARACTER, NUM: XPT_NUMERIC}
+
+    for name in REQUIRED_INPUT_VARIABLES[program_id]:
+        assert header[name].ntype == expected[REQUIRED_INPUT_TYPES[name]], name
+
+
+@pytest.mark.parametrize("program_id", PROGRAMS)
+def test_s02_and_s07_dep_assert_depend_rejects_mistyped_transport_variable(
+    program_id: str,
+    advs: Mapping[str, tuple[pd.DataFrame, XptMetadata]],
+    tmp_path: Path,
+) -> None:
+    """A transport file storing ``SAFFL`` as numeric reads, then fails the required-variable check.
+
+    Verifies S02-DEP-assert_depend and S07-DEP-assert_depend through :func:`read_xpt`: the first
+    rows of the program's ADVS are written back to ``tmp_path`` with ``SAFFL`` recoded to
+    ``1``/``0``, so the file stores a numeric ``SAFFL`` where the program needs a character flag
+    (S02-POP-01, S07-POP-01). The message names the absolute path and the variable, not a value.
+    """
+    frame = advs[program_id][0].head(20).copy()
+    frame["SAFFL"] = (frame["SAFFL"] == "Y").astype("float64")
+    path = tmp_path / "advs.xpt"
+    pyreadstat.write_xport(frame, str(path), table_name="ADVS")
+
+    stored, _ = read_xpt(path, program_id)
+
+    assert stored["SAFFL"].dtype == np.float64
+    with pytest.raises(InputDataError) as excinfo:
+        require_variables(stored, REQUIRED_INPUT_VARIABLES[program_id], path, program_id)
+    assert str(excinfo.value) == (
+        f"{program_id}: {path} has required variables of the wrong type: "
+        "SAFFL (numeric; character expected)"
+    )
 
 
 @pytest.mark.parametrize("program_id", PROGRAMS)

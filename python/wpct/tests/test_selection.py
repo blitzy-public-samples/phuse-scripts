@@ -1,11 +1,14 @@
 """Record-selection tests of ``wpct.selection``.
 
-Each test builds a small synthetic frame and checks one rule of
+Each test but one builds a small synthetic frame and checks one rule of
 ``python/wpct/docs/sas_specification.md`` against the SAS step it ports: the WPCT-F.07.02 subset,
 flags, baseline exclusion and keep list (S02-*), the WPCT-F.07.07 subset, post-baseline filter,
 flags, keep list, pooling and study numbering (S07-*), the ``$6`` truncation (D-12), comparisons
 with missing values (D-13), the pooled identifier and its sort order (D-16), and the halting checks
-S07-FLT-04 and S07-FLT-05. No test reads or writes a file.
+S07-FLT-04 and S07-FLT-05. The exception applies the ``advs_sub`` step of each program (S02-FLT-01
+with S02-TRN-02, S07-FLT-01 with S07-TRN-02) to the repository ADVS and checks the result against
+the ``WORK.ADVS_SUB`` line of the SAS log, both read through the session fixtures of
+``conftest.py``. No test writes a file.
 """
 
 import numpy as np
@@ -17,6 +20,7 @@ from wpct import selection
 from wpct.errors import AnalysisHalted
 from wpct.sas_semantics import assign_char, prefix_match, sas_sort
 from wpct.schemas import (
+    ADVS_SUB_EXTRA,
     ANA_VARIABLES,
     POOLED_STUDYID,
     PROGRAM_07_02,
@@ -170,8 +174,10 @@ def test_s02_trn_02_abbreviate_treatment():
     [whitepapers/WPCT/WPCT-F.07.02.sas:95-102; whitepapers/WPCT/WPCT-F.07.07.sas:150-157]. The three
     WHEN values give ``P``, ``X-high`` and ``X-low``; WHEN ignores trailing blanks (D-11) but not
     case. Every other value, a blank or missing TRTP included, takes OTHERWISE ``'UNEXPECTED'``,
-    which the ``$6`` length stores as ``UNEXPE``. ``trtp_short`` follows every input variable.
+    which the ``$6`` length stores as ``UNEXPE``. ``trtp_short``, the only variable the ATTRIB
+    statement adds and so the whole of ``schemas.ADVS_SUB_EXTRA``, follows every input variable.
     """
+    assert ADVS_SUB_EXTRA == _sas_list("trtp_short")
     assert assign_char("UNEXPECTED", 6) == "UNEXPE"
     assert assign_char("P", 6) == "P"
     advs = pd.DataFrame(
@@ -204,8 +210,8 @@ def test_s02_trn_02_abbreviate_treatment():
         "UNEXPE",
         "UNEXPE",
     ]
-    assert list(out.columns) == [*advs.columns, "trtp_short"]
-    assert_frame_equal(out.drop(columns="trtp_short"), advs, check_exact=True)
+    assert tuple(out.columns) == (*advs.columns, *ADVS_SUB_EXTRA)
+    assert_frame_equal(out.drop(columns=list(ADVS_SUB_EXTRA)), advs, check_exact=True)
     assert_frame_equal(advs, original, check_exact=True)
 
 
@@ -687,3 +693,46 @@ def test_s07_flt_04_flt_05_empty_frame_returned(check, args):
     assert frame.empty and "CHG" in frame and "ATPTN" in frame
 
     _assert_frame_returned(check(frame, *args, PROGRAM_07_07), frame)
+
+
+# --- Both programs on the repository ADVS ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("program_id", "advs_fixture", "pairs"),
+    [
+        (PROGRAM_07_02, "advs_07_02_raw", PAIRS_07_02),
+        (PROGRAM_07_07, "advs_07_07_raw", PAIRS_07_07),
+    ],
+    ids=["07.02", "07.07"],
+)
+def test_s02_flt_01_trn_02_s07_flt_01_trn_02_advs_sub_variables(
+    program_id, advs_fixture, pairs, request, sas_checkpoints
+):
+    """S02-FLT-01 with S02-TRN-02, and S07-FLT-01 with S07-TRN-02, on the repository ADVS.
+
+    DATA ``advs_sub`` [whitepapers/WPCT/WPCT-F.07.02.sas:90-103;
+    whitepapers/WPCT/WPCT-F.07.07.sas:146-158] keeps every ``WORK.ADVS`` variable in input order and
+    appends ``schemas.ADVS_SUB_EXTRA``. Applied to the ADVS that ``xpt_reader`` reads, the subset
+    has the shape the SAS log gives ``WORK.ADVS_SUB``: 5925 (07.02) or 5926 (07.07) observations
+    and 45 variables, the 44 of ``WORK.ADVS`` plus one
+    [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.log:32,59;
+    whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:32,61]. Both log lines are read through the
+    ``sas_checkpoints`` fixture.
+    """
+    advs = request.getfixturevalue(advs_fixture)
+    logged = [
+        checkpoint
+        for checkpoint in sas_checkpoints[program_id]
+        if checkpoint.spec.SAS_DATASET in ("ADVS", "ADVS_SUB")
+    ]
+    assert [checkpoint.spec.SAS_DATASET for checkpoint in logged] == ["ADVS", "ADVS_SUB"]
+    advs_log, advs_sub_log = logged
+    assert advs_log.ok and advs_sub_log.ok, (advs_log.problem, advs_sub_log.problem)
+    assert advs.shape == (advs_log.NOBS, advs_log.NVARS)
+    assert advs_sub_log.NVARS == advs_log.NVARS + len(ADVS_SUB_EXTRA) == 45
+
+    advs_sub = selection.abbreviate_treatment(selection.subset_param_timepoints(advs, pairs))
+
+    assert tuple(advs_sub.columns) == (*advs.columns, *ADVS_SUB_EXTRA)
+    assert advs_sub.shape == (advs_sub_log.NOBS, advs_sub_log.NVARS)
