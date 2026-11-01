@@ -22,22 +22,26 @@ those of ``docs/sas_specification.md``:
 - ``checkpoints.csv``: the log-equivalent record counts (``ProgramResult.checkpoints``).
 
 CSV format: UTF-8 with a header row of the SAS variable names in ``spec.columns`` order. Fields are
-separated by commas, lines end with ``\\n`` and quoting is minimal. Floats are written with
-``%.17g``, which round-trips exactly, and integers as integers. Booleans are written as ``True`` or
-``False``, and a missing value of any type is an empty field. Rows are sorted by the record key with
-``sas_sort``, which is stable and puts missing values first. An empty dataset still gets its header
-row, and identical inputs give identical bytes. :func:`read_exported_csv` reads a file back to the
+separated by commas and lines end with ``\\n``. A field is quoted only when it holds a comma, a
+double quote, a carriage return or a line feed, and each double quote inside it is doubled; a
+record of one empty field is written ``""``. Floats are written with ``%.17g``, which round-trips
+exactly, and integers as integers. Booleans are written as ``True`` or ``False``, and a missing
+value of any type is an empty field. A character value holding a NUL character (U+0000), which CSV
+readers do not return intact, or text that UTF-8 cannot encode, such as a lone surrogate, raises
+``ValueError`` before anything is written. Rows are sorted by the record key with ``sas_sort``,
+which is stable and puts missing values first. An empty dataset still gets its header row, and
+identical inputs give identical bytes. :func:`read_exported_csv` reads a file back to the
 in-memory dtypes.
 """
 
 from __future__ import annotations
 
-import csv
 import dataclasses
-import io
 import math
 import numbers
 import os
+import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +64,17 @@ _RECORD_EXPORTS = {
 
 _TRUE = "True"
 _FALSE = "False"
+
+#: Encoding of every export file.
+_ENCODING = "utf-8"
+
+#: Characters that make a CSV field quoted: the delimiter, the quote character and both line-break
+#: characters, so that a reader ends a record only at a line end written between records.
+_QUOTED = re.compile('[,"\r\n]')
+
+#: The NUL character (U+0000), refused in character values because CSV readers do not return it
+#: intact.
+_NUL = "\x00"
 
 
 def _label(spec: ExportSpec) -> str:
@@ -251,8 +266,11 @@ def _as_char(column: pd.Series, label: str) -> np.ndarray:
 # --- CSV rendering and reading -------------------------------------------------------------------
 
 
-def _format_column(column: pd.Series, code: str) -> list[str]:
-    """Return the CSV fields of a column already converted by :func:`_coerce`."""
+def _format_column(column: pd.Series, code: str, label: str) -> list[str]:
+    """Return the CSV fields of a column already converted by :func:`_coerce`.
+
+    ``label`` names the export and the column in the error :func:`_char_fields` raises.
+    """
     if code == NUM:
         # ".17g" is the "%.17g" of the export contract: 17 significant digits round-trip a double.
         return ["" if math.isnan(value) else f"{value:.17g}" for value in column.to_numpy()]
@@ -263,19 +281,64 @@ def _format_column(column: pd.Series, code: str) -> list[str]:
     if code == BOOL:
         return [_TRUE if value else _FALSE for value in column.to_numpy()]
     if code == CHAR:
-        return list(column.to_numpy())
+        return _char_fields(column, label)
     raise ValueError(f"unknown column type {code!r}")
 
 
-def _render_csv(frame: pd.DataFrame, spec: ExportSpec) -> str:
-    """Return the CSV text of a frame built by :func:`frame_for_export` for ``spec``."""
+def _char_fields(column: pd.Series, label: str) -> list[str]:
+    """Return the values of a character column after checking that the CSV file can carry them.
+
+    A NUL character (U+0000) raises ``ValueError``, because CSV readers do not return it intact,
+    and so does text that UTF-8 cannot encode, such as a lone surrogate. The message names
+    ``label`` and the 1-based data row but not the value; an encoding error is chained to it.
+    """
+    fields = list(column.to_numpy())
+    for row, text in enumerate(fields, start=1):
+        if _NUL in text:
+            raise ValueError(
+                f"{label}, data row {row}: a NUL character (U+0000) cannot be exported"
+            )
+        try:
+            text.encode(_ENCODING)
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                f"{label}, data row {row}: text that cannot be encoded as UTF-8 ({exc.reason})"
+            ) from exc
+    return fields
+
+
+def _csv_field(text: str) -> str:
+    """Return ``text`` as one CSV field, quoted only when it holds a :data:`_QUOTED` character."""
+    if _QUOTED.search(text) is None:
+        return text
+    return '"' + text.replace('"', '""') + '"'
+
+
+def _csv_line(fields: Sequence[str]) -> str:
+    """Return one CSV record, ending with ``\\n``, of the text ``fields``."""
+    if len(fields) == 1 and not fields[0]:
+        # Unquoted, a record of one empty field would be a blank line, which readers skip.
+        return '""\n'
+    return ",".join(map(_csv_field, fields)) + "\n"
+
+
+def _render_csv(frame: pd.DataFrame, spec: ExportSpec) -> bytes:
+    """Return the UTF-8 bytes of the CSV of a frame built by :func:`frame_for_export` for ``spec``.
+
+    The quoting rule of the module docstring is applied here rather than by the ``csv`` module,
+    whose writer leaves a carriage return unquoted under a ``\\n`` line end and whose handling of
+    NUL characters differs between Python versions. A character value the file cannot carry raises
+    ``ValueError`` (:func:`_char_fields`). Every other field is a number, a boolean or one of the
+    schema's column names, so encoding the finished text cannot fail.
+    """
+    label = _label(spec)
     columns = list(frame.columns)
-    fields = [_format_column(frame[column], spec.column_types[column]) for column in columns]
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, delimiter=",", quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
-    writer.writerow(columns)
-    writer.writerows(zip(*fields))
-    return buffer.getvalue()
+    fields = [
+        _format_column(frame[column], spec.column_types[column], f"{label} column {column}")
+        for column in columns
+    ]
+    lines = [_csv_line(columns), *(_csv_line(row) for row in zip(*fields))]
+    return "".join(lines).encode(_ENCODING)
 
 
 def read_exported_csv(path: str | os.PathLike[str], spec: ExportSpec) -> pd.DataFrame:
@@ -362,8 +425,10 @@ def write_program_outputs(result: ProgramResult, paths: RepoPaths) -> tuple[Path
     A halted run (S07-FLT-04, S07-FLT-05) writes nothing and returns ``()``, because a halting
     check stops the program before any export.
 
-    Every frame is built and every CSV rendered in memory first, so a schema drift
-    (``ValueError`` or ``TypeError``) writes nothing. Each target then goes through
+    Every frame is built and every CSV rendered and encoded as UTF-8 in memory first, so a schema
+    drift (``ValueError`` or ``TypeError``) writes nothing, and neither does a character value the
+    file cannot carry: a NUL character or text that UTF-8 cannot encode raises ``ValueError``
+    naming the export, the column and the data row. Each target then goes through
     ``check_write_destination`` (Agent Action Plan 0.8). Each resolved path must also equal its
     fixed destination under the resolved write root, so a target reached through a symlinked
     file or directory is refused even when the link stays inside the outputs tree. Any refusal
@@ -380,7 +445,7 @@ def write_program_outputs(result: ProgramResult, paths: RepoPaths) -> tuple[Path
     for spec in specs:
         destination = destinations[spec.name]
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with open(destination, "w", encoding="utf-8", newline="") as handle:
+        with open(destination, "wb") as handle:
             handle.write(payloads[spec.name])
     return tuple(destinations[spec.name] for spec in specs)
 

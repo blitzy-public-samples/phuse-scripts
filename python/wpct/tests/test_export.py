@@ -6,9 +6,12 @@ Units under test: ``wpct.export`` (``output_targets``, ``frame_for_export``,
 Export contract (Agent Action Plan 0.6.4): one CSV per ``schemas.EXPORTS`` spec in
 ``python/wpct/outputs/<program>/``, encoded as UTF-8. The header row holds the SAS variable names in
 ``spec.columns`` order, numbers are written with ``%.17g``, a missing value is an empty field, and
-rows are sorted by the record key (D-04, D-14). The record-level files carry the S02-TRN-03 and
-S07-TRN-04 keep lists, the LMM-TRN-07 derived records, and the pooled copy with ``studynum``
-(S07-TRN-05, S07-TRN-06), whose identifier ``'\\u00a0Pooled'`` must survive the encoding (D-16).
+rows are sorted by the record key (D-04, D-14). A field holding a comma, a double quote, a carriage
+return or a line feed is quoted, and a character value with a NUL character or text that UTF-8
+cannot encode raises ``ValueError`` before anything is written. The record-level files carry the
+S02-TRN-03 and S07-TRN-04 keep lists, the LMM-TRN-07 derived records, and the pooled copy with
+``studynum`` (S07-TRN-05, S07-TRN-06), whose identifier ``'\\u00a0Pooled'`` must survive the
+encoding (D-16).
 
 Write policy (Agent Action Plan 0.8, "Guard" and "Boundary tests"): every write in this module goes
 through the ``write_paths`` fixture, whose write root lies under pytest's ``tmp_path``. The
@@ -20,6 +23,7 @@ cases on a ``tmp_path`` write root also cover the checkout's fixed destinations.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -129,6 +133,22 @@ def _written_by_name(result: ProgramResult, paths: RepoPaths) -> dict[str, Path]
     written = export.write_program_outputs(result, paths)
     assert len(written) == len(names)
     return dict(zip(names, written, strict=True))
+
+
+def _with_param(result: ProgramResult, value: str) -> tuple[ProgramResult, int]:
+    """Return ``result`` with ``value`` as one ``css_anadata`` ``PARAM``, and that value's data row.
+
+    The value replaces the ``PARAM`` of the frame's first row in a copy, so the session result and
+    its frames stay unchanged. The data row is the 1-based position of the value in the exported
+    frame, which is sorted by the record key.
+    """
+    frame = result.dataset("css_anadata").copy()
+    frame.loc[frame.index[0], "PARAM"] = value
+    changed = dataclasses.replace(result, datasets={**result.datasets, "css_anadata": frame})
+    exported = export.frame_for_export(changed, export_spec(result.program_id, "css_anadata"))
+    rows = exported.index[exported["PARAM"] == value].tolist()
+    assert len(rows) == 1
+    return changed, rows[0] + 1
 
 
 # --- Round trip, keys and halted runs (AAP 0.6.4) -------------------------------------------------
@@ -242,6 +262,90 @@ def test_halted_result_writes_nothing(check: str, message: str, write_paths: Rep
 
     assert export.write_program_outputs(result, write_paths) == ()
     assert _tree(write_paths.write_root) == {}
+
+
+# --- Character values (AAP 0.6.4) -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("cr\rret", id="inner_cr"),
+        pytest.param("\r", id="lone_cr"),
+        pytest.param("abc\r", id="trailing_cr"),
+        pytest.param('say "hi",\r\nthen\rbye', id="crlf_comma_quote"),
+    ],
+)
+def test_round_trip_carriage_return(
+    value: str, result_07_02: ProgramResult, write_paths: RepoPaths
+) -> None:
+    """A character value holding a carriage return is quoted and reads back exactly (AAP 0.6.4).
+
+    ``value`` is one ``PARAM`` of a copy of the WPCT-F.07.02 ``css_anadata`` frame. Its field
+    must be quoted, with each double quote doubled, so ``csv.reader`` finds one record per data
+    row plus the header and returns the value intact, and ``read_exported_csv`` returns the
+    in-memory export frame exactly.
+    """
+    result, row = _with_param(result_07_02, value)
+    spec = export_spec(PROGRAM_07_02, "css_anadata")
+    expected = export.frame_for_export(result, spec)
+    path = _written_by_name(result, write_paths)["css_anadata"]
+
+    quoted = '"' + value.replace('"', '""') + '"'
+    assert f",{quoted},".encode() in path.read_bytes()
+    with open(path, encoding="utf-8", newline="") as handle:
+        records = list(csv.reader(handle))
+    assert len(records) == len(expected) + 1
+    assert records[row][spec.columns.index("PARAM")] == value
+    pd.testing.assert_frame_equal(export.read_exported_csv(path, spec), expected, check_exact=True)
+
+
+@pytest.mark.parametrize(
+    ("value", "cause"),
+    [
+        pytest.param("\x00nul", None, id="nul"),
+        pytest.param("bad\ud800", UnicodeEncodeError, id="lone_surrogate"),
+    ],
+)
+def test_rejects_unwritable_text(
+    value: str,
+    cause: type[Exception] | None,
+    result_07_02: ProgramResult,
+    write_paths: RepoPaths,
+    file_state: _FileState,
+) -> None:
+    """A character value the CSV cannot carry raises ``ValueError`` before any write (AAP 0.8).
+
+    ``value`` is one ``PARAM`` of a copy of the WPCT-F.07.02 ``css_anadata`` frame: a NUL
+    character, which CSV readers do not return intact, or a lone surrogate, which UTF-8 cannot
+    encode. The error names the export, the column and the data row but not the value, and chains
+    the encoding error. On an empty write root nothing is created. Over the files of a previous
+    clean run, the tree and every file's bytes and ``st_mtime_ns`` are unchanged.
+    """
+    result, row = _with_param(result_07_02, value)
+
+    with pytest.raises(ValueError) as excinfo:
+        export.write_program_outputs(result, write_paths)
+
+    message = str(excinfo.value)
+    assert f"{PROGRAM_07_02}/css_anadata column PARAM, data row {row}:" in message
+    assert value not in message
+    if cause is None:
+        assert excinfo.value.__cause__ is None
+    else:
+        assert isinstance(excinfo.value.__cause__, cause)
+    assert _tree(write_paths.write_root) == {}
+
+    previous = export.write_program_outputs(result_07_02, write_paths)
+    planted = _tree(write_paths.write_root)
+    before = {path: file_state(path) for path in previous}
+
+    with pytest.raises(ValueError) as rerun:
+        export.write_program_outputs(result, write_paths)
+
+    assert str(rerun.value) == message
+    assert _tree(write_paths.write_root) == planted
+    assert {path: file_state(path) for path in previous} == before
 
 
 # --- Protected destinations (AAP 0.8) -------------------------------------------------------------
