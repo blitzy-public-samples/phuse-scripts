@@ -127,6 +127,31 @@ def test_d13_in_list_false_for_missing(pairs, timepoint):
     assert_frame_equal(kept, _rows(advs, [0]))
 
 
+@pytest.mark.parametrize(
+    "missing", [float("nan"), np.nan, np.float32("nan")], ids=["float", "np.nan", "np.float32"]
+)
+@pytest.mark.parametrize("pairs", [PAIRS_07_02, PAIRS_07_07], ids=["07.02", "07.07"])
+def test_d13_missing_configured_timepoint_rejected(pairs, missing):
+    """D-13 for S02-FLT-01 and S07-FLT-01: a missing configured ATPTN is refused, never matched.
+
+    The SAS IN lists hold only non-missing timepoints [whitepapers/WPCT/WPCT-F.07.02.sas:92-93;
+    whitepapers/WPCT/WPCT-F.07.07.sas:148], so a missing ATPTN is never selected. pandas ``isin``
+    matches NaN to NaN, so a missing value added to the DIABP list would select the missing-ATPTN
+    record; the subset raises instead and leaves the input unchanged.
+    """
+    (code, timepoints), *others = pairs
+    configured = ((code, (*timepoints, missing)), *others)
+    advs = pd.DataFrame({"PARAMCD": ["DIABP", "DIABP"], "ATPTN": [815.0, np.nan]})
+    original = advs.copy()
+    assert advs["ATPTN"].isin([815.0, float(missing)]).tolist() == [True, True]
+
+    with pytest.raises(ValueError, match="ATPTN values of DIABP must be non-missing") as raised:
+        selection.subset_param_timepoints(advs, configured)
+
+    assert str(raised.value).endswith(f"got {[missing]!r}")
+    assert_frame_equal(advs, original)
+
+
 def test_s02_trn_02_abbreviate_treatment():
     """S02-TRN-02, S07-TRN-02 and D-12: the ``$6`` treatment abbreviation.
 
@@ -204,20 +229,56 @@ def test_s02_pop_01_and_flt_02_flag_filter(flags):
     _assert_flag_filter(flags, "ANL01FL")
 
 
-def test_s02_flt_03_exclude_baseline_visit():
+#: AVISITN dtypes: the float64 that ``pyreadstat`` returns, whose missing value is NaN, and the
+#: pandas nullable numeric dtypes, whose missing value is ``pd.NA``.
+VISIT_DTYPES = ("float64", "Int64", "Float64")
+
+
+def _visit_frame(dtype: str) -> pd.DataFrame:
+    """Six records whose AVISITN of ``dtype`` holds visit 0 twice and the missing value once."""
+    frame = pd.DataFrame(
+        {"SEQ": [1, 2, 3, 4, 5, 6], "AVISITN": pd.array([0, 2, 99, None, 0, 4], dtype=dtype)}
+    )
+    assert frame["AVISITN"].dtype == dtype
+    assert frame["AVISITN"].isna().tolist() == [False, False, False, True, False, False]
+    return frame
+
+
+@pytest.mark.parametrize(
+    ("dtype", "ne_missing"),
+    [("float64", True), ("Int64", pd.NA), ("Float64", pd.NA)],
+    ids=VISIT_DTYPES,
+)
+def test_s02_flt_03_exclude_baseline_visit(dtype, ne_missing):
     """S02-FLT-03 and D-13: ``where also avisitn ne 0`` drops visit 0 and keeps a missing AVISITN.
 
-    [whitepapers/WPCT/WPCT-F.07.02.sas:166-167]. The port relies on pandas ``NaN != 0`` being true,
-    as SAS ``. ne 0`` is.
+    [whitepapers/WPCT/WPCT-F.07.02.sas:166-167]. SAS ``. ne 0`` is true. pandas ``NaN != 0`` is
+    true too, but a nullable dtype's ``NA != 0`` is ``NA``, which the port resolves to true.
     """
-    frame = pd.DataFrame({"SEQ": [1, 2, 3, 4, 5, 6], "AVISITN": [0.0, 2.0, 99.0, np.nan, 0.0, 4.0]})
-    assert (frame["AVISITN"] != 0).tolist() == [False, True, True, True, False, True]
+    frame = _visit_frame(dtype)
+    assert (frame["AVISITN"] != 0).tolist() == [False, True, True, ne_missing, False, True]
 
     kept = selection.exclude_visit(frame, "AVISITN", 0)
 
     assert kept["SEQ"].tolist() == [2, 3, 4, 6]
     assert_frame_equal(kept, _rows(frame, [1, 2, 3, 5]))
     assert_frame_equal(selection.exclude_visit(frame), kept)
+
+
+@pytest.mark.parametrize("value", [None, np.nan], ids=["None", "NaN"])
+@pytest.mark.parametrize("dtype", VISIT_DTYPES)
+def test_s02_flt_03_exclude_missing_visit(dtype, value):
+    """S02-FLT-03 and D-13: a missing ``b_visn`` gives ``avisitn ne .``, dropping missing AVISITN.
+
+    [whitepapers/WPCT/WPCT-F.07.02.sas:166-167]. ``None`` and NaN both stand for the SAS missing
+    value ``.``, which equals every missing AVISITN, NaN and ``pd.NA`` alike.
+    """
+    frame = _visit_frame(dtype)
+
+    kept = selection.exclude_visit(frame, "AVISITN", value)
+
+    assert kept["SEQ"].tolist() == [1, 2, 3, 5, 6]
+    assert_frame_equal(kept, _rows(frame, [0, 1, 2, 4, 5]))
 
 
 def _assert_keep_variables(
@@ -459,6 +520,14 @@ def test_s07_trn_06_pooled_studynum_is_last(studies, expected):
     assert list(pairs.itertuples(index=False, name=None)) == expected
 
 
+def _assert_frame_returned(result, frame: pd.DataFrame) -> None:
+    """A passing halting check returns the frame unchanged, as a new frame with a fresh index."""
+    assert isinstance(result, pd.DataFrame)
+    assert result is not frame
+    assert isinstance(result.index, pd.RangeIndex)
+    assert_frame_equal(result, frame)
+
+
 @pytest.mark.parametrize(
     "keys", [POOLED_KEYS, "studyid usubjid paramcd atptn"], ids=["names", "sas-list"]
 )
@@ -466,23 +535,25 @@ def test_s07_trn_06_pooled_studynum_is_last(studies, expected):
     ("extra_record", "duplicates"),
     [
         # The pooled copy of 11-701-1015 becomes P1-701-1015, the pooled copy of 01-701-1015.
-        (("CDISCPILOT02", "11-701-1015", 81.0, 815.0, 2.0), 2),
+        (("CDISCPILOT02", "11-701-1015", 81.0, 815.0, 2.0), 1),
         # An exact copy duplicates its study's key group and its pooled key group.
-        (UNIQUE_RECORDS[2], 4),
+        (UNIQUE_RECORDS[2], 2),
     ],
     ids=["pooled-usubjid-collision", "duplicated-record"],
 )
 def test_unique_keys_halt(keys, extra_record, duplicates):
     """S07-FLT-05 [whitepapers/WPCT/WPCT-F.07.07.sas:244-245]: duplicate pooled keys halt.
 
-    ``%assert_unique_keys(css_anadata, studyid usubjid paramcd atptn)`` counts every record of each
-    duplicated key group (``SQLOBS``, [whitepapers/utilities/assert_unique_keys.sas:84-101]), and
-    ``%assert_continue`` then halts [whitepapers/utilities/assert_continue.sas:22-39]. Unique keys
-    let processing continue.
+    ``%assert_unique_keys(css_anadata, studyid usubjid paramcd atptn)`` selects only the grouped
+    keys, so its query returns one row per duplicated key group and ``SQLOBS`` counts those groups
+    [whitepapers/utilities/assert_unique_keys.sas:84-100]; ``%assert_continue`` then halts
+    [whitepapers/utilities/assert_continue.sas:22-39]. Unique keys let processing continue.
     """
     unique = _css_anadata(UNIQUE_RECORDS)
     assert len(unique) == 6
-    assert selection.assert_unique_keys(unique, keys, "CSS_ANADATA", PROGRAM_07_07) is None
+    _assert_frame_returned(
+        selection.assert_unique_keys(unique, keys, "CSS_ANADATA", PROGRAM_07_07), unique
+    )
     duplicated = _css_anadata([*UNIQUE_RECORDS, extra_record])
 
     with pytest.raises(AnalysisHalted) as raised:
@@ -491,8 +562,8 @@ def test_unique_keys_halt(keys, extra_record, duplicates):
     halt = raised.value
     assert str(halt) == halt.message
     assert halt.message == (
-        f"WPCT-F.07.07: assert_unique_keys failed: {duplicates} records in CSS_ANADATA "
-        "share keys STUDYID USUBJID PARAMCD ATPTN"
+        "WPCT-F.07.07: assert_unique_keys failed: unexpected duplicates in CSS_ANADATA with unique "
+        f"keys STUDYID USUBJID PARAMCD ATPTN (SQLOBS = {duplicates})"
     )
     assert (halt.program_id, halt.check, halt.checkpoints) == (
         PROGRAM_07_07,
@@ -510,7 +581,9 @@ def test_s07_flt_05_missing_last_key_not_counted():
     frame = _css_anadata([("CDISCPILOT01", "01-701-1015", 0.0, np.nan, -3.0)] * 2)
     assert len(frame) == 4
 
-    assert selection.assert_unique_keys(frame, POOLED_KEYS, "CSS_ANADATA", PROGRAM_07_07) is None
+    _assert_frame_returned(
+        selection.assert_unique_keys(frame, POOLED_KEYS, "CSS_ANADATA", PROGRAM_07_07), frame
+    )
 
 
 @pytest.mark.parametrize("var", ["CHG", "chg"], ids=["upper", "sas-name"])
@@ -524,9 +597,14 @@ def test_s07_flt_04_missing_chg_halts(var):
     """
     complete = _css_safana(UNIQUE_RECORDS)
     assert len(complete) == 3
-    assert selection.assert_var_nonmissing(complete, var, "CSS_SAFANA", PROGRAM_07_07) is None
+    _assert_frame_returned(
+        selection.assert_var_nonmissing(complete, var, "CSS_SAFANA", PROGRAM_07_07), complete
+    )
     missing_base = complete.assign(BASE=np.nan)
-    assert selection.assert_var_nonmissing(missing_base, var, "CSS_SAFANA", PROGRAM_07_07) is None
+    _assert_frame_returned(
+        selection.assert_var_nonmissing(missing_base, var, "CSS_SAFANA", PROGRAM_07_07),
+        missing_base,
+    )
     missing_chg = complete.copy()
     missing_chg.loc[[0, 2], "CHG"] = np.nan
 
@@ -576,3 +654,24 @@ def test_s07_halting_checks_halt_on_absent_variable(check, args, message):
 
     assert str(raised.value) == message
     assert raised.value.check == check.__name__
+
+
+@pytest.mark.parametrize(
+    ("check", "args"),
+    [
+        (selection.assert_var_nonmissing, ("CHG", "CSS_SAFANA")),
+        (selection.assert_unique_keys, (POOLED_KEYS, "CSS_ANADATA")),
+    ],
+    ids=["assert_var_nonmissing", "assert_unique_keys"],
+)
+def test_s07_flt_04_flt_05_empty_frame_returned(check, args):
+    """S07-FLT-04 and S07-FLT-05: an empty frame passes and comes back unchanged.
+
+    ``where=(missing(chg))`` selects no record, so ``NLOBSF`` is 0 and the check passes
+    [whitepapers/utilities/assert_var_nonmissing.sas:43-58]; the GROUP BY query returns no row, so
+    ``SQLOBS = 0`` and the check passes [whitepapers/utilities/assert_unique_keys.sas:84-104].
+    """
+    frame = _css_anadata(UNIQUE_RECORDS).iloc[:0]
+    assert frame.empty and "CHG" in frame and "ATPTN" in frame
+
+    _assert_frame_returned(check(frame, *args, PROGRAM_07_07), frame)

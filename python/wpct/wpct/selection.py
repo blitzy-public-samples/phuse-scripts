@@ -8,10 +8,10 @@ Spec items (``python/wpct/docs/sas_specification.md``):
   S07-TRN-05, S07-TRN-06 and S07-FLT-05.
 
 Every function is pure. It takes a DataFrame, never mutates it, and returns a new frame with a
-fresh ``RangeIndex``; the halting checks return nothing or raise. Filters keep the input row order,
-as a DATA step with WHERE does. Variables are found as SAS finds them: the exact spelling first,
-otherwise the one column whose name matches case-insensitively. Character comparisons ignore
-trailing blanks, and a blank value is missing (D-11).
+fresh ``RangeIndex``; the halting checks return the validated frame or raise. Filters keep the
+input row order, as a DATA step with WHERE does. Variables are found as SAS finds them: the exact
+spelling first, otherwise the one column whose name matches case-insensitively. Character
+comparisons ignore trailing blanks, and a blank value is missing (D-11).
 
 Only steps that change records or halt processing are ported. The ``attrib ... label=`` of
 ``trtp_short`` is presentation and has no counterpart here.
@@ -31,6 +31,7 @@ from wpct.sas_semantics import (
     assign_char,
     char_missing_mask,
     is_char_missing,
+    is_num_missing,
     prefix_match,
     sas_sort,
 )
@@ -197,6 +198,14 @@ def _timepoint_pairs(
         ]
         if invalid:
             raise TypeError(f"{caller}: ATPTN values of {paramcd} must be numbers, got {invalid!r}")
+        # The programs' IN lists hold only non-missing timepoints, so a missing ATPTN is never
+        # selected (D-13). A missing value in the list would make pandas isin select one, so it is
+        # refused rather than matched or silently ignored.
+        missing = [value for value in values if is_num_missing(value)]
+        if missing:
+            raise ValueError(
+                f"{caller}: ATPTN values of {paramcd} must be non-missing, got {missing!r}"
+            )
         pairs.append((paramcd.rstrip(SAS_BLANK), tuple(float(value) for value in values)))
     return pairs
 
@@ -222,8 +231,9 @@ def subset_param_timepoints(
     (D-13). A pair with no data contributes no records, and no pairs select no records. Every input
     variable is kept, in input order.
 
-    Raises ``KeyError`` when ``PARAMCD`` or ``ATPTN`` is absent and ``TypeError`` for a malformed
-    pair or a non-numeric ``ATPTN``.
+    Raises ``KeyError`` when ``PARAMCD`` or ``ATPTN`` is absent, ``TypeError`` for a malformed
+    pair or a non-numeric ``ATPTN``, and ``ValueError`` for a missing configured timepoint, which
+    would otherwise select the records whose ``ATPTN`` is missing.
     """
     caller = "subset_param_timepoints"
     pairs = _timepoint_pairs(param_timepoints)
@@ -296,7 +306,8 @@ def exclude_visit(
 
     Ports ``where also avisitn ne &b_visn`` with ``b_visn=0``
     [whitepapers/WPCT/WPCT-F.07.02.sas:166-167]. A missing ``AVISITN`` is not equal to 0, so it is
-    kept (D-13). ``value=None`` or NaN is the SAS missing value ``.``, so it drops the missing
+    kept (D-13); a ``pd.NA`` in a pandas nullable ``Int64`` or ``Float64`` column is kept the same
+    way as NaN. ``value=None`` or NaN is the SAS missing value ``.``, so it drops the missing
     records instead.
 
     Raises ``KeyError`` when ``var`` is absent and ``TypeError`` for a non-numeric ``var`` or
@@ -310,7 +321,7 @@ def exclude_visit(
     if value is None or math.isnan(value):
         keep = series.notna().to_numpy(dtype=bool)
     else:
-        keep = (series != value).to_numpy(dtype=bool)
+        keep = (series != value).to_numpy(dtype=bool, na_value=True)
     return df.loc[keep].reset_index(drop=True)
 
 
@@ -428,7 +439,9 @@ def assign_studynum(
 # --- Halting checks -------------------------------------------------------------------------------
 
 
-def assert_var_nonmissing(df: pd.DataFrame, var: str, dataset_name: str, program: str) -> None:
+def assert_var_nonmissing(
+    df: pd.DataFrame, var: str, dataset_name: str, program: str
+) -> pd.DataFrame:
     """Halt when ``var`` has a missing value (S07-FLT-04).
 
     Ports ``%assert_var_nonmissing(css_safana, &c_var)`` followed by ``%assert_continue``
@@ -443,7 +456,8 @@ def assert_var_nonmissing(df: pd.DataFrame, var: str, dataset_name: str, program
     missing, with the message ``"<program>: assert_var_nonmissing failed: <k> missing <VAR> in
     <DATASET>"``, for example ``"WPCT-F.07.07: assert_var_nonmissing failed: 2 missing CHG in
     CSS_SAFANA"``. It also halts when ``var`` is absent, as the macro's ``%assert_var_exist`` check
-    fails then. Returns None when every value is present, an empty frame included.
+    fails then. Returns the frame unchanged, as a new frame with a fresh index, when every value is
+    present, an empty frame included.
     """
     check = "assert_var_nonmissing"
     variable, dataset = var.upper(), dataset_name.upper()
@@ -461,15 +475,16 @@ def assert_var_nonmissing(df: pd.DataFrame, var: str, dataset_name: str, program
             program_id=program,
             check=check,
         )
+    return df.reset_index(drop=True)
 
 
-def _duplicate_records(df: pd.DataFrame, columns: list[str], caller: str) -> int:
-    """Return the record count of ``group by <keys> having count(<last key>) > 1``.
+def _duplicate_key_groups(df: pd.DataFrame, columns: list[str], caller: str) -> int:
+    """Return the row count of ``select <keys> ... group by <keys> having count(<last key>) > 1``.
 
-    The SELECT lists no summary function, so PROC SQL remerges the HAVING result with the data and
-    returns every record of each failing group: this count is the macro's ``SQLOBS``. GROUP BY puts
-    missing values in one group and ignores trailing blanks, and ``count`` counts non-missing values
-    only (D-13).
+    The SELECT lists only the grouped keys, so the query returns one row per key group that fails
+    HAVING; that row count is the macro's ``SQLOBS``
+    [whitepapers/utilities/assert_unique_keys.sas:84-99]. GROUP BY puts missing values in one group
+    and ignores trailing blanks, and ``count`` counts non-missing values only (D-13).
     """
     if df.empty:
         return 0
@@ -481,28 +496,32 @@ def _duplicate_records(df: pd.DataFrame, columns: list[str], caller: str) -> int
     )
     key_names = list(groups.columns)
     groups["counted"] = (~char_missing_mask(df[columns[-1]])).to_numpy(dtype=np.int64)
-    counts = groups.groupby(key_names, dropna=False, sort=False)["counted"].transform("sum")
+    counts = groups.groupby(key_names, dropna=False, sort=False)["counted"].sum()
     return int((counts > 1).sum())
 
 
 def assert_unique_keys(
     df: pd.DataFrame, keys: "str | Iterable[str]", dataset_name: str, program: str
-) -> None:
+) -> pd.DataFrame:
     """Halt when two or more records share the record key (S07-FLT-05).
 
     Ports ``%assert_unique_keys(css_anadata, studyid usubjid paramcd atptn)`` followed by
     ``%assert_continue`` [whitepapers/WPCT/WPCT-F.07.07.sas:244-245]. The macro runs ``group by
     <keys> having count(<last key>) > 1`` [whitepapers/utilities/assert_unique_keys.sas:84-101] and
-    fails when the query returns any record; a duplicated group whose last key is missing is not
+    fails when the query returns any row; a duplicated group whose last key is missing is not
     detected, because ``count`` skips missing values. On the real data the check passes
     [whitepapers/WPCT/outputs_sas/WPCT-F.07.07.log:459]. ``keys`` is a sequence, or one
     blank-separated string.
 
-    Raises ``AnalysisHalted`` with ``check="assert_unique_keys"`` when ``n > 0`` records fall in
-    duplicated key groups, with the message ``"<program>: assert_unique_keys failed: <n> records in
-    <DATASET> share keys <KEY1 KEY2 ...>"``. It also halts when no key is named or a key variable
-    is absent, as the macro fails then too [whitepapers/utilities/assert_unique_keys.sas:51-67].
-    Returns None when the keys are unique, an empty frame included.
+    Raises ``AnalysisHalted`` with ``check="assert_unique_keys"`` when ``n > 0`` key groups are
+    duplicated, where ``n`` is the macro's ``SQLOBS``, one per duplicated key group however many
+    records share it. The message mirrors the macro's ERROR line
+    [whitepapers/utilities/assert_unique_keys.sas:99-100]: ``"<program>: assert_unique_keys failed:
+    unexpected duplicates in <DATASET> with unique keys <KEY1 KEY2 ...> (SQLOBS = <n>)"``, so one
+    duplicated pair gives ``SQLOBS = 1``. It also halts when no key is named or a key variable is
+    absent, as the macro fails then too [whitepapers/utilities/assert_unique_keys.sas:51-67].
+    Returns the frame unchanged, as a new frame with a fresh index, when the keys are unique, an
+    empty frame included.
     """
     check = "assert_unique_keys"
     names = _name_list(keys, check)
@@ -522,11 +541,12 @@ def assert_unique_keys(
             program_id=program,
             check=check,
         )
-    duplicates = _duplicate_records(df, columns, check)
+    duplicates = _duplicate_key_groups(df, columns, check)
     if duplicates > 0:
         raise AnalysisHalted(
-            f"{program}: {check} failed: {duplicates} records in {dataset} share keys "
-            f"{' '.join(name.upper() for name in names)}",
+            f"{program}: {check} failed: unexpected duplicates in {dataset} with unique keys "
+            f"{' '.join(name.upper() for name in names)} (SQLOBS = {duplicates})",
             program_id=program,
             check=check,
         )
+    return df.reset_index(drop=True)

@@ -235,8 +235,8 @@ def test_export_keys_unique(
         ),
         pytest.param(
             "assert_unique_keys",
-            f"{PROGRAM_07_07}: assert_unique_keys failed: 2 records in CSS_ANADATA share keys "
-            "STUDYID USUBJID PARAMCD ATPTN",
+            f"{PROGRAM_07_07}: assert_unique_keys failed: unexpected duplicates in CSS_ANADATA "
+            "with unique keys STUDYID USUBJID PARAMCD ATPTN (SQLOBS = 1)",
             id="S07-FLT-05",
         ),
     ],

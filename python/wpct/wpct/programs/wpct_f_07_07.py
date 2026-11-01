@@ -329,7 +329,7 @@ def _record_derivation(
     }
 
 
-def _halting_check(log: _CheckpointLog, check: Callable[..., None], *args: object) -> None:
+def _halting_check(log: _CheckpointLog, check: Callable[..., pd.DataFrame], *args: object) -> None:
     """Run one halting check, re-raising its halt with the checkpoints recorded so far.
 
     ``%assert_continue`` stops all further processing
