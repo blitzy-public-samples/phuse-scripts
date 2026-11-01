@@ -22,7 +22,10 @@ so any module may depend on it.
   writes only below ``python/wpct/outputs/`` and to
   ``python/wpct/reports/equivalence_report.md`` under the write root, so every
   other target, including any fixed destination reached through a symlink
-  below the write root, is refused before it is opened.
+  below the write root or one that exists as anything but a regular file with
+  a single hard link, is refused before it is opened. A destination that
+  becomes one of those after that check is refused as it is opened, before it
+  is truncated.
 """
 
 from __future__ import annotations
@@ -132,9 +135,16 @@ class AnalysisHalted(WpctError):
 class OutputPathError(WpctError):
     """A write target is refused by the write policy.
 
-    Raised by ``paths.check_write_destination`` and by the writers' fixed-target
-    check in ``export`` and ``report`` (a fixed destination reached through a
-    symlink), before any directory is created or file opened. ``target`` is the
+    Raised by ``paths.check_write_destination`` and
+    ``paths.vet_fixed_destination`` before any directory is created or file
+    opened: a target outside the permitted destinations, a fixed destination
+    reached through a symlink below the write root, one below an entry that is
+    not a directory, or an existing one that is not a regular file or is a hard
+    link shared with another path. Raised as well by
+    ``paths.open_fixed_destination`` when the destination is found in one of
+    those states as it is opened, or, opened by path, the opened file is not at
+    the destination or the platform reports no path for it, before it is
+    truncated. ``target`` is the
     path as requested and ``resolved`` the path it resolves to once every
     symlink is followed, or its absolute form (``os.path.abspath``) when the
     target or the write root cannot be resolved; the message names both.

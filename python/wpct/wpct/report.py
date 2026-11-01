@@ -42,8 +42,7 @@ from wpct.compare import (
     compared_fields,
     count_statuses,
 )
-from wpct.errors import OutputPathError
-from wpct.paths import RepoPaths, check_write_destination
+from wpct.paths import RepoPaths, open_fixed_destination, vet_fixed_destination
 from wpct.programs import ModelRecord, ProgramResult
 from wpct.provenance import (
     STATUS_CHANGED,
@@ -788,20 +787,29 @@ def write_report(
     The destination is fixed: this function takes none (Agent Action Plan 0.8). The tolerance table
     is the ``Tolerances`` snapshot the comparison groups carry (``ComparisonGroup.tolerances``),
     the limits that produced their verdicts; ``tolerances.json`` is not read again, so an edit to
-    it after the comparisons ran cannot relabel them. The text is rendered in memory first. The
-    target then passes :func:`~wpct.paths.check_write_destination`, and its resolved form must be
-    the report path under the resolved write root, before any directory is created or the file
-    opened.
+    it after the comparisons ran cannot relabel them. The text is rendered and encoded as UTF-8
+    in memory first. The target then passes :func:`~wpct.paths.vet_fixed_destination` before any
+    directory is created or the file opened, and the bytes are written through
+    :func:`~wpct.paths.open_fixed_destination`, which opens the report through directory
+    descriptors without following a symlink and truncates it only once it is a regular file with a
+    single hard link. Where the platform has no such opens, as on Windows, it opens the report by
+    path and also requires, before truncating, that the opened file's own path be the report path.
 
     Raises:
         OSError: The reports directory cannot be created, or the report file cannot be opened or
             written.
-        OutputPathError: :func:`~wpct.paths.check_write_destination` refuses the report path
-            (it resolves outside the permitted destinations or cannot be resolved), or the path is
-            reached through a symlink below the write root: the report path itself or a directory
-            between it and the write root, leading anywhere else, inside or outside the checkout.
-            Symlinks at or above the write root itself are followed. Nothing is created or
-            modified.
+        OutputPathError: :func:`~wpct.paths.vet_fixed_destination` refuses the report path:
+            :func:`~wpct.paths.check_write_destination` refuses it (it resolves outside the
+            permitted destinations or cannot be resolved); the path is reached through a symlink
+            below the write root, the report path itself or a directory between it and the write
+            root, leading anywhere else, inside or outside the checkout; an existing entry on its
+            way is not a directory; or an existing report is not a regular file, such as a FIFO
+            or a directory, or is a hard link shared with another path. Symlinks at or above the
+            write root itself are followed. Nothing is created or modified. It is raised too when
+            the report path has become a symlink, a hard link or a special file between that check
+            and the open, or, opened by path, the opened file is not at the report path or the
+            platform reports no path for it; the report is then not truncated, though a directory
+            created on its way stays.
         TypeError, ValueError: As :func:`render_report`, ``paths`` is not a ``RepoPaths``, or no
             group carries a tolerance snapshot or the groups carry different ones; nothing is
             written.
@@ -811,19 +819,9 @@ def write_report(
     groups_by_program = _checked_groups(results, comparisons)
     tolerances = _applied_tolerances(groups_by_program)
     text = render_report(results, groups_by_program, provenance, tolerances)
+    payload = text.encode("utf-8")
     target = paths.report_file
-    resolved = check_write_destination(target, paths)
-    # The guard also accepts any path strictly below the outputs tree, so a reports directory
-    # symlinked into python/wpct/outputs would pass it. The write policy refuses a fixed destination
-    # reached through a symlink below the write root, so the resolved path must be the report path
-    # re-rooted at the resolved write root. Only symlinks at or above the write root itself are
-    # followed.
-    expected = paths.write_root.resolve() / target.relative_to(paths.write_root)
-    if resolved != expected:
-        raise OutputPathError(
-            target, resolved, f"the fixed destination {expected} is reached through a symlink"
-        )
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    with open(resolved, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
+    resolved = vet_fixed_destination(target, paths)
+    with open_fixed_destination(target, paths) as handle:
+        handle.write(payload)
     return resolved

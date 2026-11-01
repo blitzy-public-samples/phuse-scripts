@@ -4,8 +4,10 @@ This module and ``wpct.report`` are the package's only writers. Under the data r
 policy (Agent Action Plan 0.8), :func:`write_program_outputs` writes only to the fixed files below
 ``python/wpct/outputs/<program_id>/`` under ``paths.write_root``. It takes no destination argument,
 derives every target from :meth:`wpct.paths.RepoPaths.program_outputs_dir`, and passes every target
-of a call through :func:`wpct.paths.check_write_destination` before it creates a directory or opens
-a file. One rejection therefore leaves every target of the call unopened and unchanged.
+of a call through :func:`wpct.paths.vet_fixed_destination` before it creates a directory or opens
+a file. One rejection therefore leaves every target of the call unopened and unchanged. Each file
+is then opened through :func:`wpct.paths.open_fixed_destination`, which refuses a destination
+replaced since that check before truncating it.
 
 The exports (Agent Action Plan 0.6.4) let the port's datasets be joined record by record with
 their SAS counterparts. Their shapes come only from ``wpct.schemas.EXPORTS``; the spec items are
@@ -47,8 +49,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from wpct.errors import OutputPathError
-from wpct.paths import RepoPaths, check_write_destination
+from wpct.paths import RepoPaths, open_fixed_destination, vet_fixed_destination
 from wpct.programs import Checkpoint, ModelRecord, ProgramResult
 from wpct.sas_semantics import is_num_missing, sas_sort
 from wpct.schemas import BOOL, CHAR, EXPORTS, INT, NULLABLE_INT, NUM, ExportSpec
@@ -65,7 +66,6 @@ _RECORD_EXPORTS = {
 _TRUE = "True"
 _FALSE = "False"
 
-#: Encoding of every export file.
 _ENCODING = "utf-8"
 
 #: Characters that make a CSV field quoted: the delimiter, the quote character and both line-break
@@ -429,40 +429,28 @@ def write_program_outputs(result: ProgramResult, paths: RepoPaths) -> tuple[Path
     drift (``ValueError`` or ``TypeError``) writes nothing, and neither does a character value the
     file cannot carry: a NUL character or text that UTF-8 cannot encode raises ``ValueError``
     naming the export, the column and the data row. Each target then goes through
-    ``check_write_destination`` (Agent Action Plan 0.8). Each resolved path must also equal its
-    fixed destination under the resolved write root, so a target reached through a symlinked
-    file or directory is refused even when the link stays inside the outputs tree. Any refusal
-    raises :class:`~wpct.errors.OutputPathError` before a directory is created or a file is
-    opened. Only after every target passes are the directories created and the files written,
-    and only at the resolved paths the check returned.
+    :func:`~wpct.paths.vet_fixed_destination` (Agent Action Plan 0.8): it must pass
+    ``check_write_destination``, and its resolved path must equal its fixed destination under the
+    resolved write root, so a target reached through a symlinked file or directory below the write
+    root is refused even when the link stays inside the outputs tree. Symlinks at or above the
+    resolved write root are followed. An existing target must also be a regular file with a single
+    hard link, and every existing entry on its way a directory. Any refusal raises
+    :class:`~wpct.errors.OutputPathError` before a directory is created or a file is opened. Only
+    after every target passes are the directories created and the files written, at the paths the
+    check accepted, each through :func:`~wpct.paths.open_fixed_destination`. That opens it through
+    directory descriptors without following a symlink (or by path where the platform has no such
+    opens, then requiring the opened file's own path to be the target) and raises
+    ``OutputPathError`` before truncating it when it has become a symlink, a hard link or a special
+    file since the check, or was opened elsewhere; the files that earlier targets of the call wrote
+    then stay.
     """
     if result.halted:
         return ()
     specs = _program_specs(result.program_id)
     targets = output_targets(result, paths)
     payloads = {spec.name: _render_csv(frame_for_export(result, spec), spec) for spec in specs}
-    destinations = {spec.name: _vet_target(targets[spec.name], paths) for spec in specs}
+    destinations = {spec.name: vet_fixed_destination(targets[spec.name], paths) for spec in specs}
     for spec in specs:
-        destination = destinations[spec.name]
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with open(destination, "wb") as handle:
+        with open_fixed_destination(targets[spec.name], paths) as handle:
             handle.write(payloads[spec.name])
     return tuple(destinations[spec.name] for spec in specs)
-
-
-def _vet_target(target: Path, paths: RepoPaths) -> Path:
-    """Return the resolved ``target`` once the write guard accepts it as its own fixed destination."""
-    resolved = check_write_destination(target, paths)
-    # check_write_destination accepts any resolved path below the outputs tree, so a symlink there
-    # that leads to another file in the tree would pass it. The write policy refuses every fixed
-    # destination reached through a symlink, inside the checkout or outside it. The resolved path
-    # must therefore be the unresolved target re-rooted at the resolved write root. Only symlinks
-    # at or above the write root itself are followed.
-    expected = paths.write_root.resolve() / Path(target).relative_to(paths.write_root)
-    if resolved != expected:
-        raise OutputPathError(
-            target,
-            resolved,
-            f"the fixed destination {expected} is reached through a symlink",
-        )
-    return resolved

@@ -47,7 +47,7 @@ that writes nothing, namely the readers ``provenance.collect`` (git metadata and
 ``compare.load_tolerances`` and ``file_state``, and the guard ``check_write_destination``. The
 ``conftest.py`` session fixtures built on it only read. The guard applies one rule to every write
 root, so the symlink cases on a ``tmp_path`` write root also cover the checkout's fixed report
-destination.
+destination, and so do the hard-link, special-file and replaced-report cases.
 
 The content tests render the comparisons of a clean checkout, in which no full-precision SAS export
 is supplied (``clean_comparisons``). The report they check therefore does not depend on files a
@@ -66,12 +66,13 @@ import platform
 import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, NamedTuple
 
 import pytest
 
 import wpct.__main__ as cli
+import wpct.paths as wpct_paths
 from wpct import compare, provenance, report
 from wpct.errors import AnalysisHalted, InputDataError, OutputPathError
 from wpct.paths import REPORT_RELATIVE, RepoPaths, check_write_destination
@@ -2898,6 +2899,41 @@ def test_reproduce_rejected_destination_exits_2(
     assert _tree(write_paths.write_root) == expected
 
 
+def test_reproduce_nul_byte_write_root_exits_2(
+    write_paths: RepoPaths,
+    tmp_path: Path,
+    file_state: _FileState,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A write root holding a NUL byte makes ``reproduce`` exit 2, not raise (AAP 0.6.5, 0.8).
+
+    Outputs go only to fixed locations under ``python/wpct/`` (ENV-03). Here the write root of
+    ``write_paths`` is moved to ``sub\\x00dir`` inside it, a name no directory can have, so the guard
+    cannot resolve the first target of the WPCT-F.07.02 export call and refuses it with
+    ``OutputPathError`` instead of the ``ValueError`` that ``Path.resolve()`` raises. ``reproduce``
+    reports that refusal as one stderr error line naming the target and its absolute form with the
+    reason ``cannot resolve the destination``, and prints no traceback. stdout stays empty, the
+    real write root stays empty and the ``--sas-exports`` directory is unchanged.
+    """
+    exports_dir = _cli_exports_dir(tmp_path, {})
+    nul_paths = dataclasses.replace(write_paths, write_root=write_paths.write_root / "sub\x00dir")
+    target = nul_paths.program_outputs_dir(PROGRAM_07_02) / EXPORTS[PROGRAM_07_02][0].file_name
+    refusal = OutputPathError(target, os.path.abspath(target), "cannot resolve the destination: ")
+    exports_before = file_state(exports_dir)
+
+    code = cli.reproduce(nul_paths, exports_dir)
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_INPUT_ERROR == 2, captured.err
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    errors = _cli_errors(captured.err)
+    assert len(errors) == 1, captured.err
+    assert errors[0].startswith(_CLI_ERROR_PREFIX + str(refusal)), errors[0]
+    assert _tree(write_paths.write_root) == {}
+    assert file_state(exports_dir) == exports_before == []
+
+
 # --- Write-destination guard (Agent Action Plan 0.8) ----------------------------------------------
 
 
@@ -3052,6 +3088,348 @@ def test_rejects_reports_dir_linked_into_outputs_tree(
     assert excinfo.value.resolved == linked
     assert file_state(decoy) == decoy_before == []
     assert _tree(write_paths.write_root) == planted
+
+
+#: How ``wpct.paths.open_fixed_destination`` binds a write: ``dir_fd``, through directory
+#: descriptors, or ``path``, its fallback for platforms whose ``os.open`` takes no ``dir_fd``.
+_STRATEGIES = ("dir_fd", "path")
+
+#: The entry each replaced-report case swaps in after the preflight, and the refusal reason
+#: ``write_report`` must then give.
+_SWAP_REASONS = {
+    "final_symlink": "is reached through a symlink",
+    "final_hard_link": "is a hard link shared with 1 other path(s)",
+    "final_fifo": "not a regular file",
+    "ancestor_symlink": "is reached through a symlink",
+}
+
+
+def _hard_link(link: Path, target: Path) -> None:
+    """Create ``link`` as a hard link to ``target``, or skip where the file system refuses one."""
+    try:
+        os.link(target, link)
+    except OSError as exc:
+        pytest.skip(f"hard links not supported here: {exc}")
+
+
+def _fifo(path: Path) -> None:
+    """Create a FIFO at ``path``, or skip where the platform has none."""
+    mkfifo = getattr(os, "mkfifo", None)
+    if mkfifo is None:
+        pytest.skip("FIFOs not supported on this platform")
+    try:
+        mkfifo(path)
+    except OSError as exc:
+        pytest.skip(f"FIFOs not supported here: {exc}")
+
+
+def _use_strategy(strategy: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``open_fixed_destination`` bind writes by ``strategy``, or skip where it cannot."""
+    if strategy == "path":
+        monkeypatch.setattr(wpct_paths, "_DIR_FD_WRITES", False)
+    elif not wpct_paths._DIR_FD_WRITES:
+        pytest.skip("this platform cannot open files relative to a directory descriptor")
+
+
+@pytest.mark.parametrize("entry", ["hard_link", "fifo", "directory"])
+def test_rejects_unsafe_existing_report(
+    entry: str,
+    write_paths: RepoPaths,
+    results: Mapping[str, object],
+    clean_comparisons: _Comparisons,
+    tmp_path: Path,
+    file_state: _FileState,
+) -> None:
+    """A report path that aliases another file or is no regular file is refused (AAP 0.8).
+
+    Outputs go only to fixed locations under ``python/wpct/`` (ENV-03), and no write may change a
+    SAS-era file or a file outside the write root. Resolving a path follows symlinks but not hard
+    links (CWE-59), so the entry itself is checked:
+
+    - ``hard_link``: the report path is a hard link to a stand-in, under ``tmp_path``, for a SAS-era
+      file or an external SAS export.
+    - ``fifo``: the report path is a FIFO, which an ordinary open for writing waits on until a
+      reader appears.
+    - ``directory``: the report path is a directory.
+
+    ``write_report`` must raise ``OutputPathError`` naming the report path and why, at once and
+    before it creates a directory or opens a file: the stand-in's bytes and ``st_mtime_ns`` are
+    unchanged and the write root holds only what the test planted.
+    """
+    report_file = write_paths.report_file
+    report_file.parent.mkdir(parents=True)
+    sentinel = tmp_path / "sentinel.csv"
+    sentinel.write_bytes(_SAS_EXPORT_STANDIN)
+    if entry == "fifo":
+        _fifo(report_file)
+        reason = "is a FIFO, not a regular file"
+    elif entry == "directory":
+        report_file.mkdir()
+        reason = "is a directory, not a regular file"
+    else:
+        _hard_link(report_file, sentinel)
+        reason = "is a hard link shared with 1 other path(s)"
+    planted = _tree(write_paths.write_root)
+    sentinel_before = file_state(sentinel)
+    facts = provenance.collect(write_paths)
+
+    with pytest.raises(OutputPathError) as excinfo:
+        report.write_report(results, clean_comparisons, facts, write_paths)
+
+    error = excinfo.value
+    assert error.target == report_file
+    assert error.resolved == report_file.resolve()
+    assert f"the fixed destination {report_file.resolve()} {reason}" in str(error)
+    assert file_state(sentinel) == sentinel_before
+    assert _tree(write_paths.write_root) == planted
+
+
+@pytest.mark.parametrize("strategy", _STRATEGIES)
+def test_rewrites_existing_report(
+    strategy: str,
+    monkeypatch: pytest.MonkeyPatch,
+    write_paths: RepoPaths,
+    results: Mapping[str, object],
+    clean_comparisons: _Comparisons,
+) -> None:
+    """A report already on disk is rewritten in place, truncated first (AAP 0.8).
+
+    Outputs go only to fixed locations under ``python/wpct/`` (ENV-03), and the report destination
+    is that one file, so a second run writes the same file again instead of placing a new one
+    beside it. ``strategy`` selects how ``open_fixed_destination`` binds the write: ``dir_fd`` or
+    the ``path`` fallback, which must also create the directories of the first write. After a
+    first clean write, a stale tail is appended to the report. A second write must return the same
+    path and leave the file with the first write's UTF-8 bytes, its inode and a single hard link,
+    in an unchanged tree.
+    """
+    _use_strategy(strategy, monkeypatch)
+    facts = provenance.collect(write_paths)
+    first = report.write_report(results, clean_comparisons, facts, write_paths)
+    content = first.read_bytes()
+    inode = os.stat(first).st_ino
+    with open(first, "ab") as handle:
+        handle.write(b"stale tail\n" * 1000)
+    tree = _tree(write_paths.write_root)
+
+    second = report.write_report(results, clean_comparisons, facts, write_paths)
+
+    assert second == first == write_paths.report_file.resolve()
+    assert second.read_bytes() == content
+    assert content.decode("utf-8").endswith("\n")
+    assert os.stat(second).st_ino == inode
+    assert os.stat(second).st_nlink == 1
+    assert _tree(write_paths.write_root) == tree
+
+
+@pytest.mark.parametrize("swap", list(_SWAP_REASONS))
+@pytest.mark.parametrize("strategy", _STRATEGIES)
+def test_refuses_report_replaced_after_vetting(
+    strategy: str,
+    swap: str,
+    monkeypatch: pytest.MonkeyPatch,
+    write_paths: RepoPaths,
+    results: Mapping[str, object],
+    clean_comparisons: _Comparisons,
+    tmp_path: Path,
+    file_state: _FileState,
+) -> None:
+    """A report path replaced after the preflight is refused before it is written (AAP 0.8).
+
+    Outputs go only to fixed locations under ``python/wpct/`` (ENV-03), and no write may follow a
+    symlink below the write root or change another path's file, even when an entry changes
+    between the check and the open (CWE-367). Over a first clean write of the report,
+    ``report.vet_fixed_destination`` is wrapped so that, as soon as it has accepted the report path
+    on the second call, an entry staged beforehand is renamed into place:
+
+    - ``final_symlink``: the report file becomes a symlink to an external stand-in for a SAS-export
+      CSV, in a directory outside the write root.
+    - ``final_hard_link``: the report file becomes a hard link to that stand-in.
+    - ``final_fifo``: the report file becomes a FIFO without a reader.
+    - ``ancestor_symlink``: ``python/wpct/reports`` becomes a symlink to the external directory.
+
+    ``strategy`` selects how ``open_fixed_destination`` binds the write (``dir_fd`` or the ``path``
+    fallback). ``write_report`` must raise ``OutputPathError`` at once, naming the report path and
+    the reason. The stand-in's bytes and ``st_mtime_ns`` and the external directory's listing are
+    unchanged, and the write root holds what it held after the swap.
+    """
+    _use_strategy(strategy, monkeypatch)
+    report_file = write_paths.report_file
+    facts = provenance.collect(write_paths)
+    report.write_report(results, clean_comparisons, facts, write_paths)
+    external_dir = tmp_path / "external_dir"
+    external_dir.mkdir()
+    sentinel = external_dir / "sentinel.csv"
+    sentinel.write_bytes(_SAS_EXPORT_STANDIN)
+    replaced = report_file.parent if swap == "ancestor_symlink" else report_file
+    staged = replaced.with_name("staged")
+    if swap == "final_symlink":
+        _symlink(staged, sentinel)
+    elif swap == "final_hard_link":
+        _hard_link(staged, sentinel)
+    elif swap == "final_fifo":
+        _fifo(staged)
+    else:
+        _symlink(staged, external_dir)
+    after_swap: list[dict[str, str]] = []
+    vet = report.vet_fixed_destination
+
+    def vet_then_swap(target: str | os.PathLike[str], paths: RepoPaths) -> Path:
+        resolved = vet(target, paths)
+        if swap == "ancestor_symlink":
+            replaced.rename(tmp_path / "replaced_dir")
+        os.replace(staged, replaced)
+        after_swap.append(_tree(write_paths.write_root))
+        return resolved
+
+    monkeypatch.setattr(report, "vet_fixed_destination", vet_then_swap)
+    sentinel_before = file_state(sentinel)
+    external_before = file_state(external_dir)
+
+    with pytest.raises(OutputPathError) as excinfo:
+        report.write_report(results, clean_comparisons, facts, write_paths)
+
+    assert len(after_swap) == 1
+    assert excinfo.value.target == report_file
+    assert _SWAP_REASONS[swap] in str(excinfo.value)
+    assert file_state(sentinel) == sentinel_before
+    assert file_state(external_dir) == external_before == ["sentinel.csv"]
+    assert _tree(write_paths.write_root) == after_swap[0]
+
+
+#: The cases in which the ``path`` fallback opens a file it cannot show to be the report path.
+_UNBOUND_OPENS = ("ancestor_swapped_during_open", "unidentified_handle")
+
+
+def _swap_ancestor_during_open(
+    patched: pytest.MonkeyPatch, target: Path, ancestor: Path, staged: Path, parked: Path
+) -> list[str]:
+    """Swap the directory ``ancestor`` for the symlink ``staged`` while ``target`` is opened.
+
+    Through ``patched``, ``wpct.paths`` gets a copy of ``os`` whose ``open`` and ``lstat`` schedule
+    a concurrent process against that module's own calls, leaving path resolution elsewhere as it
+    is: just before ``target`` is opened by path, ``ancestor`` moves to ``parked`` and ``staged``
+    takes its place; right after the open the real directory is back, for a later check of the
+    path to find, and the next ``os.lstat`` of ``ancestor`` swaps the symlink in again, so a last
+    lookup of ``target`` would reach the file the symlink leads to. Returns the swaps made, in
+    order.
+    """
+    opened_at, watched = target.resolve(), ancestor.resolve()
+    real_open, real_lstat = os.open, os.lstat
+    swaps: list[str] = []
+
+    def to_symlink() -> None:
+        ancestor.rename(parked)
+        staged.rename(ancestor)
+
+    def to_directory() -> None:
+        ancestor.rename(staged)
+        parked.rename(ancestor)
+
+    def open_during_swap(
+        path: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        if dir_fd is None and not swaps and Path(path) == opened_at:
+            to_symlink()
+            swaps.append("open")
+            try:
+                return real_open(path, flags, mode)
+            finally:
+                to_directory()
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def lstat_then_relink(
+        path: str | os.PathLike[str], *, dir_fd: int | None = None
+    ) -> os.stat_result:
+        info = real_lstat(path, dir_fd=dir_fd)
+        if swaps == ["open"] and Path(path) == watched:
+            to_symlink()
+            swaps.append("lstat")
+        return info
+
+    scheduled_os = SimpleNamespace(**vars(os))
+    scheduled_os.open = open_during_swap
+    scheduled_os.lstat = lstat_then_relink
+    patched.setattr(wpct_paths, "os", scheduled_os)
+    return swaps
+
+
+@pytest.mark.parametrize("case", _UNBOUND_OPENS)
+def test_path_fallback_refuses_unbound_report_open(
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+    write_paths: RepoPaths,
+    results: Mapping[str, object],
+    clean_comparisons: _Comparisons,
+    tmp_path: Path,
+    file_state: _FileState,
+) -> None:
+    """The ``path`` fallback truncates only a report it shows to be the report path (AAP 0.8).
+
+    Outputs go only to fixed locations under ``python/wpct/`` (ENV-03), and no write may follow a
+    symlink below the write root, even one swapped in and out while the file is opened (CWE-367).
+    After a first clean write of the report with the ``path`` fallback, a directory outside the
+    write root holds a stand-in for a SAS-export CSV named ``equivalence_report.md``, and the
+    second call meets one case:
+
+    - ``ancestor_swapped_during_open``: ``python/wpct/reports`` is a symlink to that directory only
+      while the report is opened; the real directory is back for a later check of the path, and
+      the symlink again for a last lookup of the file, so a fallback that checked paths alone
+      would truncate the stand-in.
+    - ``unidentified_handle``: the platform reports no path for the opened file
+      (``wpct.paths._opened_path`` returns ``None``).
+
+    ``write_report`` must raise ``OutputPathError`` for the report path with the reason, and close
+    the descriptor it opened. The report of the first write and the stand-in keep their bytes and
+    ``st_mtime_ns``, the external directory its listing, and the write root its tree.
+    """
+    _use_strategy("path", monkeypatch)
+    report_file = write_paths.report_file
+    facts = provenance.collect(write_paths)
+    written = report.write_report(results, clean_comparisons, facts, write_paths)
+    external_dir = tmp_path / "external_dir"
+    external_dir.mkdir()
+    standin = external_dir / report_file.name
+    standin.write_bytes(_SAS_EXPORT_STANDIN)
+    staged = tmp_path / "staged_link"
+    _symlink(staged, external_dir)
+    report_before = file_state(written)
+    standin_before = file_state(standin)
+    external_before = file_state(external_dir)
+    tree = _tree(write_paths.write_root)
+    locate = wpct_paths._opened_path
+    located: list[int] = []
+
+    def locate_recorded(descriptor: int) -> str | None:
+        located.append(descriptor)
+        return None if case == "unidentified_handle" else locate(descriptor)
+
+    swaps: list[str] = []
+    with monkeypatch.context() as patched:
+        patched.setattr(wpct_paths, "_opened_path", locate_recorded)
+        if case == "ancestor_swapped_during_open":
+            swaps = _swap_ancestor_during_open(
+                patched, report_file, report_file.parent, staged, tmp_path / "parked_dir"
+            )
+        with pytest.raises(OutputPathError) as excinfo:
+            report.write_report(results, clean_comparisons, facts, write_paths)
+
+    error = excinfo.value
+    destination = report_file.resolve()
+    assert error.target == report_file
+    assert error.resolved == destination == written
+    if case == "ancestor_swapped_during_open":
+        assert swaps[:1] == ["open"]
+        reason = f"{destination} was opened at {standin.resolve()}, not at itself"
+    else:
+        reason = f"{destination}: the platform reports no path for the opened file"
+    assert f"the fixed destination {reason}" in str(error)
+    assert len(located) == 1
+    with pytest.raises(OSError):
+        os.fstat(located[0])
+    assert file_state(written) == report_before
+    assert file_state(standin) == standin_before
+    assert file_state(external_dir) == external_before
+    assert _tree(write_paths.write_root) == tree
 
 
 # --- Command line (Agent Action Plan 0.6.5, 0.8) --------------------------------------------------
