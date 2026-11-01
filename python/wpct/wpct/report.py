@@ -1,0 +1,713 @@
+"""Equivalence report of the WPCT Python port: the Markdown renderer and its guarded writer.
+
+:func:`render_report` turns the program runs, their comparison groups (``wpct.compare``), the
+provenance facts (``wpct.provenance``) and the tolerances (``python/wpct/tolerances.json``) into
+the text of ``python/wpct/reports/equivalence_report.md`` (Agent Action Plan 0.7.5). The sections
+follow :data:`SECTION_TITLES`: Provenance, with the tolerance table before any result; Summary;
+one section per program, WPCT-F.07.02 then WPCT-F.07.07; Not compared; Source integrity.
+:func:`write_report` writes that text to the single fixed report destination under the write
+root, once the write-destination guard has accepted it (Agent Action Plan 0.8). The report is
+committed as produced and never edited by hand.
+
+The text is deterministic for a given checkout and environment. It has no timestamp and no
+absolute path, rows keep the order ``wpct.compare`` gave them, and every count comes from
+:func:`wpct.compare.count_statuses`, which keeps PASS, FAIL and NOT COMPARED apart, so a NOT
+COMPARED row is never counted as PASS. The tolerance table is rendered from the loaded tolerance
+file, so this module states no tolerance of its own. The report claims no equivalence for a NOT
+COMPARED quantity, and where only rounded SAS listings exist it says so in the wording
+:data:`ROUNDED_NOTE_TEMPLATE` fixes.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
+
+from wpct.compare import (
+    FAIL,
+    GROUP_LISTING_MERGED_PVAL,
+    GROUP_LISTING_PARAMETER_ESTIMATES,
+    GROUP_NOT_COMPARED,
+    NOT_COMPARED,
+    PASS,
+    STATUSES,
+    ComparisonGroup,
+    ComparisonRow,
+    Tolerances,
+    count_statuses,
+    load_tolerances,
+)
+from wpct.errors import OutputPathError
+from wpct.paths import RepoPaths, check_write_destination
+from wpct.programs import ModelRecord, ProgramResult
+from wpct.provenance import (
+    STATUS_CHANGED,
+    STATUS_UNCHANGED,
+    UNAVAILABLE,
+    IntegrityRow,
+    Provenance,
+)
+from wpct.schemas import PROGRAMS
+
+__all__ = [
+    "REPORT_TITLE",
+    "ROUNDED_NOTE_TEMPLATE",
+    "SECTION_TITLES",
+    "render_report",
+    "write_report",
+]
+
+#: The level-1 heading of the report.
+REPORT_TITLE = "WPCT Python port — equivalence report"
+
+#: The level-2 section headings, in report order (Agent Action Plan 0.7.5).
+SECTION_TITLES: tuple[str, ...] = (
+    "Provenance",
+    "Summary",
+    *PROGRAMS,
+    "Not compared",
+    "Source integrity",
+)
+
+#: The wording every rounded-reference group carries (Agent Action Plan 0.7.5).
+ROUNDED_NOTE_TEMPLATE = (
+    "Rounded reference only: agreement is shown at the precision displayed in `{file}` "
+    "(`{d}` decimals; `<.0001` as a bound). Equivalence within the full-precision tolerance "
+    "`{rule}` is not established for these quantities."
+)
+
+#: Displayed decimals of the listing values each rounded group compares
+#: [whitepapers/WPCT/outputs_sas/WPCT-F.07.02.lst:8-14].
+_ROUNDED_DECIMALS: Mapping[str, str] = {
+    GROUP_LISTING_PARAMETER_ESTIMATES: "8 (Estimate, StdErr), 2 (t Value), 4 (Pr > |t|)",
+    GROUP_LISTING_MERGED_PVAL: "4",
+}
+
+_ROW_COLUMNS = (
+    "Quantity",
+    "Stratum",
+    "SAS value",
+    "Python value",
+    "Difference",
+    "Tolerance",
+    "Result",
+)
+_REASON_COLUMN = "Reason"
+
+#: Keys of a tolerance class that have their own table column; every other key is a setting.
+_TOLERANCE_COLUMN_KEYS = ("label", "rule", "limit", "fields", "applies_to")
+#: Top-level keys of the tolerance file rendered on their own lines rather than as extra keys.
+_TOLERANCE_TOP_KEYS = ("schema_version", "description", "classes")
+
+_NONE = "—"
+_MISSING = "."
+
+# "<" followed by a letter, "/", "!" or "?" would open raw HTML in Markdown and hide the text, as
+# for the pooled identifier that wpct.compare renders as "<A0>Pooled" (D-16).
+_HTML_START = re.compile(r"<(?=[A-Za-z/!?])")
+
+
+# --- Text and number formatting -------------------------------------------------------------------
+
+
+def _format_number(value: object) -> str:
+    """Render a number deterministically: integers as written, other floats in shortest round-trip
+    form (``repr``), and ``None`` or NaN as the SAS missing value ``.``."""
+    if value is None:
+        return _MISSING
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return _MISSING
+        if value.is_integer() and abs(value) < 1e16:
+            return str(int(value))
+        return repr(value)
+    return str(value)
+
+
+def _format_setting(value: object) -> str:
+    """Render a value of the tolerance file as its JSON spelling would read."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        return "; ".join(f"{key} = {_format_setting(item)}" for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return " ".join(_format_setting(item) for item in value)
+    return _format_number(value)
+
+
+def _flatten(text: object) -> str:
+    return " ".join(str(text).splitlines())
+
+
+def _cell(text: object) -> str:
+    """Escape one table cell: one line, ``|`` escaped, no raw-HTML opening ``<``."""
+    return _HTML_START.sub(r"\\<", _flatten(text).replace("|", "\\|"))
+
+
+def _code(text: object) -> str:
+    """Render ``text`` as an inline code span that is also safe inside a table cell."""
+    value = _flatten(text)
+    if not value or "`" in value:
+        return _cell(value)
+    # GFM splits table cells before parsing code spans, so "|" needs its escape here too.
+    escaped = value.replace("|", "\\|")
+    return f"`{escaped}`"
+
+
+def _table(header: Sequence[str], rows: Iterable[Sequence[str]]) -> list[str]:
+    """A Markdown table; header and cells must already be escaped."""
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "|" + "|".join("---" for _ in header) + "|",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return lines
+
+
+def _status_counts(counts: Mapping[str, int]) -> str:
+    return ", ".join(f"{status} {counts[status]}" for status in STATUSES)
+
+
+def _repo_relative(path: Path, paths: RepoPaths) -> str:
+    """``path`` relative to the checkout with forward slashes: the report holds no absolute path."""
+    return path.relative_to(paths.repo_root).as_posix()
+
+
+# --- Input checks ---------------------------------------------------------------------------------
+
+
+def _checked_inputs(
+    results: Mapping[str, ProgramResult],
+    comparisons: Mapping[str, Sequence[ComparisonGroup]],
+    provenance: Provenance,
+    tolerances: Tolerances,
+) -> dict[str, tuple[ComparisonGroup, ...]]:
+    """Validate the inputs of :func:`render_report`; return each program's groups as a tuple.
+
+    Both mappings must hold exactly the programs of ``wpct.schemas.PROGRAMS``, each result must
+    belong to its key and each group to its program, so no program section can be left out or
+    filled with another program's rows.
+    """
+    if not isinstance(provenance, Provenance):
+        raise TypeError(f"provenance must be a Provenance, got {type(provenance).__name__}")
+    if not isinstance(tolerances, Tolerances):
+        raise TypeError(f"tolerances must be a Tolerances, got {type(tolerances).__name__}")
+    for name, mapping in (("results", results), ("comparisons", comparisons)):
+        if not isinstance(mapping, Mapping):
+            raise TypeError(
+                f"{name} must be a mapping keyed by program, got {type(mapping).__name__}"
+            )
+        missing = [program for program in PROGRAMS if program not in mapping]
+        unknown = sorted(str(key) for key in mapping if key not in PROGRAMS)
+        if missing or unknown:
+            raise ValueError(
+                f"{name} must hold exactly the programs {', '.join(PROGRAMS)}; "
+                f"missing: {', '.join(missing) or 'none'}; unknown: {', '.join(unknown) or 'none'}"
+            )
+    groups_by_program: dict[str, tuple[ComparisonGroup, ...]] = {}
+    for program in PROGRAMS:
+        result = results[program]
+        if not isinstance(result, ProgramResult):
+            raise TypeError(f"results[{program!r}] must be a ProgramResult, got {result!r}")
+        if result.program_id != program:
+            raise ValueError(f"results[{program!r}] is the run of {result.program_id}")
+        groups = comparisons[program]
+        if isinstance(groups, (str, ComparisonGroup)):
+            raise TypeError(f"comparisons[{program!r}] must be a sequence of ComparisonGroup")
+        groups = tuple(groups)
+        for position, group in enumerate(groups):
+            if not isinstance(group, ComparisonGroup):
+                raise TypeError(
+                    f"comparisons[{program!r}][{position}] must be a ComparisonGroup, got {group!r}"
+                )
+            if group.program != program:
+                raise ValueError(
+                    f"comparisons[{program!r}][{position}] ({group.key}) belongs to {group.program}"
+                )
+        groups_by_program[program] = groups
+    return groups_by_program
+
+
+# --- Provenance -----------------------------------------------------------------------------------
+
+
+def _integrity_statement(provenance: Provenance) -> str:
+    """What the Source integrity section shows, including when nothing was verified."""
+    total = len(provenance.integrity)
+    if not provenance.git_available:
+        return "git is unavailable, so integrity was not verified."
+    if not provenance.integrity_verified:
+        return (
+            f"the upstream commit {provenance.upstream_commit} is unavailable in this checkout, "
+            "so integrity was not verified."
+        )
+    changed = sum(1 for row in provenance.integrity if row.status != STATUS_UNCHANGED)
+    if changed:
+        return (
+            f"{changed} of {total} read-only inputs differ from their blobs at the upstream commit "
+            "(see Source integrity)."
+        )
+    return f"all {total} read-only inputs match their blobs at the upstream commit."
+
+
+def _tolerance_lines(tolerances: Tolerances, paths: RepoPaths) -> list[str]:
+    """The tolerance table, rendered from the loaded file so the report cannot restate a limit."""
+    raw = tolerances.raw
+    lines = [
+        "### Tolerances",
+        "",
+        (
+            f"Rendered from {_code(_repo_relative(paths.tolerances_file, paths))} "
+            f"(schema version {_format_setting(raw['schema_version'])}), the single tolerance "
+            "source; every comparison below applies these values."
+        ),
+        "",
+    ]
+    if raw.get("description"):
+        lines.extend([f"File description: {_flatten(raw['description'])}", ""])
+    for key, value in raw.items():
+        if key not in _TOLERANCE_TOP_KEYS:
+            lines.extend([f"{_cell(key)}: {_cell(_format_setting(value))}", ""])
+    rows = []
+    for class_key in tolerances.classes:
+        entry = tolerances.entry(class_key)
+        settings = "; ".join(
+            f"{name} = {_format_setting(value)}"
+            for name, value in entry.items()
+            if name not in _TOLERANCE_COLUMN_KEYS
+        )
+        rows.append(
+            (
+                _code(class_key),
+                _cell(entry["label"]),
+                _cell(entry["rule"]),
+                _cell(_format_setting(entry["limit"])) if "limit" in entry else _NONE,
+                _cell(settings) if settings else _NONE,
+                _cell(_format_setting(entry["fields"])) if "fields" in entry else _NONE,
+                _cell(entry["applies_to"]),
+            )
+        )
+    lines.extend(
+        _table(
+            ("Class", "Label", "Rule", "Limit", "Settings", "Fields", "Applies to"),
+            rows,
+        )
+    )
+    return lines
+
+
+def _provenance_lines(
+    provenance: Provenance, tolerances: Tolerances, paths: RepoPaths
+) -> list[str]:
+    head = provenance.head_commit
+    lines = [
+        "## Provenance",
+        "",
+        (
+            f"- Upstream commit, the commit the port was built against: "
+            f"{_code(provenance.upstream_commit)}"
+        ),
+        (
+            f"- Checkout `HEAD` when the report was generated (`git rev-parse HEAD`): "
+            f"{UNAVAILABLE if head == UNAVAILABLE else _code(head)}"
+        ),
+        f"- Python: {_code(provenance.python_version)}",
+        f"- Source integrity: {_integrity_statement(provenance)}",
+        "",
+        "### Library versions",
+        "",
+    ]
+    lines.extend(
+        _table(
+            ("Package", "Version"),
+            (
+                (_cell(name), _cell(version))
+                for name, version in provenance.library_versions.items()
+            ),
+        )
+    )
+    lines.append("")
+    lines.extend(_tolerance_lines(tolerances, paths))
+    spec = _repo_relative(paths.spec_file, paths)
+    lines.extend(
+        [
+            "",
+            "### Reference provenance",
+            "",
+            (
+                f"- The SAS listings and logs used as references come from commit "
+                f"{_code(provenance.reference_commit)} ({provenance.reference_commit_date}) and "
+                f"were produced by {provenance.reference_sas_version}."
+            ),
+            f"- {_flatten(provenance.reference_note)}",
+            f"- The Sources section of {_code(spec)} details these later edits.",
+            (
+                "- The box-plot PDFs hold their statistics only as raster images and are not used "
+                "as references."
+            ),
+        ]
+    )
+    return lines
+
+
+# --- Summary --------------------------------------------------------------------------------------
+
+
+def _summary_lines(
+    results: Mapping[str, ProgramResult], groups_by_program: Mapping[str, Sequence[ComparisonGroup]]
+) -> list[str]:
+    per_program = {program: count_statuses(groups_by_program[program]) for program in PROGRAMS}
+    overall = count_statuses(group for program in PROGRAMS for group in groups_by_program[program])
+    rows = [
+        (
+            _cell(program),
+            *(str(per_program[program][status]) for status in STATUSES),
+            "yes" if results[program].halted else "no",
+        )
+        for program in PROGRAMS
+    ]
+    rows.append(("Overall", *(str(overall[status]) for status in STATUSES), _NONE))
+    lines = ["## Summary", ""]
+    lines.extend(_table(("Program", *STATUSES, "Halted"), rows))
+    lines.extend(
+        [
+            "",
+            (
+                f"{NOT_COMPARED} rows are counted on their own, never as {PASS}; no equivalence is "
+                "claimed for them (see Not compared)."
+            ),
+            "",
+        ]
+    )
+    halted = [program for program in PROGRAMS if results[program].halted]
+    for program in halted:
+        lines.extend([f"{program} halted: {_cell(results[program].halt_message)}", ""])
+    if overall[FAIL] or halted:
+        problems = []
+        if overall[FAIL]:
+            noun = "comparison" if overall[FAIL] == 1 else "comparisons"
+            problems.append(f"{overall[FAIL]} {noun} failed")
+        if halted:
+            problems.append(f"{', '.join(halted)} halted")
+        lines.append(f"Result: {FAIL}: {'; '.join(problems)}.")
+    else:
+        lines.append(
+            f"Result: no comparison failed and no program halted ({overall[PASS]} {PASS})."
+        )
+    return lines
+
+
+# --- Program sections -----------------------------------------------------------------------------
+
+
+def _model_stratum(record: ModelRecord) -> str:
+    stratum = f"PARAMCD={record.PARAMCD} ATPTN={_format_number(record.ATPTN)}"
+    if record.STUDYNUM is not None:
+        stratum += f" studynum={record.STUDYNUM}"
+    return stratum
+
+
+def _model_lines(result: ProgramResult) -> list[str]:
+    """The GLM fit status of every model, or why the run has none (Agent Action Plan 0.6.4)."""
+    lines = ["### Models", ""]
+    if result.glm_skipped:
+        lines.append("GLM: not produced: GLM skipped by setting.")
+    elif result.models:
+        lines.extend(
+            _table(
+                ("Model", "Stratum", "NOBS", "DFE", "Status"),
+                (
+                    (
+                        _cell(record.MODEL),
+                        _cell(_model_stratum(record)),
+                        _format_number(record.NOBS),
+                        _format_number(record.DFE),
+                        _cell(record.STATUS),
+                    )
+                    for record in result.models
+                ),
+            )
+        )
+    elif result.halted:
+        lines.append("No model was fitted: the run halted before the GLM step.")
+    else:
+        lines.append("No model was fitted: the analysis population holds no stratum.")
+    return lines
+
+
+def _rounded_rule(group_key: str, tolerances: Tolerances) -> str:
+    """The full-precision tolerance a rounded group cannot establish, from ``tolerances.json``."""
+    p_values = f"absolute ≤ {_format_number(tolerances.limit('p_values'))}"
+    if group_key == GROUP_LISTING_PARAMETER_ESTIMATES:
+        glm = f"relative ≤ {_format_number(tolerances.limit('glm_estimates'))}"
+        return f"{glm} for Estimate, StdErr and t Value; {p_values} for Pr > |t|"
+    return p_values
+
+
+def _rounded_note(group: ComparisonGroup, tolerances: Tolerances, paths: RepoPaths) -> str:
+    """The rounded-reference wording of a listing group, with its listing, decimals and rule."""
+    if group.key not in _ROUNDED_DECIMALS:
+        raise ValueError(
+            f"no rounded-reference precision is defined for comparison group {group.key!r}"
+        )
+    return ROUNDED_NOTE_TEMPLATE.format(
+        file=_repo_relative(paths.listing_file(group.program), paths),
+        d=_ROUNDED_DECIMALS[group.key],
+        rule=_rounded_rule(group.key, tolerances),
+    )
+
+
+def _row_cells(row: ComparisonRow, with_reason: bool) -> tuple[str, ...]:
+    cells = (
+        row.quantity,
+        row.stratum,
+        row.sas_value,
+        row.python_value,
+        row.difference,
+        row.tolerance,
+        row.status,
+    )
+    if with_reason:
+        cells += (row.reason,)
+    return tuple(_cell(text) for text in cells)
+
+
+def _group_lines(group: ComparisonGroup, tolerances: Tolerances, paths: RepoPaths) -> list[str]:
+    heading = group.title
+    note = group.heading_note
+    if group.key == GROUP_LISTING_MERGED_PVAL and note:
+        # The heading itself says that these are the CSS_STATS cells the merge fills, so the table
+        # cannot be read as a second check of the model rows.
+        heading, note = f"{heading}: {note}", None
+    lines = [f"### {_cell(heading)}", ""]
+    if note:
+        lines.extend([_cell(note), ""])
+    if group.rounded:
+        lines.extend([_rounded_note(group, tolerances, paths), ""])
+    lines.append(
+        f"{PASS} {group.n_pass}, {FAIL} {group.n_fail}, {NOT_COMPARED} {group.n_not_compared}."
+    )
+    if not group.rows:
+        lines.extend(["", "No rows."])
+        return lines
+    with_reason = any(row.reason for row in group.rows)
+    header = _ROW_COLUMNS + ((_REASON_COLUMN,) if with_reason else ())
+    lines.append("")
+    lines.extend(_table(header, (_row_cells(row, with_reason) for row in group.rows)))
+    return lines
+
+
+def _program_lines(
+    result: ProgramResult,
+    groups: Sequence[ComparisonGroup],
+    tolerances: Tolerances,
+    paths: RepoPaths,
+) -> list[str]:
+    program = result.program_id
+    lines = [
+        f"## {program}",
+        "",
+        (
+            f"{_status_counts(count_statuses(groups))}; the {NOT_COMPARED} quantities are listed "
+            "under Not compared."
+        ),
+        "",
+    ]
+    if result.halted:
+        lines.append(f"Halted: {_cell(result.halt_message)}")
+    else:
+        lines.append("Halt: none; every halting check passed.")
+    if result.omission_counts:
+        counts = ", ".join(f"{name} {count}" for name, count in result.omission_counts.items())
+        lines.extend(["", f"Derivation omission counts: {_cell(counts)}."])
+    lines.append("")
+    lines.extend(_model_lines(result))
+    for group in groups:
+        if group.key == GROUP_NOT_COMPARED:
+            continue
+        lines.append("")
+        lines.extend(_group_lines(group, tolerances, paths))
+    return lines
+
+
+# --- Not compared and source integrity ------------------------------------------------------------
+
+
+def _not_compared_lines(groups_by_program: Mapping[str, Sequence[ComparisonGroup]]) -> list[str]:
+    """Every NOT COMPARED row of every group, with its reason, in report order."""
+    rows = [
+        (
+            _cell(program),
+            _NONE if group.key == GROUP_NOT_COMPARED else _cell(group.title),
+            _cell(row.quantity),
+            _cell(row.stratum),
+            _cell(row.reason) if row.reason else _NONE,
+        )
+        for program in PROGRAMS
+        for group in groups_by_program[program]
+        for row in group.rows
+        if row.status == NOT_COMPARED
+    ]
+    lines = [
+        "## Not compared",
+        "",
+        (
+            "No equivalence is claimed for any quantity listed here: each has no SAS reference "
+            "value to compare with, or the run did not produce it. Each row gives the reason."
+        ),
+        "",
+    ]
+    if not rows:
+        lines.append("Every quantity of both programs was compared.")
+        return lines
+    lines.extend(_table(("Program", "Comparison", "Quantity", "Stratum", "Reason"), rows))
+    return lines
+
+
+def _blob_text(blob: str | None) -> str:
+    return UNAVAILABLE if blob is None else _code(blob)
+
+
+def _integrity_lines(provenance: Provenance) -> list[str]:
+    rows: Sequence[IntegrityRow] = provenance.integrity
+    lines = [
+        "## Source integrity",
+        "",
+        (
+            "Each read-only input's working-tree blob (`git hash-object --no-filters`) against its "
+            f"blob at the upstream commit {_code(provenance.upstream_commit)}: "
+            f"{_integrity_statement(provenance)}"
+        ),
+        "",
+    ]
+    changed = [row.path for row in rows if row.status == STATUS_CHANGED]
+    if changed:
+        lines.extend([f"Changed inputs: {_cell(', '.join(changed))}.", ""])
+    lines.extend(
+        _table(
+            ("Path", "Blob at upstream commit", "Working-tree blob", "Result"),
+            (
+                (
+                    _code(row.path),
+                    _blob_text(row.upstream_blob),
+                    _blob_text(row.working_blob),
+                    _cell(row.status),
+                )
+                for row in rows
+            ),
+        )
+    )
+    return lines
+
+
+# --- Introduction ---------------------------------------------------------------------------------
+
+
+def _intro_lines(paths: RepoPaths) -> list[str]:
+    spec = _repo_relative(paths.spec_file, paths)
+    # The link is relative to the report's own directory, so it resolves wherever the file is read.
+    link = Path(os.path.relpath(paths.spec_file, paths.report_file.parent)).as_posix()
+    return [
+        f"# {REPORT_TITLE}",
+        "",
+        (
+            f"This report compares the Python port of {' and '.join(PROGRAMS)} under "
+            f"`{_repo_relative(paths.project_dir, paths)}/` with the SAS reference results: the "
+            f"listings and logs in `{_repo_relative(paths.outputs_sas_dir, paths)}/` and any "
+            "user-supplied full-precision SAS exports. It covers the intermediate datasets, the "
+            "PROC SUMMARY statistics and the PROC GLM SOLUTION tables; the box-plot graphics are "
+            f"not reproduced. The specification is [{spec}]({link}). `python -m wpct reproduce` "
+            "generates this file; it is not edited by hand."
+        ),
+    ]
+
+
+# --- Public API -----------------------------------------------------------------------------------
+
+
+def render_report(
+    results: Mapping[str, ProgramResult],
+    comparisons: Mapping[str, Sequence[ComparisonGroup]],
+    provenance: Provenance,
+    tolerances: Tolerances,
+) -> str:
+    """Render the equivalence report as Markdown (Agent Action Plan 0.7.5).
+
+    Args:
+        results: The run of each program in ``wpct.schemas.PROGRAMS``, keyed by program; a halted
+            run is ``ProgramResult.from_halt``.
+        comparisons: ``wpct.compare.compare_program`` of each run, keyed by program.
+        provenance: ``wpct.provenance.collect`` of the checkout.
+        tolerances: ``wpct.compare.load_tolerances`` of ``python/wpct/tolerances.json``; its table
+            is printed before any result.
+
+    Returns:
+        The report text with ``\\n`` line ends and one trailing newline. Equal inputs give equal
+        text: it holds no timestamp and no absolute path.
+
+    Raises:
+        TypeError, ValueError: An input of the wrong type, a program missing from or unknown to
+            either mapping, a result or group filed under another program, or a rounded group whose
+            displayed precision is not defined here.
+    """
+    groups_by_program = _checked_inputs(results, comparisons, provenance, tolerances)
+    # Repository-relative names only; the checkout paths are never opened while rendering.
+    paths = RepoPaths.checkout()
+    blocks = [
+        _intro_lines(paths),
+        _provenance_lines(provenance, tolerances, paths),
+        _summary_lines(results, groups_by_program),
+    ]
+    blocks.extend(
+        _program_lines(results[program], groups_by_program[program], tolerances, paths)
+        for program in PROGRAMS
+    )
+    blocks.append(_not_compared_lines(groups_by_program))
+    blocks.append(_integrity_lines(provenance))
+    return "\n\n".join("\n".join(block) for block in blocks) + "\n"
+
+
+def write_report(
+    results: Mapping[str, ProgramResult],
+    comparisons: Mapping[str, Sequence[ComparisonGroup]],
+    provenance: Provenance,
+    paths: RepoPaths,
+) -> Path:
+    """Render the report and write it to ``paths.report_file``; return the resolved path written.
+
+    The destination is fixed: this function takes none (Agent Action Plan 0.8). The tolerances are
+    read from ``paths.tolerances_file`` and the text is rendered in memory first. The target then
+    passes :func:`~wpct.paths.check_write_destination`, and its resolved form must be the report
+    path under the resolved write root, before any directory is created or the file opened.
+
+    Raises:
+        OutputPathError: The report path, or a directory above it, is a symlink leading anywhere
+            else, inside or outside the checkout; nothing is created or modified.
+        TypeError, ValueError: As :func:`render_report`, or ``paths`` is not a ``RepoPaths``;
+            nothing is written.
+    """
+    if not isinstance(paths, RepoPaths):
+        raise TypeError(f"paths must be a RepoPaths, got {type(paths).__name__}")
+    tolerances = load_tolerances(paths.tolerances_file)
+    text = render_report(results, comparisons, provenance, tolerances)
+    target = paths.report_file
+    resolved = check_write_destination(target, paths)
+    # The guard also accepts any path strictly below the outputs tree, so a reports directory
+    # symlinked into python/wpct/outputs would pass it. The write policy refuses a fixed destination
+    # reached through any symlink, so the resolved path must be the report path itself.
+    expected = paths.write_root.resolve() / target.relative_to(paths.write_root)
+    if resolved != expected:
+        raise OutputPathError(
+            target, resolved, f"the fixed destination {expected} is reached through a symlink"
+        )
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    with open(resolved, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+    return resolved
