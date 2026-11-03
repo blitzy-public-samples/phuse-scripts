@@ -69,6 +69,7 @@ The export README predates this launcher. Line 64 of the README asks for `BEST32
   * Match the historical references where possible: SAS 9.4 TS1M2 with SAS/STAT 13.2. That is the release in the header of [`whitepapers/WPCT/outputs_sas/WPCT-F.07.02.log`](../../../../whitepapers/WPCT/outputs_sas/WPCT-F.07.02.log), which was produced on Windows (`X64_7PRO`).
   * A newer release yields results for that release, not for SAS 9.4 TS1M2. Record which release ran ([section 3](#3-values-to-record)).
   * The program halts on a SAS release older than 9.4M2 (`SASV=9.4M2` at line 148). On an OS other than AIX, Windows or HP IPF it writes a WARNING and carries on (line 147).
+  * The session's WORK library must lie outside the checkout, and the session must have no USER library (no `LIBNAME USER` statement and no `USER=` system option), so that one-level dataset names go to WORK. The launcher refuses any other session before it writes any file, dataset or template of its own. A WORK location inside any checkout of this repository (a directory holding `whitepapers/WPCT/WPCT-F.07.02.sas` and `data/adam/cdisc/advs.xpt`) is refused, even when it is reached through a symbolic link: the launcher looks for both files in each of the 64 directory levels above WORK, reached with `..` as the operating system resolves it. In batch, `-work <dir>` sets the WORK location.
 * **Repository.** A git checkout of this repository at a recorded commit, readable by the SAS session, with `whitepapers/`, `data/` and `python/` in place. SAS reads the program, the macros and `data/adam/cdisc/advs.xpt` from it. When SAS runs on a server, as SAS Studio and SAS Enterprise Guide commonly do, the checkout and every path must be on that server.
 * **Work directory.** A writable capture work directory outside the checkout, whose parent exists. The launcher creates only one directory level.
 * **Nothing else on the SAS side.** No network connection and no credentials are needed.
@@ -182,9 +183,11 @@ run;
      ```sh
      cd "$WPCT_WORKDIR"
      sas -sysin WPCT-F.07.02_capture.sas -log WPCT-F.07.02_session.log -print WPCT-F.07.02_session.lst
+     echo $?
      ```
 
-   * **Interactive** (SAS windowing environment, SAS Enterprise Guide or SAS Studio). Open the copy in a new session and submit the whole program once. Then save the Log window as `WPCT-F.07.02_session.log` in the work directory.
+     `echo $?` prints the exit status; on Windows, run `echo %ERRORLEVEL%` in the same command prompt. A complete capture sets SYSCC back to its value before the staged program ran (`0` in a fresh session without SAS warnings), so it ends with `0`, or `1` when a SAS step of the launcher itself, before or after the staged program, issued a WARNING. The expected ERROR lines from lines 76 and 82 do not count against it. Any refused or failed run ends with SYSCC 8 or more, so the exit status is `2`. A SAS ERROR in a step of the launcher itself, before or after the staged program, also makes the run a failed one (SYSCC 8 or more, exit status `2`).
+   * **Interactive** (SAS windowing environment, SAS Enterprise Guide or SAS Studio). Open the copy in a new session and submit the whole program once. The launcher does not end the session. Submit `%put &syscc;` afterwards: a complete capture prints `0` in a fresh session without SAS warnings, or `4` when a SAS step of the launcher itself, before or after the staged program, issued a WARNING, and a refused or failed run prints `8` or more. Then save the Log window as `WPCT-F.07.02_session.log` in the work directory.
 5. **Check the logs:**
 
    ```sh
@@ -204,13 +207,16 @@ run;
      * `Wrote the staged copy from <n> lines of WPCT-F.07.02.sas, with 4 anchors matched.` The original has 402 lines.
    * **The staged program's own log:**
      * the expected ERROR lines from lines 76 and 82 of the original ([failure point 8](#9-likely-failure-points));
-     * for each stratum, the `MPRINT(BOXPLOT_EACH_PARAM_TP)` echo of `DATA _WPCT_PE` and `DATA _WPCT_STATS`;
-     * no `The program halted`, `syntax-check mode` or `No CSV is written` line ([failure point 11](#9-likely-failure-points)).
+     * for each stratum, the `MPRINT(BOXPLOT_EACH_PARAM_TP)` echo of `DATA WORK._WPCT_PE` and `DATA WORK._WPCT_STATS`;
+     * no `ERROR: (WPCT CAPTURE)` line from `WPCT_APPEND`, which appends each stratum to the capture library ([failure point 16](#9-likely-failure-points));
+     * no `The program halted`, `syntax-check mode` or `No CSV is written` line ([failure point 11](#9-likely-failure-points));
+     * after the program, `The capture checks passed. The staged program ended with SYSCC=<n>, ... SYSCC is set back to <n>, its value before the program ran.`
    * **The exports, for each file:**
      * `<data> has <n> rows, the count the shipped SAS log reports for <file>.`, with 3548, 60 and 10;
      * `Wrote <csv>/<file> from <data>.`;
      * for each column, `every CSV value reads back as the native value.`, or a WARNING ([failure point 4](#9-likely-failure-points) for a numeric column, [failure point 3](#9-likely-failure-points) for a character one).
-   * **The session log's last line**, after the redirect ends: `Capture finished: native copies in ..., CSVs in ..., log in .... Review every WARNING there.` A failed run ends with `Capture failed.` instead.
+   * **Capture log, after the exports:** no `A SAS step of the launcher itself ended with an ERROR` line.
+   * **The session log's last line**, after the redirect ends: `Capture finished with SYSCC=<n>: native copies in ..., CSVs in ..., log in .... Review every WARNING there.` A failed run ends with `Capture failed with SYSCC=<n>. See the ERROR lines in ...` (or `... See the ERROR lines above.` when it stopped before the redirect) instead.
 
    To compare the program's own record counts with the shipped SAS log, list the `CSS_` dataset notes of both logs:
 
@@ -227,7 +233,7 @@ run;
 
 7. **Compare** ([section 6](#6-compare-commands)).
 
-A rerun with the same settings first removes the captures and CSVs of the earlier run.
+A rerun with the same settings first removes the captures and CSVs of the earlier run. When it cannot remove them, it stops before the program runs.
 
 ### 5. Files produced
 
@@ -377,7 +383,7 @@ The numbers match the launcher header, and the launcher cites them in its commen
    * *Symptom:* `No ParameterEstimates table was captured.`, or `wpctcap.parameter_estimates has no variable <var>, which WPCT-F.07.02_parameter_estimates.csv requires.`, or an ODS WARNING that the output was not created.
    * *Debug:* `proc contents data=wpctcap.parameter_estimates; run;` lists what was captured. In an interactive session, submit `ods trace on;` before the launcher, and the log then names every table PROC GLM creates.
 2. **Macro variable scoping.** The inserted DATA steps run inside `%boxplot_each_param_tp`. They resolve its local `pdx`, `tdx` and `css_pval_ds`, and the global `paramcd_val<n>` and `atptn_val<n>` that `util_labels_from_var` creates.
-   * *Symptom:* `Apparent symbolic reference ... not resolved` next to `DATA _WPCT_PE` or `DATA _WPCT_STATS`, or a blank `PARAMCD` or missing `ATPTN` in the captures.
+   * *Symptom:* `Apparent symbolic reference ... not resolved` next to `DATA WORK._WPCT_PE` or `DATA WORK._WPCT_STATS`, or a blank `PARAMCD` or missing `ATPTN` in the captures.
    * *Debug:* in the MPRINT lines of those two steps, `PARAMCD` must read DIABP or SYSBP, and `ATPTN` 815 or 816. Then list the strata, which should show 30 `css_stats` rows and 5 estimate rows for each of DIABP/815 and SYSBP/816:
 
      ```sas
@@ -411,7 +417,7 @@ The numbers match the launcher header, and the launcher cites them in its commen
      ```
 
 6. **Anchor mismatch.** Lines 85, 126, 280 and 308 are checked.
-   * *Symptom:* `Line <n> of WPCT-F.07.02.sas does not hold the expected anchor text. It reads: ...`, then `Staged copy rejected`. Nothing runs.
+   * *Symptom:* `Line <n> of WPCT-F.07.02.sas does not hold the expected anchor text. It reads: ...`, then `Staged copy rejected`. Both messages appear in the capture log. Nothing runs.
    * *Debug:* `git status --porcelain whitepapers/WPCT/WPCT-F.07.02.sas` must print nothing. The two hashes below, of the unchanged bytes on disk and of the upstream file, must be equal, and the last command shows the four anchor lines. A different revision of the program needs a change to the launcher.
 
      ```sh
@@ -458,8 +464,8 @@ The numbers match the launcher header, and the launcher cites them in its commen
 15. **Log location.** Settings and guard messages go to the session log. From the redirect on, the log goes to `<work>/WPCT-F.07.02_capture.log`, and the final status line goes back to the session log.
     * *Symptom:* a SAS log or listing in the checkout. `git status --porcelain` lists it.
     * *Debug:* move it into the work directory, and in batch start SAS there, as in step 4.
-16. **PROC APPEND runs without FORCE.** If the second stratum has a variable of another length, the append stops with an ERROR instead of truncating values.
-    * *Symptom:* a PROC APPEND ERROR for `wpctcap.parameter_estimates` or `wpctcap.css_stats`.
+16. **PROC APPEND runs without FORCE.** If the second stratum has a variable of another length, the append stops with an ERROR instead of truncating values. `WPCT_APPEND` compares the row counts around each append, so a rejected or partial append fails the capture.
+    * *Symptom:* a PROC APPEND ERROR for `wpctcap.parameter_estimates` or `wpctcap.css_stats`, then `Appending work._wpct_pe to wpctcap.parameter_estimates failed: SYSERR=<rc>, <n> rows to add, <n> rows before the append and <n> after it.` (or the same for `work._wpct_stats` and `wpctcap.css_stats`). A capture DATA step that fails gives `Building work._wpct_pe for wpctcap.parameter_estimates failed (SYSERR=<rc>), so this stratum is not captured.` instead. Either way the run ends with `A capture step of the staged copy failed.` and `No CSV is written.`
     * *Debug:* `proc contents data=wpctcap.css_stats; run;` shows the attributes the first stratum set. The fix is a change to the launcher.
 
 Any change to the launcher is a repository change. Commit it, run the contract check of [section 6.1](#61-contract-check-of-the-launcher), and record the new commit.

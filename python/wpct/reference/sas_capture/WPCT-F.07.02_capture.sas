@@ -10,6 +10,11 @@
   REQUIREMENTS
     Licensed SAS 9.4 with Base SAS and SAS/STAT, run once by a person in a fresh session.
     Match the historical references where possible: SAS 9.4 TS1M2 with SAS/STAT 13.2.
+    A session whose WORK library lies outside the checkout and that has no USER library; the
+    launcher refuses any other session before it writes any file, dataset or template of its
+    own. A WORK location inside any checkout of this repository (a directory holding
+    whitepapers/WPCT/WPCT-F.07.02.sas and data/adam/cdisc/advs.xpt) is refused, even when it is
+    reached through a symbolic link.
     No network connection and no credentials are needed.
     Edit only the USER SETTINGS block below.
 
@@ -54,6 +59,15 @@
     <csv>/WPCT-F.07.02_css_stats.csv
     <csv>/WPCT-F.07.02_parameter_estimates.csv
 
+  STATUS
+    A complete capture sets SYSCC back to its value before the staged program ran (0 in a fresh
+    session without SAS warnings), so a batch run ends with exit status 0, or 1 when a SAS step of
+    the launcher itself, before or after the staged program, issued a SAS WARNING. The expected
+    ERRORs of lines 76 and 82 (point 8) do not count against a complete capture. Any refused or
+    failed run ends with SYSCC 8 or more: batch exit status 2. A SAS ERROR in a step of the
+    launcher itself, before or after the staged program, also makes the run a failed one (SYSCC 8
+    or more, exit status 2). Nothing ends the SAS session, so an interactive session stays open.
+
   LIKELY FAILURE POINTS, for the first licensed run
     1. ODS table name and columns. The capture relies on the ODS table ParameterEstimates of
        PROC GLM. The CSV requires its variables Parameter Estimate StdErr tValue Probt. If this
@@ -62,8 +76,8 @@
        ODS extras, left out of the CSV and not checked.
     2. Macro variable scoping. The inserted DATA steps run inside macro boxplot_each_param_tp and
        resolve its local pdx, tdx and css_pval_ds, and the global paramcd_val<n> and atptn_val<n>
-       that util_labels_from_var creates. Check the MPRINT lines of DATA _WPCT_PE and
-       DATA _WPCT_STATS: PARAMCD must read DIABP or SYSBP and ATPTN 815 or 816.
+       that util_labels_from_var creates. Check the MPRINT lines of DATA WORK._WPCT_PE and
+       DATA WORK._WPCT_STATS: PARAMCD must read DIABP or SYSBP and ATPTN 815 or 816.
     3. Format stripping. The CSV step removes every format (FORMAT _ALL_) and writes each numeric
        with PUTN and the explicit WPCT_NUMFMT format, without leading blanks, so no estimate is
        rounded and no p-value becomes text such as <.0001. Character values are written as
@@ -81,7 +95,7 @@
     5. CRLF line endings. WPCT-F.07.02.sas has CRLF line endings. On UNIX each record then ends
        with a CR, which the staged-copy step removes.
     6. Anchor mismatch. Lines 85, 126, 280 and 308 are checked. A different revision of the
-       program stops the launcher with an ERROR line naming the line.
+       program stops the launcher with an ERROR line in the capture log naming the line.
     7. SASAUTOS. util_resolve_sasautos, used by assert_macro_exist, parses one flat list of
        filerefs and double-quoted paths, and line 76 wraps the current SASAUTOS value in another
        pair of parentheses with an empty "" entry. The launcher therefore sets SASAUTOS to the
@@ -117,7 +131,9 @@
        the log goes to <work>/WPCT-F.07.02_capture.log. In batch, start SAS outside the
        repository, or pass -log, so the session log is not written into the checkout.
    16. PROC APPEND runs without FORCE. If the second stratum has a variable of another length,
-       the append stops with an ERROR instead of truncating values.
+       the append stops with an ERROR instead of truncating values. WPCT_APPEND compares the row
+       counts around each append, so a rejected or partial append fails the capture with the
+       ERROR Appending ... failed: SYSERR=..., and no CSV is written.
 ***/
 
 
@@ -341,23 +357,74 @@ options mprint;
 %mend wpct_exports;
 
 
+/*** Row count of a dataset, as macro text: 0 when DATA does not exist, -1 when it cannot be
+  opened, otherwise its number of logical observations. ***/
+%macro wpct_nobs(data);
+  %local dsid nobs rc;
+  %let nobs = 0;
+  %if %sysfunc(exist(&data)) %then %do;
+    %let dsid = %sysfunc(open(&data, i));
+    %if &dsid = 0 %then %let nobs = -1;
+    %else %do;
+      %let nobs = %sysfunc(attrn(&dsid, nlobs));
+      %let rc = %sysfunc(close(&dsid));
+    %end;
+  %end;
+&nobs
+%mend wpct_nobs;
+
+
+/*** Append of one stratum to a capture dataset, called by the capture inserts of the staged copy.
+  BASE   the capture dataset in WPCTCAP
+  DATA   the WORK dataset the insert built
+  RC     SYSERR of the DATA step that built DATA
+  A failed build, a failed append, or an append that does not add exactly the rows of DATA sets
+  the global WPCT_CAPFAIL, which WPCT_FINISH checks. The row counts are compared as well as
+  SYSERR, because a failed PROC APPEND can leave SYSERR=4 (SAS Sample 45143). DATA is deleted
+  from WORK afterwards. ***/
+%macro wpct_append(base=, data=, rc=);
+  %local before added after;
+  %if &rc > 4 or not %sysfunc(exist(&data)) %then %do;
+    %put ERROR: (WPCT CAPTURE) Building &data for &base failed (SYSERR=&rc), so this stratum is not captured.;
+    %let wpct_capfail = 1;
+  %end;
+  %else %do;
+    %let before = %wpct_nobs(&base);
+    %let added = %wpct_nobs(&data);
+    proc append base=&base data=&data;
+    run;
+    %let rc = &syserr;
+    %let after = %wpct_nobs(&base);
+    %if &rc > 4 or &added < 1 or &before < 0 or &after ne %eval(&before + &added) %then %do;
+      %put ERROR: (WPCT CAPTURE) Appending &data to &base failed: SYSERR=&rc, &added rows to add, &before rows before the append and &after after it.;
+      %let wpct_capfail = 1;
+    %end;
+  %end;
+  %if %sysfunc(exist(&data)) %then %do;
+    proc datasets library=work memtype=data nolist nodetails;
+      delete %scan(&data, 2, .);
+    quit;
+  %end;
+%mend wpct_append;
+
+
 /*** Guards, environment record, autocall setup, capture library and staged copy. On success it
-  points fileref WPCTRUN at the staged copy; otherwise WPCTRUN holds one blank line. ***/
+  points fileref WPCTRUN at the staged copy; otherwise WPCTRUN stays the DUMMY device, so the
+  INCLUDE reads nothing. ***/
 %macro wpct_prepare;
-  %global wpct_ok wpct_staged wpct_printto wpct_syntaxcheck wpct_sasdirs wpct_action;
-  %local wpct_t;
+  %global wpct_ok wpct_staged wpct_printto wpct_syntaxcheck wpct_sasdirs wpct_action wpct_capfail
+          wpct_syscc;
+  %local wpct_t wpct_rc wpct_old;
   %let wpct_ok = 0;
   %let wpct_staged = 0;
   %let wpct_printto = 0;
   %let wpct_syntaxcheck = %sysfunc(getoption(syntaxcheck));
   %let wpct_sasdirs = ;
   %let wpct_action = ;
+  %let wpct_capfail = 0;
+  %let wpct_syscc = ;
 
-  filename wpctrun temp;
-  data _null_;
-    file wpctrun;
-    put ' ';
-  run;
+  filename wpctrun dummy;
 
   %if "%sysfunc(getoption(obs))" = "0" %then
     %put ERROR: (WPCT CAPTURE) This session is in syntax-check mode (OBS=0). Start a new SAS session and run the launcher again.;
@@ -495,6 +562,74 @@ options mprint;
 
       if _wpct_ok then do _wpct_i = 1 to 3;
         call symputx(_wpct_m{_wpct_i}, _wpct_c{_wpct_i}, 'G');
+      end;
+      call symputx('wpct_ok', _wpct_ok, 'G');
+    run;
+  %end;
+
+  /* Session scratch storage: the WORK library must lie outside the checkout, and one-level
+     dataset names must go to WORK, so no USER library may be set. Both are checked before
+     the launcher writes any file, dataset or template of its own. */
+  %if &wpct_ok = 1 %then %do;
+    data _null_;
+      length _wpct_repo _wpct_wd _wpct_wk _wpct_prefix _wpct_user _wpct_uopt _wpct_wkp
+             _wpct_base $1024;
+      _wpct_ok = 1;
+      _wpct_repo = symget('wpct_repo');
+      _wpct_wd = pathname('work');
+      _wpct_wk = translate(strip(_wpct_wd), '/', '\');
+      _wpct_wk = prxchange('s#(?<=.)/{2,}#/#', -1, trim(_wpct_wk));
+      do while (length(_wpct_wk) > 1 and char(_wpct_wk, length(_wpct_wk)) = '/');
+        _wpct_wk = substr(_wpct_wk, 1, length(_wpct_wk) - 1);
+      end;
+      _wpct_wkp = _wpct_wk;
+      if "&sysscp" = 'WIN' then do;
+        _wpct_repo = upcase(_wpct_repo);
+        _wpct_wk = upcase(_wpct_wk);
+      end;
+      if char(_wpct_repo, length(_wpct_repo)) = '/' then _wpct_prefix = _wpct_repo;
+      else _wpct_prefix = cats(_wpct_repo, '/');
+      if _wpct_wk = ' ' then do;
+        put 'ERROR: (WPCT CAPTURE) The physical location of the WORK library is unknown, so it cannot be shown to lie outside the repository.';
+        _wpct_ok = 0;
+      end;
+      else if _wpct_wk = _wpct_repo or index(_wpct_wk, trim(_wpct_prefix)) = 1 then do;
+        put 'ERROR: (WPCT CAPTURE) The WORK library of this session lies inside the repository: ' _wpct_wd;
+        put 'ERROR: (WPCT CAPTURE) Start SAS with a WORK location outside the checkout (the -WORK option) and run the launcher again.';
+        _wpct_ok = 0;
+      end;
+      else if not fileexist(strip(_wpct_wd)) then do;
+        put 'ERROR: (WPCT CAPTURE) The WORK library directory ' _wpct_wd 'cannot be inspected, so it cannot be shown to lie outside the repository.';
+        _wpct_ok = 0;
+      end;
+      else if length(_wpct_wkp) + 3 * 64 > vlength(_wpct_base) then do;
+        put 'ERROR: (WPCT CAPTURE) The WORK library path is too long to inspect the 64 directories above it, so it cannot be shown to lie outside the repository: ' _wpct_wd;
+        _wpct_ok = 0;
+      end;
+      else do;
+        /* No directory up to 64 levels above WORK may hold both checkout markers, whatever the
+           spelling of WPCT_REPO: each level is reached with .. because the operating system
+           resolves .. after following symbolic links, which trimming path components would not. */
+        _wpct_base = _wpct_wkp;
+        do _wpct_k = 1 to 64;
+          _wpct_base = cats(_wpct_base, '/..');
+          if fileexist(cats(_wpct_base, '/whitepapers/WPCT/WPCT-F.07.02.sas')) and fileexist(cats(_wpct_base, '/data/adam/cdisc/advs.xpt')) then do;
+            put 'ERROR: (WPCT CAPTURE) The WORK library of this session lies inside a checkout of this repository: ' _wpct_wd;
+            put 'ERROR: (WPCT CAPTURE) Start SAS with a WORK location outside the checkout (the -WORK option) and run the launcher again.';
+            _wpct_ok = 0;
+            leave;
+          end;
+        end;
+      end;
+      /* A USER libref, or a USER= system option that names a libref other than WORK, takes the
+         one-level names of the program and of SAS procedures away from WORK. */
+      _wpct_uopt = strip(getoption('user'));
+      if libref('USER') = 0 or (_wpct_uopt ne ' ' and upcase(_wpct_uopt) ne 'WORK') then do;
+        if libref('USER') = 0 then _wpct_user = pathname('USER');
+        else _wpct_user = cats('USER=', _wpct_uopt);
+        put 'ERROR: (WPCT CAPTURE) A USER library is assigned, so one-level dataset names would not go to WORK: ' _wpct_user;
+        put 'ERROR: (WPCT CAPTURE) Start a SAS session without a USER library (no LIBNAME USER statement and no USER= system option) and run the launcher again.';
+        _wpct_ok = 0;
       end;
       call symputx('wpct_ok', _wpct_ok, 'G');
     run;
@@ -744,13 +879,26 @@ options mprint;
     %end;
   %end;
 
-  /* A rerun starts clean: earlier captures and CSVs are removed before the program runs. */
+  /* A rerun starts clean: earlier captures and CSVs are removed before the program runs. Only
+     the captures that exist are deleted, and a capture that remains stops the launcher. */
   %if &wpct_ok = 1 %then %do;
-    proc datasets library=wpctcap memtype=data nolist nodetails;
-      delete css_anadata css_stats parameter_estimates;
-    quit;
-    %let wpct_action = clear;
-    %wpct_exports
+    %let wpct_old = ;
+    %if %sysfunc(exist(wpctcap.css_anadata)) %then %let wpct_old = &wpct_old css_anadata;
+    %if %sysfunc(exist(wpctcap.css_stats)) %then %let wpct_old = &wpct_old css_stats;
+    %if %sysfunc(exist(wpctcap.parameter_estimates)) %then %let wpct_old = &wpct_old parameter_estimates;
+    %if %length(&wpct_old) > 0 %then %do;
+      proc datasets library=wpctcap memtype=data nolist nodetails;
+        delete &wpct_old;
+      quit;
+    %end;
+    %if %sysfunc(exist(wpctcap.css_anadata)) or %sysfunc(exist(wpctcap.css_stats)) or %sysfunc(exist(wpctcap.parameter_estimates)) %then %do;
+      %put ERROR: (WPCT CAPTURE) Cannot remove the captures of an earlier run from &wpct_workdir/capture, so the program does not run.;
+      %let wpct_ok = 0;
+    %end;
+    %else %do;
+      %let wpct_action = clear;
+      %wpct_exports
+    %end;
   %end;
 
   /* The staged working copy. Statement keywords that start with a percent sign are built with
@@ -782,7 +930,7 @@ options mprint;
         else _wpct_hit = (_wpct_text = (byte(37) || 'end;'));
         if not _wpct_hit then do;
           _wpct_bad + 1;
-          put 'ERROR: (WPCT CAPTURE) Line ' _n_ 'of WPCT-F.07.02.sas does not hold the expected anchor text. It reads: ' _wpct_text;
+          putlog 'ERROR: (WPCT CAPTURE) Line ' _n_ 'of WPCT-F.07.02.sas does not hold the expected anchor text. It reads: ' _wpct_text;
         end;
       end;
 
@@ -797,39 +945,33 @@ options mprint;
       else do;
         put _wpct_line $varying32767. _wpct_len;
         if _n_ = 280 and _wpct_hit then do;
-          put '              data _wpct_pe;';
+          put '              data work._wpct_pe;';
           put '                length PARAMCD $8 ATPTN 8;';
           put '                PARAMCD = "&&paramcd_val&pdx";';
           put '                ATPTN = &&atptn_val&tdx;';
           put '                set &css_pval_ds;';
           put '              run;';
-          put '              proc append base=wpctcap.parameter_estimates data=_wpct_pe;';
-          put '              run;';
-          put '              proc datasets library=work memtype=data nolist nodetails;';
-          put '                delete _wpct_pe;';
-          put '              quit;';
+          _wpct_new = byte(37) || 'wpct_append(base=wpctcap.parameter_estimates, data=work._wpct_pe, rc=&syserr)';
+          link _wpct_put_new;
         end;
         else if _n_ = 308 and _wpct_hit then do;
-          put '            data _wpct_stats;';
+          put '            data work._wpct_stats;';
           put '              length PARAMCD $8 ATPTN 8;';
           put '              PARAMCD = "&&paramcd_val&pdx";';
           put '              ATPTN = &&atptn_val&tdx;';
           put '              set css_stats;';
           put '            run;';
-          put '            proc append base=wpctcap.css_stats data=_wpct_stats;';
-          put '            run;';
-          put '            proc datasets library=work memtype=data nolist nodetails;';
-          put '              delete _wpct_stats;';
-          put '            quit;';
+          _wpct_new = byte(37) || 'wpct_append(base=wpctcap.css_stats, data=work._wpct_stats, rc=&syserr)';
+          link _wpct_put_new;
         end;
       end;
 
       if _wpct_eof then do;
         if _wpct_found = 4 and _wpct_bad = 0 then do;
           call symputx('wpct_staged', '1', 'G');
-          put 'NOTE: (WPCT CAPTURE) Wrote the staged copy from ' _n_ 'lines of WPCT-F.07.02.sas, with 4 anchors matched.';
+          putlog 'NOTE: (WPCT CAPTURE) Wrote the staged copy from ' _n_ 'lines of WPCT-F.07.02.sas, with 4 anchors matched.';
         end;
-        else put 'ERROR: (WPCT CAPTURE) Staged copy rejected: ' _wpct_found 'of 4 anchors read, ' _wpct_bad 'mismatched.';
+        else putlog 'ERROR: (WPCT CAPTURE) Staged copy rejected: ' _wpct_found 'of 4 anchors read, ' _wpct_bad 'mismatched.';
       end;
       return;
 
@@ -840,11 +982,21 @@ options mprint;
       put _wpct_out $varying32767. _wpct_olen;
       return;
     run;
+    %let wpct_rc = &syserr;
+    %if &wpct_rc > 4 %then %do;
+      %put ERROR: (WPCT CAPTURE) The step that writes the staged copy &wpct_workdir/WPCT-F.07.02_staged.sas ended with SYSERR=&wpct_rc..;
+      %let wpct_staged = 0;
+    %end;
+    %else %if &wpct_staged = 1 and not %sysfunc(fileexist(&wpct_workdir/WPCT-F.07.02_staged.sas)) %then %do;
+      %put ERROR: (WPCT CAPTURE) The staged copy &wpct_workdir/WPCT-F.07.02_staged.sas was not written.;
+      %let wpct_staged = 0;
+    %end;
 
     %if &wpct_staged = 1 %then %do;
       filename wpctrun "&wpct_workdir/WPCT-F.07.02_staged.sas";
       options nosyntaxcheck;
       ods path (prepend) work.templat(update);
+      %let wpct_syscc = &syscc;
       %put NOTE: (WPCT CAPTURE) Running the staged copy. ERROR lines from lines 76 and 82 of the original are expected (failure point 8).;
     %end;
     %else %do;
@@ -885,6 +1037,10 @@ options mprint;
       %put ERROR: (WPCT CAPTURE) The program halted: CONTINUE=%superq(continue).;
       %let wpct_halt = 1;
     %end;
+    %if &wpct_capfail ne 0 %then %do;
+      %put ERROR: (WPCT CAPTURE) A capture step of the staged copy failed. See the ERROR lines of WPCT_APPEND above.;
+      %let wpct_halt = 1;
+    %end;
     %if &wpct_rc > 4 %then %do;
       %put ERROR: (WPCT CAPTURE) The last step of the program ended with SYSERR=&wpct_rc..;
       %let wpct_halt = 1;
@@ -903,6 +1059,8 @@ options mprint;
     %end;
 
     %if &wpct_halt = 0 %then %do;
+      %put NOTE: (WPCT CAPTURE) The capture checks passed. The staged program ended with SYSCC=&syscc, which includes the expected ERRORs of lines 76 and 82 (failure point 8). SYSCC is set back to &wpct_syscc, its value before the program ran.;
+      %let syscc = &wpct_syscc;
       proc copy in=work out=wpctcap memtype=data;
         select css_anadata;
       run;
@@ -921,18 +1079,27 @@ options mprint;
       %put ERROR: (WPCT CAPTURE) No CSV is written.;
       %let wpct_ok = 0;
     %end;
+    %if &wpct_ok = 1 and &syscc > 4 %then %do;
+      %put ERROR: (WPCT CAPTURE) A SAS step of the launcher itself ended with an ERROR (SYSCC=&syscc), so the capture is not complete. See the ERROR lines above.;
+      %let wpct_ok = 0;
+    %end;
   %end;
 
   %if &wpct_printto = 1 %then %do;
     proc printto;
     run;
   %end;
+  /* Failure status: every refused or failed run ends with SYSCC 8 or more (batch exit status 2),
+     without ending the session. */
+  %if &wpct_ok ne 1 %then %do;
+    %if &syscc <= 4 %then %let syscc = 8;
+  %end;
   %if &wpct_ok = 1 %then
-    %put NOTE: (WPCT CAPTURE) Capture finished: native copies in &wpct_workdir/capture, CSVs in &wpct_csvdir, log in &wpct_workdir/WPCT-F.07.02_capture.log. Review every WARNING there.;
+    %put NOTE: (WPCT CAPTURE) Capture finished with SYSCC=&syscc: native copies in &wpct_workdir/capture, CSVs in &wpct_csvdir, log in &wpct_workdir/WPCT-F.07.02_capture.log. Review every WARNING there.;
   %else %if &wpct_printto = 1 %then
-    %put ERROR: (WPCT CAPTURE) Capture failed. See the ERROR lines in &wpct_workdir/WPCT-F.07.02_capture.log.;
+    %put ERROR: (WPCT CAPTURE) Capture failed with SYSCC=&syscc. See the ERROR lines in &wpct_workdir/WPCT-F.07.02_capture.log.;
   %else
-    %put ERROR: (WPCT CAPTURE) Capture failed. See the ERROR lines above.;
+    %put ERROR: (WPCT CAPTURE) Capture failed with SYSCC=&syscc. See the ERROR lines above.;
 %mend wpct_finish;
 
 
