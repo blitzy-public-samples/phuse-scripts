@@ -71,7 +71,7 @@ The export README predates this launcher. Line 64 of the README asks for `BEST32
   * The program halts on a SAS release older than 9.4M2 (`SASV=9.4M2` at line 148). On an OS other than AIX, Windows or HP IPF it writes a WARNING and carries on (line 147).
   * The session's WORK library must lie outside the checkout, and the session must have no USER library (no `LIBNAME USER` statement and no `USER=` system option), so that one-level dataset names go to WORK. The launcher refuses any other session before it writes any file, dataset or template of its own. A WORK location inside any checkout of this repository (a directory holding `whitepapers/WPCT/WPCT-F.07.02.sas` and `data/adam/cdisc/advs.xpt`) is refused, even when it is reached through a symbolic link: the launcher looks for both files in each of the 64 directory levels above WORK, reached with `..` as the operating system resolves it. In batch, `-work <dir>` sets the WORK location.
 * **Repository.** A git checkout of this repository at a recorded commit, readable by the SAS session, with `whitepapers/`, `data/` and `python/` in place. SAS reads the program, the macros and `data/adam/cdisc/advs.xpt` from it. When SAS runs on a server, as SAS Studio and SAS Enterprise Guide commonly do, the checkout and every path must be on that server.
-* **Work directory.** A writable capture work directory outside the checkout, whose parent exists. The launcher creates only one directory level.
+* **Work directory.** A writable capture work directory outside the checkout and not a parent of it, whose parent exists. The launcher creates only one directory level.
 * **Nothing else on the SAS side.** No network connection and no credentials are needed.
 * **Python side.** For the comparison, the Python 3.10 environment of [`python/wpct/README.md`](../../README.md) (Reproduce, steps 1 and 2). It needs no SAS.
 
@@ -165,10 +165,9 @@ run;
    %let wpct_numfmt   = E32.17;
    ```
 
-   * Use the same absolute paths as in the shell. The settings take `/` or `\` as the separator, as in `C:/work/phuse-scripts` on Windows.
-   * A path must not contain `& % ; , " ' ( ) |`, or a `.` or `..` segment.
-   * `wpct_workdir` must lie outside the checkout.
-   * `wpct_csvdir` must not be the checkout root, and must not lie under `whitepapers/` or `data/`. Keep the default, inside the work directory.
+   * Use the same absolute paths as in the shell. The settings take `/` or `\` as the separator. On UNIX a path starts with `/`. On Windows it starts with a drive letter, as in `C:/work/phuse-scripts`, or is a UNC path `//server/share/...`; a path that starts with `/` or `\` without a drive is refused.
+   * A path must not contain `& % ; , " ' ( ) |`, or a `.` or `..` segment. On Windows it must also not hold a `:` after the drive, or a folder name that ends in `.` or a blank.
+   * `wpct_workdir` and `wpct_csvdir` must lie outside the checkout and must not be a parent directory of it, whether by their spelling or through a symbolic link, a junction or a mount ([failure point 17](#9-likely-failure-points)). Keep the default `wpct_csvdir`, inside the work directory.
    * On Windows, set `wpct_encoding` to `wlatin1` if the session refuses `latin1` ([failure point 10](#9-likely-failure-points)).
 
    Then confirm that only the settings lines differ:
@@ -199,8 +198,11 @@ run;
    * **Session log, before the redirect:**
      * no `ERROR: (WPCT CAPTURE)` line from the settings and guard checks;
      * the `WPCT_NUMFMT pre-flight` lines;
+     * on a rerun, a `Removed the empty directory <dir>, left by an earlier run. It is created again.` line for each empty `capture`, `pdf` or default `csv` folder an earlier run left;
+     * `Physical containment: none of the <n> destination directories has the listing of any of the <m> directories searched below <repo>.` ([failure point 17](#9-likely-failure-points)), and on a rerun a `Removed <path>, left at an output name by an earlier run.` line for each earlier staged copy, capture log, listing and box plot;
      * `From here on the log goes to <work>/WPCT-F.07.02_capture.log.`
    * **Capture log:**
+     * one `ODS destination <name> with style <style> was open. The launcher closes it for the run.` line for each ODS destination the session had open, then `Every ODS destination listed above is closed and stays closed after the run. Only LISTING is open, ...` ([failure point 15](#9-likely-failure-points));
      * `UNVERIFIED IN SAS until run in a licensed session.`;
      * the settings and the `SYSVLONG=... SYSSCP=... SYSSCPL=... SYSENCODING=...` line, then the PROC PRODUCT_STATUS and PROC OPTIONS output;
      * `SASAUTOS=... with WPCTAUTO=...`;
@@ -233,11 +235,11 @@ run;
 
 7. **Compare** ([section 6](#6-compare-commands)).
 
-A rerun with the same settings first removes the captures and CSVs of the earlier run. When it cannot remove them, it stops before the program runs.
+A rerun with the same settings first removes the staged copy, the capture log and listing, the box plots, the captures and the CSVs of the earlier run. When it cannot remove them, it stops before the program runs.
 
 ### 5. Files produced
 
-Every file lands below the settings-block directories, never in the repository.
+Every file lands below the settings-block directories. The launcher refuses settings that would place any of them in the checkout ([failure point 17](#9-likely-failure-points)).
 
 | Path | Content |
 |---|---|
@@ -309,7 +311,7 @@ rm reference/sas_exports/WPCT-F.07.02_*.csv
 git status --porcelain
 ```
 
-* **Why the copy.** `tests/test_sas_exports.py` reads exports only from `reference/sas_exports/` ([section 7](#7-how-teststest_sas_exportspy-finds-the-exports)). The three CSVs are copied there for the run and removed afterwards.
+* **Why the copy.** `tests/test_sas_exports.py` reads exports only from `reference/sas_exports/` ([section 7](#7-how-teststest_sas_exportspy-finds-the-exports)). The three CSVs are copied there for the run and removed afterwards. This copy is a separate manual step for pytest: the launcher itself refuses a `wpct_csvdir` in the checkout ([failure point 17](#9-likely-failure-points)).
 * **Commit none of them.** `.gitignore` does not ignore CSV files in that folder, and `css_anadata` is subject-level.
 * **What runs.** `test_d01_02_05_to_09_sas_export_equivalence` has seven cases.
   * The three WPCT-F.07.02 cases run. Each passes only when every comparison of its file is PASS.
@@ -461,11 +463,27 @@ The numbers match the launcher header, and the launcher cites them in its commen
 14. **Directory creation.** DCREATE creates one level only, so the parents of `wpct_workdir` and `wpct_csvdir` must exist.
     * *Symptom:* `Cannot create the directory <dir>. Its parent must exist and be writable.`
     * *Debug:* create the missing parent directory and run again. Step 2 creates the work directory itself with `mkdir -p "$WPCT_WORKDIR"`.
-15. **Log location.** Settings and guard messages go to the session log. From the redirect on, the log goes to `<work>/WPCT-F.07.02_capture.log`, and the final status line goes back to the session log.
-    * *Symptom:* a SAS log or listing in the checkout. `git status --porcelain` lists it.
-    * *Debug:* move it into the work directory, and in batch start SAS there, as in step 4.
+15. **Log location.** Settings and guard messages go to the session log. From the redirect on, the log goes to `<work>/WPCT-F.07.02_capture.log`, and the final status line goes back to the session log. PROC PRINTTO does not move ODS output, so right after the redirect the launcher lists every open ODS destination in the capture log, clears every earlier ODS OUTPUT request, persistent ones included, with `ods output clear`, closes every destination with `ods _all_ close`, and opens only LISTING, whose print file is `<work>/WPCT-F.07.02_capture.lst` and whose graphics path is `<work>`. The program's own `ods listing;` at line 388 reopens LISTING without GPATH=, but no graph goes to LISTING: PROC GLM shows only ParameterEstimates (line 273), and PROC SGRENDER runs while LISTING is closed (line 338). The closed destinations stay closed after the run. In an interactive session the Results window therefore stays empty: read the capture log and listing instead.
+    * *Symptom:* a SAS log or listing, or HTML, RTF or image files, in the checkout. `git status --porcelain` lists them.
+    * *Debug:* move a log or listing into the work directory, and in batch start SAS there, as in step 4. For any other file, the command below must show one `ODS destination ... was open` line for each destination the session had open, then `Every ODS destination listed above is closed`, before the staged program runs. Without those lines the launcher stopped before the redirect and the program did not run, so the files come from the session. With them, a file the run still writes into the checkout means the launcher needs a change: record the file name and the log lines around its creation.
+
+      ```sh
+      grep -n '^NOTE: (WPCT CAPTURE).*ODS destination' "$WPCT_WORKDIR/WPCT-F.07.02_capture.log"
+      ```
 16. **PROC APPEND runs without FORCE.** If the second stratum has a variable of another length, the append stops with an ERROR instead of truncating values. `WPCT_APPEND` compares the row counts around each append, so a rejected or partial append fails the capture.
     * *Symptom:* a PROC APPEND ERROR for `wpctcap.parameter_estimates` or `wpctcap.css_stats`, then `Appending work._wpct_pe to wpctcap.parameter_estimates failed: SYSERR=<rc>, <n> rows to add, <n> rows before the append and <n> after it.` (or the same for `work._wpct_stats` and `wpctcap.css_stats`). A capture DATA step that fails gives `Building work._wpct_pe for wpctcap.parameter_estimates failed (SYSERR=<rc>), so this stratum is not captured.` instead. Either way the run ends with `A capture step of the staged copy failed.` and `No CSV is written.`
     * *Debug:* `proc contents data=wpctcap.css_stats; run;` shows the attributes the first stratum set. The fix is a change to the launcher.
+17. **Destination guard.** The settings are compared in one canonical text per OS: `\` becomes `/`, and every run of separators one `/`, except the leading pair of a Windows UNC path. On Windows the comparison ignores case. `wpct_workdir` and `wpct_csvdir` must be neither the checkout, nor inside it, nor a parent of it, so no path below them is in the checkout. A physical check then compares directory listings. It only reads, so nothing is written, in the destinations or in the checkout, before its verdict. One physical directory has one set of member names at a given moment, whatever path lists it. The check lists each destination directory, or the nearest existing directory above it, then every directory reachable from the checkout root. A checkout directory with the same member names may be that destination, reached through a symbolic link, a junction, a mount or another spelling, so the destination is refused; a destination that only happens to hold the member names of a checkout directory is refused as well. A checkout entry that can be neither listed as a directory nor opened as a file, such as a directory the session may enter but not list, stops the run, because a destination could lie unseen below it. An empty destination has the listing of every empty checkout directory, and a checkout usually has some, such as `.git/refs/tags`, so it cannot be told apart from them and is refused. The exception is an empty `capture`, `pdf` or default `csv` folder that an earlier run left in the work directory: the launcher creates those folders itself, so such a folder is checked as one still to be created in the work directory, removed once the check has passed, and created again. The work directory holds the launcher copy ([run step 2](#4-run-steps)), so it is not empty. Every entry at an output name in `<work>` and `<work>/pdf` is removed before the log redirect, and every entry at a contract CSV name in `<csv>` before the program runs, so no write goes through a link left there. Limits: a link created while the launcher runs is not seen, nor a destination whose members change during the check. An entry that a checkout listing names but the session cannot reach, a link to nothing or a member of a directory the session can list but not enter, is skipped, since no path through the checkout leads into it.
+    * *Symptom:* one of these ERROR lines, and the launcher stops before the staged program runs. The settings, physical-check and output-name lines are in the session log, before the log redirect; the CSV lines are in the capture log:
+      * `Setting <name> is not an absolute path. On UNIX a path starts with /: ...`, or `... On Windows a path starts with a drive letter, as in C:/work, or is a UNC path //server/share: ...`;
+      * `Setting <name> holds a colon after the drive, or a folder name that ends in a dot or a blank, which Windows reads as another path: ...`;
+      * `WPCT_WORKDIR must lie outside the repository <repo>`, or `WPCT_WORKDIR must not be a parent directory of the repository <repo>`, and the same for `WPCT_CSVDIR`;
+      * `<setting> <dir> is the same physical directory as <dir> in the repository, through a link or another spelling.`, or `<setting> <dir> would be created in <dir>, which is the same physical directory as <dir> in the repository, ...`;
+      * `<setting> <dir> is an empty directory, as is <dir> in the repository, so the launcher cannot tell them apart. Put a file into <dir>, or choose another directory, and run again.`;
+      * `<setting> <dir> cannot be placed: neither it nor any directory above it exists.` or `Cannot list <dir> to establish its physical location.`;
+      * `Cannot list the repository directory <dir>, so the launcher cannot establish that no destination lies in it.`, `Cannot search the repository entry <path>: it can be neither listed as a directory nor opened as a file, so the launcher cannot establish that no destination lies below it.`, `The repository holds more than 100000 directories, more than the search covers.`, `A repository path is too long for the search: <path>` or `The search cannot queue the repository directory <path>`;
+      * `Cannot remove the empty directory <dir>. Remove it by hand.`, `Cannot open the directory <dir> to remove the outputs of an earlier run.`, `Cannot list <path> for removal.` or `Cannot remove <path>, which stands at an output name. Remove it by hand.`;
+      * in `<work>/WPCT-F.07.02_capture.log`: `Cannot remove <csv>/<file>, left by an earlier run.`, `Cannot remove <csv>/<file>, which stands at the name of a contract CSV. Remove it by hand.`, `Cannot open <csv> to check for an earlier <file>.` or `Cannot assign a fileref to <csv>/<file> to check for an earlier <file>.`
+    * *Debug:* choose directories outside the checkout, and spell `wpct_repo` as the checkout is spelled. To find the link on a path, run `ls -ld` on each directory of the path on UNIX, which shows a link as `name -> target`, or `dir /AL` in each parent directory on Windows, which lists links and junctions. Remove the link, or choose another directory. For an empty destination, put a file into it, or choose another directory. For a checkout entry the launcher cannot list or open, `ls -ld` on it shows its type and permissions: give the session read access to it and run again. If it is a readable ordinary file or directory, the launcher needs a change: record the entry and the log lines around the ERROR. Remove by hand any file or empty directory the launcher names as one it cannot remove.
 
 Any change to the launcher is a repository change. Commit it, run the contract check of [section 6.1](#61-contract-check-of-the-launcher), and record the new commit.

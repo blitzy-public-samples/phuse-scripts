@@ -48,7 +48,8 @@
     the launcher checks that each of the 15 repository macro files WPCT-F.07.02 calls, directly
     or through another macro, can be read from whitepapers/utilities, and stops if one cannot.
 
-  FILES PRODUCED (all below the settings-block directories, never in the repository)
+  FILES PRODUCED, all below the settings-block directories. The launcher refuses settings that
+  would put any of them in the checkout (point 17).
     <work>/WPCT-F.07.02_staged.sas                 the staged working copy
     <work>/WPCT-F.07.02_capture.log and .lst       log and listing, from the redirect onwards
     <work>/capture/css_anadata.sas7bdat            native copies: the authoritative capture
@@ -130,10 +131,42 @@
    15. Log location. Settings and guard messages go to the session log. From the redirect on,
        the log goes to <work>/WPCT-F.07.02_capture.log. In batch, start SAS outside the
        repository, or pass -log, so the session log is not written into the checkout.
+       PROC PRINTTO does not move ODS output, so right after the redirect the launcher lists
+       every open ODS destination in the capture log, clears every earlier ODS OUTPUT request,
+       persistent ones included, then closes every destination and opens only LISTING: print
+       file <work>/WPCT-F.07.02_capture.lst, graphics in <work>. The closed destinations
+       stay closed after the run. In an interactive session the Results window therefore stays
+       empty: read the capture log and listing instead.
    16. PROC APPEND runs without FORCE. If the second stratum has a variable of another length,
        the append stops with an ERROR instead of truncating values. WPCT_APPEND compares the row
        counts around each append, so a rejected or partial append fails the capture with the
        ERROR Appending ... failed: SYSERR=..., and no CSV is written.
+   17. Destination guard. The settings are compared in one canonical text per OS: separators
+       become /, and every run of them one / (on Windows except the leading pair of a UNC path).
+       On UNIX a path starts with /. On Windows it starts with a drive letter, as in C:/work, or
+       is a UNC path //server/share, and the comparison ignores case. WPCT_WORKDIR and
+       WPCT_CSVDIR must be neither the checkout, nor inside it, nor a parent of it, so no path
+       below them is in the checkout. A physical check then compares directory listings and
+       only reads, so nothing is written before its verdict: one physical directory has one set
+       of member names at a given moment, whatever path lists it. It lists each destination
+       directory, or the nearest existing directory above it, then every directory reachable
+       from the checkout root. A checkout directory with the same member names means that a
+       symbolic link, a junction, a mount or another spelling may lead into the checkout, and
+       the run stops; a destination that only happens to hold the names of a checkout directory
+       is refused as well. A checkout entry that can be neither listed as a directory nor opened
+       as a file stops the run, because a destination could lie unseen below it. An empty
+       destination cannot be told apart from an empty checkout directory and is refused. The
+       exception is an empty capture, pdf or default csv folder that an earlier run left in the
+       work directory: it is checked as a folder still to be created there, removed once the
+       check has passed and created again. The work directory holds the launcher copy (run step
+       2 of RUNBOOK.md), so it is not empty. Every entry at an output name in <work> and
+       <work>/pdf is removed before the log redirect, and every entry at a contract CSV name in
+       <csv> before the program runs, so no write goes through a link left there. Limits: a
+       link created while the launcher runs is not seen, nor a destination whose members change
+       during the check, and an entry that a checkout listing names but the session cannot
+       reach (a link to nothing, or a member of a directory it can list but not enter) is
+       skipped, since no path through the checkout leads into it. Keep WPCT_REPO spelled as the
+       checkout, and keep the destinations off links into it.
 ***/
 
 
@@ -168,8 +201,9 @@ options mprint;
 
   %if &wpct_action = clear %then %do;
     data _null_;
-      length _wpct_fref $8;
+      length _wpct_fref _wpct_dref $8 _wpct_name $1024;
       _wpct_fref = '_wpctcsv';
+      _wpct_dref = '_wpctcsd';
       _wpct_rc = filename(_wpct_fref, "&path");
       if _wpct_rc = 0 then do;
         if fexist(_wpct_fref) then do;
@@ -180,7 +214,40 @@ options mprint;
             call symputx('wpct_ok', '0', 'G');
           end;
         end;
+        /* FEXIST follows a link, so it does not see a link that points to no existing file, and
+           the FILE write would create the target of that link. The CSV directory is therefore
+           listed: an entry at the file name is removed, and the run stops when that entry
+           cannot be removed or the directory cannot be opened (failure point 17). */
+        else do;
+          _wpct_found = 0;
+          _wpct_did = 0;
+          if filename(_wpct_dref, "&wpct_csvdir") = 0 then _wpct_did = dopen(_wpct_dref);
+          if _wpct_did = 0 then do;
+            put "ERROR: (WPCT CAPTURE) Cannot open &wpct_csvdir to check for an earlier &file..";
+            call symputx('wpct_ok', '0', 'G');
+          end;
+          else do;
+            do _wpct_i = 1 to dnum(_wpct_did) while (not _wpct_found);
+              _wpct_name = dread(_wpct_did, _wpct_i);
+              if "&sysscp" = 'WIN' then _wpct_found = (upcase(_wpct_name) = upcase("&file"));
+              else _wpct_found = (_wpct_name = "&file");
+            end;
+            _wpct_rc = dclose(_wpct_did);
+          end;
+          _wpct_rc = filename(_wpct_dref);
+          if _wpct_found then do;
+            if fdelete(_wpct_fref) = 0 then put "NOTE: (WPCT CAPTURE) Removed &path, a link to no existing file.";
+            else do;
+              put "ERROR: (WPCT CAPTURE) Cannot remove &path, which stands at the name of a contract CSV. Remove it by hand.";
+              call symputx('wpct_ok', '0', 'G');
+            end;
+          end;
+        end;
         _wpct_rc = filename(_wpct_fref);
+      end;
+      else do;
+        put "ERROR: (WPCT CAPTURE) Cannot assign a fileref to &path to check for an earlier &file..";
+        call symputx('wpct_ok', '0', 'G');
       end;
     run;
   %end;
@@ -430,11 +497,12 @@ options mprint;
     %put ERROR: (WPCT CAPTURE) This session is in syntax-check mode (OBS=0). Start a new SAS session and run the launcher again.;
   %else %do;
     /* Settings: present, usable in the macro calls of the program, absolute, and outside the
-       protected parts of the checkout. Paths are written back with / separators and without a
-       trailing separator. */
+       checkout (failure point 17). Paths are written back in their canonical text: / separators,
+       no repeated separator except the leading pair of a Windows UNC path, and no trailing
+       separator. */
     data _null_;
       length _wpct_name $16 _wpct_value _wpct_clean $1024 _wpct_enc _wpct_fmt _wpct_probe $64
-             _wpct_wp _wpct_dt _wpct_mpath $1024 _wpct_mac $32 _wpct_mref $8;
+             _wpct_rs _wpct_ds _wpct_mpath $1024 _wpct_mac $32 _wpct_mref $8;
       array _wpct_p {3} $1024 _wpct_p1-_wpct_p3;
       array _wpct_c {3} $1024 _wpct_c1-_wpct_c3;
       array _wpct_n {3} $1024 _wpct_n1-_wpct_n3;
@@ -458,16 +526,32 @@ options mprint;
         end;
         else do;
           _wpct_clean = translate(_wpct_value, '/', '\');
-          _wpct_clean = prxchange('s#(?<=.)/{2,}#/#', -1, trim(_wpct_clean));
+          /* One canonical text per OS. On Windows a leading double separator starts a UNC path
+             and stays. On UNIX a leading double separator is the same as a single one, so every
+             run of separators becomes one. */
+          if _wpct_fold then _wpct_clean = prxchange('s#(?<=.)/{2,}#/#', -1, trim(_wpct_clean));
+          else _wpct_clean = prxchange('s#/{2,}#/#', -1, trim(_wpct_clean));
           do while (length(_wpct_clean) > 1 and char(_wpct_clean, length(_wpct_clean)) = '/');
             _wpct_clean = substr(_wpct_clean, 1, length(_wpct_clean) - 1);
           end;
-          if not prxmatch('#^(/|[A-Za-z]:/)#', _wpct_clean) then do;
-            put 'ERROR: (WPCT CAPTURE) Setting ' _wpct_name 'is not an absolute path: ' _wpct_value;
+          /* Windows accepts a drive-qualified path or a UNC path with server and share only: a
+             path rooted on the current drive, a device path and a relative path are refused. */
+          if _wpct_fold and not prxmatch('#^([A-Za-z]:/|//[^/?.][^/]{0,}/[^/])#', trim(_wpct_clean)) then do;
+            put 'ERROR: (WPCT CAPTURE) Setting ' _wpct_name 'is not an absolute path. On Windows a path starts with a drive letter, as in C:/work, or is a UNC path //server/share: ' _wpct_value;
+            _wpct_ok = 0;
+          end;
+          else if not _wpct_fold and char(_wpct_clean, 1) ne '/' then do;
+            put 'ERROR: (WPCT CAPTURE) Setting ' _wpct_name 'is not an absolute path. On UNIX a path starts with /: ' _wpct_value;
             _wpct_ok = 0;
           end;
           else if index(cats('/', _wpct_clean, '/'), '/./') or index(cats('/', _wpct_clean, '/'), '/../') then do;
             put 'ERROR: (WPCT CAPTURE) Setting ' _wpct_name 'holds a . or .. segment: ' _wpct_value;
+            _wpct_ok = 0;
+          end;
+          /* Windows drops a dot or a blank at the end of a folder name and reads a colon after the
+             drive as a stream name, so such a path is another spelling of another path. */
+          else if _wpct_fold and (index(substr(_wpct_clean, 3), ':') or prxmatch('#[. ](/|$)#', trim(_wpct_clean))) then do;
+            put 'ERROR: (WPCT CAPTURE) Setting ' _wpct_name 'holds a colon after the drive, or a folder name that ends in a dot or a blank, which Windows reads as another path: ' _wpct_value;
             _wpct_ok = 0;
           end;
         end;
@@ -486,27 +570,26 @@ options mprint;
       end;
 
       if _wpct_ok then do;
-        if _wpct_n2 = _wpct_n1 or index(_wpct_n2, cats(_wpct_n1, '/')) = 1 then do;
-          put 'ERROR: (WPCT CAPTURE) WPCT_WORKDIR must lie outside the repository ' _wpct_c1;
-          _wpct_ok = 0;
-        end;
-        if _wpct_n3 = _wpct_n1 then do;
-          put 'ERROR: (WPCT CAPTURE) WPCT_CSVDIR must not be the repository root ' _wpct_c1;
-          _wpct_ok = 0;
-        end;
-        _wpct_wp = cats(_wpct_c1, '/whitepapers');
-        _wpct_dt = cats(_wpct_c1, '/data');
-        if _wpct_fold then do;
-          _wpct_wp = upcase(_wpct_wp);
-          _wpct_dt = upcase(_wpct_dt);
-        end;
-        if _wpct_n2 = _wpct_wp or index(_wpct_n2, cats(_wpct_wp, '/')) = 1 or _wpct_n3 = _wpct_wp or index(_wpct_n3, cats(_wpct_wp, '/')) = 1 then do;
-          put 'ERROR: (WPCT CAPTURE) WPCT_WORKDIR and WPCT_CSVDIR must not lie under ' _wpct_wp;
-          _wpct_ok = 0;
-        end;
-        if _wpct_n2 = _wpct_dt or index(_wpct_n2, cats(_wpct_dt, '/')) = 1 or _wpct_n3 = _wpct_dt or index(_wpct_n3, cats(_wpct_dt, '/')) = 1 then do;
-          put 'ERROR: (WPCT CAPTURE) WPCT_WORKDIR and WPCT_CSVDIR must not lie under ' _wpct_dt;
-          _wpct_ok = 0;
+        /* One rule for WPCT_WORKDIR and WPCT_CSVDIR, on the canonical texts: the directory must
+           be neither the repository, nor inside it, nor a parent of it. A path lies within a
+           directory when the path plus a separator starts with the directory plus a separator,
+           which holds for the root directory too. With the directory neither equal to, inside nor
+           a parent of the repository, every path below it (capture, pdf, csv, the staged copy,
+           the logs and the CSVs) lies outside the repository as well. */
+        if char(_wpct_n1, length(_wpct_n1)) = '/' then _wpct_rs = _wpct_n1;
+        else _wpct_rs = cats(_wpct_n1, '/');
+        do _wpct_i = 2 to 3;
+          _wpct_name = _wpct_m{_wpct_i};
+          if char(_wpct_n{_wpct_i}, length(_wpct_n{_wpct_i})) = '/' then _wpct_ds = _wpct_n{_wpct_i};
+          else _wpct_ds = cats(_wpct_n{_wpct_i}, '/');
+          if index(cats(_wpct_n{_wpct_i}, '/'), trim(_wpct_rs)) = 1 then do;
+            put 'ERROR: (WPCT CAPTURE) ' _wpct_name 'must lie outside the repository ' _wpct_c1;
+            _wpct_ok = 0;
+          end;
+          else if index(cats(_wpct_n1, '/'), trim(_wpct_ds)) = 1 then do;
+            put 'ERROR: (WPCT CAPTURE) ' _wpct_name 'must not be a parent directory of the repository ' _wpct_c1;
+            _wpct_ok = 0;
+          end;
         end;
         if not fileexist(cats(_wpct_c1, '/whitepapers/WPCT/WPCT-F.07.02.sas')) then do;
           put 'ERROR: (WPCT CAPTURE) Not found: ' _wpct_c1 +(-1) '/whitepapers/WPCT/WPCT-F.07.02.sas';
@@ -635,6 +718,297 @@ options mprint;
     run;
   %end;
 
+  /* Physical containment (failure point 17). The checks above compare path text, which a
+     symbolic link, a junction, a mount or another spelling of a repository directory passes.
+     This check compares directory listings instead: one physical directory has one set of
+     member names at a given moment, whatever path lists it. Each destination directory, or the
+     nearest existing directory above it when it does not exist yet, is listed, and then every
+     directory reachable from the repository root. A repository directory with the member names
+     of a destination listing may be that destination, and the run stops; when no repository
+     directory has them, the destination is not in the repository. The check only reads: it
+     lists directories and opens files for input, so nothing is created, written or removed, in
+     the destinations or in the repository, before the verdict. A repository entry that can be
+     neither listed nor opened, a repository root that cannot be listed and a search beyond its
+     bounds stop the run, because a destination could lie unseen below them. An empty
+     destination has the listing of every empty repository directory, so the two cannot be told
+     apart, and it is refused. The exception is a capture, pdf or default csv folder of the work
+     directory that an earlier run left empty. The launcher creates those folders itself, so
+     such a folder is checked as one still to be created in the work directory, removed once
+     every check has passed, and created again by the directory step below. Only DATA step
+     functions are used, so the check also runs where the X command is disabled. */
+  %if &wpct_ok = 1 %then %do;
+    data _null_;
+      length _wpct_repo _wpct_target _wpct_dir _wpct_parent _wpct_root _wpct_name _wpct_path
+             _wpct_y _wpct_qy _wpct_where $1024 _wpct_label $24 _wpct_perm $64
+             _wpct_dref _wpct_mref _wpct_rref $8;
+      array _wpct_t {4} $1024 _wpct_t1-_wpct_t4;
+      array _wpct_s {4} $24 _wpct_s1-_wpct_s4 ('WPCT_WORKDIR' 'WPCT_WORKDIR/capture' 'WPCT_WORKDIR/pdf' 'WPCT_CSVDIR');
+      array _wpct_e {4} $1024 _wpct_e1-_wpct_e4;
+      array _wpct_j {4} _wpct_j1-_wpct_j4;
+      array _wpct_o {4} _wpct_o1-_wpct_o4;
+      array _wpct_ed {4} $1024 _wpct_ed1-_wpct_ed4;
+      array _wpct_ec {4} _wpct_ec1-_wpct_ec4;
+      array _wpct_nf {4} _wpct_nf1-_wpct_nf4;
+      array _wpct_py {4} $1024 _wpct_py1-_wpct_py4;
+      declare hash _wpct_q();
+      _wpct_q.defineKey('_wpct_qk');
+      _wpct_q.defineData('_wpct_qy');
+      _wpct_q.defineDone();
+      declare hash _wpct_l();
+      _wpct_l.defineKey('_wpct_ek', '_wpct_name');
+      _wpct_l.defineDone();
+      _wpct_ok = 1;
+      _wpct_fold = ("&sysscp" = 'WIN');
+      _wpct_repo = symget('wpct_repo');
+      _wpct_t1 = symget('wpct_workdir');
+      _wpct_t2 = cats(_wpct_t1, '/capture');
+      _wpct_t3 = cats(_wpct_t1, '/pdf');
+      _wpct_t4 = symget('wpct_csvdir');
+      _wpct_dref = '_wpctdir';
+      _wpct_mref = '_wpctmem';
+      _wpct_rref = '_wpctrmd';
+      _wpct_ne = 0;
+      _wpct_ek = 0;
+      _wpct_qk = 0;
+      do _wpct_i = 1 to 4;
+        _wpct_o{_wpct_i} = 0;
+        _wpct_ec{_wpct_i} = 0;
+        _wpct_py{_wpct_i} = ' ';
+      end;
+
+      /* The existing directory each destination is, or is created in. Parents are taken as the
+         directory step below takes them, and never above the root of the path. */
+      do _wpct_i = 1 to 4 while (_wpct_ok);
+        _wpct_target = _wpct_t{_wpct_i};
+        _wpct_label = _wpct_s{_wpct_i};
+        _wpct_dir = _wpct_target;
+        if _wpct_fold and char(_wpct_dir, 2) = ':' then _wpct_root = substr(_wpct_dir, 1, 3);
+        else if _wpct_fold then _wpct_root = prxchange('s#^(//[^/]+/[^/]+).*$#$1#', 1, trim(_wpct_dir));
+        else _wpct_root = '/';
+        do while (_wpct_ok and not fileexist(_wpct_dir));
+          if _wpct_dir = _wpct_root then do;
+            put 'ERROR: (WPCT CAPTURE) ' _wpct_label _wpct_target 'cannot be placed: neither it nor any directory above it exists.';
+            _wpct_ok = 0;
+          end;
+          else do;
+            _wpct_name = scan(_wpct_dir, -1, '/');
+            _wpct_plen = length(_wpct_dir) - length(_wpct_name) - 1;
+            if _wpct_plen > 0 then _wpct_parent = substr(_wpct_dir, 1, _wpct_plen);
+            else _wpct_parent = ' ';
+            if _wpct_parent = ' ' or char(_wpct_parent, length(_wpct_parent)) = ':' then _wpct_parent = cats(_wpct_parent, '/');
+            if length(_wpct_parent) < length(_wpct_root) then _wpct_dir = _wpct_root;
+            else _wpct_dir = _wpct_parent;
+          end;
+        end;
+        /* The capture and pdf folders, and the CSV folder when it is the default <work>/csv, are
+           created by the launcher. Such a folder that exists, can be listed and is empty was left
+           by an earlier run. It is checked as a folder still to be created in the work directory,
+           whose existing directory is then the work directory, and it is removed after the
+           check, so an empty folder never needs to be told apart from an empty repository
+           directory. */
+        if _wpct_ok and _wpct_i > 1 and _wpct_dir = _wpct_target then do;
+          if _wpct_i < 4 then _wpct_own = 1;
+          else if _wpct_fold then _wpct_own = (upcase(_wpct_target) = upcase(cats(_wpct_t1, '/csv')));
+          else _wpct_own = (_wpct_target = cats(_wpct_t1, '/csv'));
+          if _wpct_own then do;
+            if filename(_wpct_dref, trim(_wpct_target)) = 0 then do;
+              _wpct_did = dopen(_wpct_dref);
+              if _wpct_did > 0 then do;
+                _wpct_nm = 0;
+                do _wpct_mi = 1 to dnum(_wpct_did);
+                  _wpct_name = dread(_wpct_did, _wpct_mi);
+                  if _wpct_name ne '.' and _wpct_name ne '..' then _wpct_nm = _wpct_nm + 1;
+                end;
+                _wpct_o{_wpct_i} = (_wpct_nm = 0);
+                _wpct_rc = dclose(_wpct_did);
+              end;
+              _wpct_rc = filename(_wpct_dref);
+            end;
+            if _wpct_o{_wpct_i} then _wpct_dir = _wpct_e1;
+          end;
+        end;
+        _wpct_e{_wpct_i} = _wpct_dir;
+        _wpct_j{_wpct_i} = 0;
+        do _wpct_k = 1 to _wpct_ne;
+          if _wpct_j{_wpct_i} = 0 and (_wpct_ed{_wpct_k} = _wpct_dir or (_wpct_fold and upcase(_wpct_ed{_wpct_k}) = upcase(_wpct_dir))) then _wpct_j{_wpct_i} = _wpct_k;
+        end;
+        if _wpct_ok and _wpct_j{_wpct_i} = 0 then do;
+          _wpct_ne = _wpct_ne + 1;
+          _wpct_j{_wpct_i} = _wpct_ne;
+          _wpct_ed{_wpct_ne} = _wpct_dir;
+        end;
+      end;
+
+      /* The listing of each of those directories: its member count, and every member name in the
+         hash object _wpct_l, keyed by the position of the directory and the name. */
+      do _wpct_k = 1 to _wpct_ne while (_wpct_ok);
+        _wpct_dir = _wpct_ed{_wpct_k};
+        _wpct_did = 0;
+        if filename(_wpct_dref, trim(_wpct_dir)) = 0 then _wpct_did = dopen(_wpct_dref);
+        if _wpct_did = 0 then do;
+          put 'ERROR: (WPCT CAPTURE) Cannot list ' _wpct_dir +(-1) ' to establish its physical location.';
+          _wpct_ok = 0;
+        end;
+        else do;
+          _wpct_ek = _wpct_k;
+          do _wpct_mi = 1 to dnum(_wpct_did);
+            _wpct_name = dread(_wpct_did, _wpct_mi);
+            if _wpct_name ne '.' and _wpct_name ne '..' then do;
+              _wpct_ec{_wpct_k} = _wpct_ec{_wpct_k} + 1;
+              _wpct_rc = _wpct_l.add();
+            end;
+          end;
+          _wpct_rc = dclose(_wpct_did);
+        end;
+        _wpct_rc = filename(_wpct_dref);
+      end;
+
+      /* Breadth-first search of every directory reachable from the repository root. The hash
+         object _wpct_q holds the queue, keyed by the position of each directory in it. A
+         repository directory has the listing of a destination when it holds as many members and
+         each of its member names is in that listing. Each member is then classified: a member
+         DOPEN lists is a directory and is queued; a member FILEEXIST does not find is a link to
+         nothing, below which nothing can lie; a member FOPEN opens for input is a file, unless
+         its permissions show a directory or a link that DOPEN could not list. Any other member,
+         and any repository directory that cannot be listed, stops the run. */
+      _wpct_qn = 0;
+      _wpct_qi = 0;
+      if _wpct_ok then do;
+        _wpct_qn = 1;
+        _wpct_qk = 1;
+        _wpct_qy = _wpct_repo;
+        _wpct_rc = _wpct_q.add();
+      end;
+      do while (_wpct_ok and _wpct_qi < _wpct_qn);
+        _wpct_qi = _wpct_qi + 1;
+        _wpct_qk = _wpct_qi;
+        _wpct_rc = _wpct_q.find();
+        _wpct_y = _wpct_qy;
+        _wpct_rc = _wpct_q.remove();
+        _wpct_did = 0;
+        if filename(_wpct_dref, trim(_wpct_y)) = 0 then _wpct_did = dopen(_wpct_dref);
+        if _wpct_did = 0 then do;
+          put 'ERROR: (WPCT CAPTURE) Cannot list the repository directory ' _wpct_y +(-1) ', so the launcher cannot establish that no destination lies in it.';
+          _wpct_ok = 0;
+        end;
+        else do;
+          _wpct_ny = 0;
+          do _wpct_k = 1 to _wpct_ne;
+            _wpct_nf{_wpct_k} = 0;
+          end;
+          do _wpct_mi = 1 to dnum(_wpct_did) while (_wpct_ok);
+            _wpct_name = dread(_wpct_did, _wpct_mi);
+            if _wpct_name ne '.' and _wpct_name ne '..' then do;
+              _wpct_ny = _wpct_ny + 1;
+              do _wpct_k = 1 to _wpct_ne;
+                _wpct_ek = _wpct_k;
+                if _wpct_l.check() ne 0 then _wpct_nf{_wpct_k} = _wpct_nf{_wpct_k} + 1;
+              end;
+              if length(_wpct_y) + 1 + length(_wpct_name) >= 1024 then do;
+                put 'ERROR: (WPCT CAPTURE) A repository path is too long for the search: ' _wpct_y +(-1) '/' _wpct_name;
+                _wpct_ok = 0;
+              end;
+              else do;
+                _wpct_path = trim(_wpct_y) || '/' || trim(_wpct_name);
+                /* 0: neither listed nor opened, 1: a directory, 2: a file, 3: nothing there,
+                   4: a directory or a link that cannot be listed. */
+                _wpct_kind = 0;
+                if filename(_wpct_mref, trim(_wpct_path)) = 0 then do;
+                  _wpct_mid = dopen(_wpct_mref);
+                  if _wpct_mid > 0 then do;
+                    _wpct_kind = 1;
+                    _wpct_rc = dclose(_wpct_mid);
+                  end;
+                  else if not fileexist(trim(_wpct_path)) then _wpct_kind = 3;
+                  else do;
+                    _wpct_fid = fopen(_wpct_mref, 'I');
+                    if _wpct_fid > 0 then do;
+                      _wpct_perm = left(finfo(_wpct_fid, 'Access Permission'));
+                      if char(_wpct_perm, 1) = 'd' or char(_wpct_perm, 1) = 'l' then _wpct_kind = 4;
+                      else _wpct_kind = 2;
+                      _wpct_rc = fclose(_wpct_fid);
+                    end;
+                  end;
+                  _wpct_rc = filename(_wpct_mref);
+                end;
+                if _wpct_kind = 1 then do;
+                  if _wpct_qn >= 100000 then do;
+                    put 'ERROR: (WPCT CAPTURE) The repository holds more than 100000 directories, more than the search covers.';
+                    _wpct_ok = 0;
+                  end;
+                  else do;
+                    _wpct_qn = _wpct_qn + 1;
+                    _wpct_qk = _wpct_qn;
+                    _wpct_qy = _wpct_path;
+                    if _wpct_q.add() ne 0 then do;
+                      put 'ERROR: (WPCT CAPTURE) The search cannot queue the repository directory ' _wpct_path;
+                      _wpct_ok = 0;
+                    end;
+                  end;
+                end;
+                else if _wpct_kind = 4 then do;
+                  put 'ERROR: (WPCT CAPTURE) Cannot list the repository directory ' _wpct_path +(-1) ', so the launcher cannot establish that no destination lies in it.';
+                  _wpct_ok = 0;
+                end;
+                else if _wpct_kind = 0 then do;
+                  put 'ERROR: (WPCT CAPTURE) Cannot search the repository entry ' _wpct_path +(-1) ': it can be neither listed as a directory nor opened as a file, so the launcher cannot establish that no destination lies below it.';
+                  _wpct_ok = 0;
+                end;
+              end;
+            end;
+          end;
+          _wpct_rc = dclose(_wpct_did);
+          if _wpct_ok then do _wpct_k = 1 to _wpct_ne;
+            if _wpct_py{_wpct_k} = ' ' and _wpct_nf{_wpct_k} = 0 and _wpct_ec{_wpct_k} = _wpct_ny then _wpct_py{_wpct_k} = _wpct_y;
+          end;
+        end;
+        _wpct_rc = filename(_wpct_dref);
+      end;
+
+      /* The verdict for each destination: a repository directory with its listing refuses it. */
+      do _wpct_i = 1 to 4;
+        _wpct_p = _wpct_j{_wpct_i};
+        if _wpct_p > 0 then do;
+          if _wpct_py{_wpct_p} ne ' ' then do;
+            _wpct_label = _wpct_s{_wpct_i};
+            _wpct_target = _wpct_t{_wpct_i};
+            _wpct_dir = _wpct_e{_wpct_i};
+            _wpct_where = _wpct_py{_wpct_p};
+            if _wpct_ec{_wpct_p} = 0 then
+              put 'ERROR: (WPCT CAPTURE) ' _wpct_label _wpct_dir 'is an empty directory, as is ' _wpct_where 'in the repository, so the launcher cannot tell them apart. Put a file into ' _wpct_dir +(-1) ', or choose another directory, and run again.';
+            else if _wpct_dir = _wpct_target then
+              put 'ERROR: (WPCT CAPTURE) ' _wpct_label _wpct_target 'is the same physical directory as ' _wpct_where 'in the repository, through a link or another spelling.';
+            else
+              put 'ERROR: (WPCT CAPTURE) ' _wpct_label _wpct_target 'would be created in ' _wpct_dir +(-1) ', which is the same physical directory as ' _wpct_where 'in the repository, through a link or another spelling.';
+            _wpct_ok = 0;
+          end;
+        end;
+      end;
+
+      /* Only when every check has passed, the empty capture, pdf and csv folders of an earlier
+         run are removed; the directory step below creates them again. FDELETE removes the
+         directory entry, a link included, and never the directory a link points to. */
+      if _wpct_ok then do _wpct_i = 2 to 4;
+        if _wpct_o{_wpct_i} then do;
+          _wpct_dir = _wpct_t{_wpct_i};
+          _wpct_rc = 1;
+          if filename(_wpct_rref, trim(_wpct_dir)) = 0 then do;
+            _wpct_rc = fdelete(_wpct_rref);
+            _wpct_frc = filename(_wpct_rref);
+          end;
+          if _wpct_rc = 0 then put 'NOTE: (WPCT CAPTURE) Removed the empty directory ' _wpct_dir +(-1) ', left by an earlier run. It is created again.';
+          else do;
+            put 'ERROR: (WPCT CAPTURE) Cannot remove the empty directory ' _wpct_dir +(-1) '. Remove it by hand.';
+            _wpct_ok = 0;
+          end;
+        end;
+      end;
+      if _wpct_ok then
+        put 'NOTE: (WPCT CAPTURE) Physical containment: none of the ' _wpct_ne 'destination directories has the listing of any of the ' _wpct_qn 'directories searched below ' _wpct_repo +(-1) '.';
+      call symputx('wpct_ok', _wpct_ok, 'G');
+    run;
+  %end;
+
   /* Directories: the work directory, its capture and pdf subfolders, and the CSV directory. */
   %if &wpct_ok = 1 %then %do;
     data _null_;
@@ -665,6 +1039,99 @@ options mprint;
     run;
   %end;
 
+  /* Output leaves (failure point 17). Before anything is written, every entry at one of the exact
+     names the staged program and the launcher write is removed, and no other file. The launcher
+     writes the staged copy and the capture log and listing in the work directory. The program
+     keeps the strata DIABP at timepoint 815 and SYSBP at timepoint 816 (lines 90-93 of
+     WPCT-F.07.02.sas), and line 339 writes the box plot of each stratum to outputs_folder, a
+     backslash and WPCT-F.07.02_Box_plot_<PARAMCD>_Change_by_visit_for_timepoint_<ATPTN>.pdf.
+     With outputs_folder set to <work>/pdf, Windows writes the two box plots into the pdf folder,
+     and UNIX writes files named pdf\<name> into the work directory (failure point 12). The two
+     bare names are removed from the pdf folder and the two pdf\ names from the work directory.
+     Names are compared exactly on UNIX and ignoring case on Windows. Any other file, such as a
+     box plot kept under another name, stays. A revision of the program that moves or changes an
+     anchor line stops at the anchor check (failure point 6); one with other strata or another
+     PDF name needs these names changed. FDELETE removes the directory entry, which may be a
+     symbolic or a hard link, and never changes the file it points to, so no later FILE, PRINTTO
+     or ODS PDF write goes through a link left at an output name. The directories are listed
+     rather than tested name by name, so a link that points to no existing file is removed as
+     well. The CSVs and the native datasets of an earlier run are removed before the program
+     runs. */
+  %if &wpct_ok = 1 %then %do;
+    data _null_;
+      length _wpct_work _wpct_dir _wpct_name _wpct_path $1024 _wpct_dref _wpct_lref $8;
+      array _wpct_o {7} $72 _wpct_o1-_wpct_o7 (
+        'WPCT-F.07.02_staged.sas' 'WPCT-F.07.02_capture.log' 'WPCT-F.07.02_capture.lst'
+        'pdf\WPCT-F.07.02_Box_plot_DIABP_Change_by_visit_for_timepoint_815.pdf'
+        'pdf\WPCT-F.07.02_Box_plot_SYSBP_Change_by_visit_for_timepoint_816.pdf'
+        'WPCT-F.07.02_Box_plot_DIABP_Change_by_visit_for_timepoint_815.pdf'
+        'WPCT-F.07.02_Box_plot_SYSBP_Change_by_visit_for_timepoint_816.pdf');
+      declare hash _wpct_l();
+      _wpct_l.defineKey('_wpct_lk');
+      _wpct_l.defineData('_wpct_path');
+      _wpct_l.defineDone();
+      _wpct_ok = 1;
+      _wpct_fold = ("&sysscp" = 'WIN');
+      _wpct_work = symget('wpct_workdir');
+      _wpct_dref = '_wpctdir';
+      _wpct_lref = '_wpctlef';
+      _wpct_ln = 0;
+      do _wpct_k = 1 to 2;
+        if _wpct_k = 1 then do;
+          _wpct_dir = _wpct_work;
+          _wpct_lo = 1;
+          _wpct_hi = 5;
+        end;
+        else do;
+          _wpct_dir = cats(_wpct_work, '/pdf');
+          _wpct_lo = 6;
+          _wpct_hi = 7;
+        end;
+        _wpct_did = 0;
+        if filename(_wpct_dref, trim(_wpct_dir)) = 0 then _wpct_did = dopen(_wpct_dref);
+        if _wpct_did = 0 then do;
+          put 'ERROR: (WPCT CAPTURE) Cannot open the directory ' _wpct_dir +(-1) ' to remove the outputs of an earlier run.';
+          _wpct_ok = 0;
+        end;
+        else do;
+          do _wpct_i = 1 to dnum(_wpct_did);
+            _wpct_name = dread(_wpct_did, _wpct_i);
+            _wpct_hit = 0;
+            do _wpct_x = _wpct_lo to _wpct_hi while (not _wpct_hit);
+              if _wpct_fold then _wpct_hit = (upcase(_wpct_name) = upcase(_wpct_o{_wpct_x}));
+              else _wpct_hit = (_wpct_name = _wpct_o{_wpct_x});
+            end;
+            if _wpct_hit then do;
+              _wpct_ln = _wpct_ln + 1;
+              _wpct_lk = _wpct_ln;
+              _wpct_path = trim(_wpct_dir) || '/' || trim(_wpct_name);
+              if _wpct_l.add() ne 0 then do;
+                put 'ERROR: (WPCT CAPTURE) Cannot list ' _wpct_path 'for removal.';
+                _wpct_ok = 0;
+              end;
+            end;
+          end;
+          _wpct_rc = dclose(_wpct_did);
+        end;
+        _wpct_rc = filename(_wpct_dref);
+      end;
+      do _wpct_lk = 1 to _wpct_ln;
+        _wpct_rc = _wpct_l.find();
+        _wpct_rc = 1;
+        if filename(_wpct_lref, trim(_wpct_path)) = 0 then do;
+          _wpct_rc = fdelete(_wpct_lref);
+          _wpct_frc = filename(_wpct_lref);
+        end;
+        if _wpct_rc = 0 then put 'NOTE: (WPCT CAPTURE) Removed ' _wpct_path +(-1) ', left at an output name by an earlier run.';
+        else do;
+          put 'ERROR: (WPCT CAPTURE) Cannot remove ' _wpct_path +(-1) ', which stands at an output name. Remove it by hand.';
+          _wpct_ok = 0;
+        end;
+      end;
+      call symputx('wpct_ok', _wpct_ok, 'G');
+    run;
+  %end;
+
   /* Log redirect and the environment record. No manifest file is written. */
   %if &wpct_ok = 1 %then %do;
     %put NOTE: (WPCT CAPTURE) From here on the log goes to &wpct_workdir/WPCT-F.07.02_capture.log.;
@@ -672,6 +1139,28 @@ options mprint;
                  print="&wpct_workdir/WPCT-F.07.02_capture.lst" new;
     run;
     %let wpct_printto = 1;
+
+    /* PROC PRINTTO moves only the log and the LISTING print file, not ODS output. Any other ODS
+       destination the session opened (HTML, HTML5, RTF, SASREPORT, a TAGSETS destination or
+       DOCUMENT) would still write the output of PROC GLM and PROC SGRENDER to its own path, and
+       an ODS OUTPUT request the session made would still write its data set to its own library.
+       Either can be in the checkout. Each open destination is listed in the capture log. ODS
+       OUTPUT CLEAR then discards every ODS OUTPUT request the session made, persistent ones
+       included, and ODS _ALL_ CLOSE closes every destination. Only LISTING is opened again: its
+       print file is the redirected listing and its graphics path the work directory. The ODS
+       OUTPUT statement of the program itself (line 274) then opens the OUTPUT destination for
+       its ParameterEstimates table only, and its ODS PDF statement opens the only other
+       destination. The closed destinations are not opened again after the run (failure
+       point 15). */
+    data _null_;
+      set sashelp.vdest;
+      put 'NOTE: (WPCT CAPTURE) ODS destination ' destination 'with style ' style 'was open. The launcher closes it for the run.';
+    run;
+    ods output clear;
+    ods _all_ close;
+    ods listing gpath="&wpct_workdir";
+    %put NOTE: (WPCT CAPTURE) Every ODS destination listed above is closed and stays closed after the run. Only LISTING is open, with the print file &wpct_workdir/WPCT-F.07.02_capture.lst and the graphics path &wpct_workdir, besides the ODS OUTPUT and ODS PDF destinations the program opens itself. Every earlier ODS OUTPUT request, persistent ones included, is cleared.;
+
     %put NOTE: (WPCT CAPTURE) UNVERIFIED IN SAS until run in a licensed session.;
     %put NOTE: (WPCT CAPTURE) WPCT_REPO=%superq(wpct_repo);
     %put NOTE: (WPCT CAPTURE) WPCT_WORKDIR=%superq(wpct_workdir);
