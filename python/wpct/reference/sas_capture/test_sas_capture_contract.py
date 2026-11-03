@@ -23,8 +23,14 @@ from wpct import schemas
 LAUNCHER = Path(__file__).with_name("WPCT-F.07.02_capture.sas")
 EXPORT_MACRO = "wpct_export_csv"
 
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
-_MACRO_COMMENT = re.compile(r"%\*[^;]*;")
+# SAS comments and quoted literals, lexed left to right; an unterminated one runs to the end.
+_SOURCE_TOKEN = re.compile(
+    r"/\*.*?(?:\*/|\Z)"  # block comment
+    r"|%\*(?:'(?:[^']|'')*(?:'|\Z)|\"(?:[^\"]|\"\")*(?:\"|\Z)|[^'\";])*;?"  # macro comment
+    r"|'(?:[^']|'')*(?:'|\Z)"  # single-quoted literal, '' escaping a quote
+    r"|(?P<double_quoted>\"(?:[^\"]|\"\")*(?:\"|\Z))",  # double-quoted literal, "" escaping
+    re.DOTALL,
+)
 _MACRO_DEFINITION = re.compile(
     rf"%macro\s+{EXPORT_MACRO}\b.*?%mend\s+{EXPORT_MACRO}\s*;", re.IGNORECASE | re.DOTALL
 )
@@ -35,12 +41,13 @@ _ARGUMENT = re.compile(r"(?P<name>\w+)\s*=\s*(?P<value>[^,]*)")
 def _export_statements(text: str) -> list[dict[str, str]]:
     """The keyword arguments of every export-macro invocation in launcher source ``text``.
 
-    Block and macro comments and the export macro's own definition are removed first, so only
-    statements that run count. Argument names are folded to lower case, as SAS folds them, and
+    Block and macro comments, single-quoted literals (where SAS resolves no macro call) and the
+    export macro's own definition are removed first; double-quoted literals stay, since SAS
+    resolves macro calls inside them. The remaining invocation-shaped source is collected without
+    evaluating SAS control flow. Argument names are folded to lower case, as SAS folds them, and
     each value has its blanks and line breaks collapsed to single blanks.
     """
-    code = _BLOCK_COMMENT.sub(" ", text)
-    code = _MACRO_COMMENT.sub(" ", code)
+    code = _SOURCE_TOKEN.sub(lambda token: token["double_quoted"] or " ", text)
     code = _MACRO_DEFINITION.sub(" ", code)
     return [
         {
@@ -74,33 +81,36 @@ def test_s02_trn_03_mod_01_mod_02_capture_launcher_exports_07_02_contract() -> N
     SUMMARY statistics), S02-TRN-05 (the merged ``pval``) and S02-MOD-02 (the GLM
     ParameterEstimates). The launcher must exist, and the files it exports must be exactly the
     WPCT-F.07.02 files of ``schemas.SAS_EXPORT_FILES``, each once, so no file is missing, invented
-    or taken from WPCT-F.07.07. File names match exactly, since the loader opens them by name.
-    Each file's ``vars=`` list must hold every required column as a whole token; columns match
-    case-insensitively, as the loader matches them, and extra columns are allowed.
+    or taken from WPCT-F.07.07. Each file's ``vars=`` list must hold every required column, and
+    extra columns are allowed. File names, like columns, match case-insensitively as whole tokens;
+    the loader matches columns the same way.
     """
     assert LAUNCHER.is_file(), f"the capture launcher is missing: {LAUNCHER}"
-    expected = [
-        file_name
+    # Folded name -> the schema's spelling, which _required_columns and the missing-file
+    # diagnostic take.
+    expected = {
+        file_name.upper(): file_name
         for file_name in schemas.SAS_EXPORT_FILES
         if schemas.sas_export_spec(file_name).program_id == schemas.PROGRAM_07_02
-    ]
+    }
     assert len(expected) > 0, f"wpct.schemas lists no {schemas.PROGRAM_07_02} SAS export file"
 
     problems: list[str] = []
-    exported: dict[str, str] = {}
+    # Folded name -> (the launcher's spelling, its vars= value).
+    exported: dict[str, tuple[str, str]] = {}
     for position, arguments in enumerate(_export_statements(LAUNCHER.read_text("latin-1")), 1):
         file_name = arguments.get("file", "")
         if not file_name:
             problems.append(f"export statement {position} has no file= argument")
-        elif file_name in exported:
+        elif file_name.upper() in exported:
             problems.append(f"{file_name} is exported more than once")
         else:
-            exported[file_name] = arguments.get("vars", "")
+            exported[file_name.upper()] = (file_name, arguments.get("vars", ""))
 
-    absent = [file_name for file_name in expected if file_name not in exported]
+    absent = [file_name for key, file_name in expected.items() if key not in exported]
     if absent:
         problems.append(f"no export statement for: {', '.join(absent)}")
-    unexpected = [file_name for file_name in exported if file_name not in expected]
+    unexpected = [file_name for key, (file_name, _) in exported.items() if key not in expected]
     if unexpected:
         problems.append(
             f"export statements for files outside the {schemas.PROGRAM_07_02} contract: "
@@ -111,14 +121,15 @@ def test_s02_trn_03_mod_01_mod_02_capture_launcher_exports_07_02_contract() -> N
             f"the launcher exports {len(exported)} files; the {schemas.PROGRAM_07_02} contract "
             f"has {len(expected)}"
         )
-    for file_name in expected:
-        if file_name not in exported:
+    for key, file_name in expected.items():
+        if key not in exported:
             continue
-        tokens = set(schemas.upper_columns(exported[file_name].split()))
+        launcher_name, columns = exported[key]
+        tokens = set(schemas.upper_columns(columns.split()))
         lacking = [
             column for column in _required_columns(file_name) if column.upper() not in tokens
         ]
         if lacking:
-            problems.append(f"{file_name}: vars= lacks {' '.join(lacking)}")
+            problems.append(f"{launcher_name}: vars= lacks {' '.join(lacking)}")
 
     assert not problems, "\n".join(problems)
