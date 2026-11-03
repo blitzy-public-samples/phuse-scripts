@@ -54,11 +54,12 @@ With the staged copy, no WPCT-F.07.02 export is impossible to capture.
 
 The export README predates this launcher. Line 64 of the README asks for `BEST32.`. Line 81 says "No SAS helper program is provided, and none should be committed", but this folder now provides one.
 
-* **Numbers.** The launcher removes every display format and writes each CSV numeric with the explicit format `E32.17` (setting `wpct_numfmt`), through modified list output, with blanks trimmed. Estimates are therefore not rounded, and small p-values are not written as text such as `<.0001`.
+* **Numbers.** The launcher removes every display format and writes each CSV numeric with the `PUTN` function and the explicit format `E32.17` (setting `wpct_numfmt`), without leading blanks; the pre-flight check tests the format with the same function. Estimates are therefore not rounded, and small p-values are not written as text such as `<.0001`.
 * **Why the loader accepts it.** `sas_reference._SAS_NUMBER` in [`wpct/sas_reference.py`](../../wpct/sas_reference.py) accepts a signed mantissa with an optional `E` exponent, and README line 69 says that blanks around a number are ignored.
 * **Precision.** SAS documents formatted output beyond about 15 significant digits as possibly inaccurate. An exact CSV round trip is therefore unverified until the first licensed run, and the launcher reports it column by column ([failure point 4](#9-likely-failure-points)). The `.sas7bdat` copies are the exact, authoritative capture, and `BEST32.` is the documented fallback.
 * **Other values.**
   * Missing numerics are written as `.`, and missing character values as an empty field.
+  * Character values are written as stored, without trailing blanks; leading and interior blanks are kept. A value that holds a comma, a double quote or a line break is enclosed in double quotes, with each double quote in it doubled (README line 63). Each record is written whole by one formatted `PUT`, so no DSD rule changes a value.
   * The encoding is Latin-1 (setting `wpct_encoding`).
   * No WPCT-F.07.02 export column is a date, so no date text is written.
 
@@ -208,7 +209,7 @@ run;
    * **The exports, for each file:**
      * `<data> has <n> rows, the count the shipped SAS log reports for <file>.`, with 3548, 60 and 10;
      * `Wrote <csv>/<file> from <data>.`;
-     * for each column, `every CSV value reads back as the native value.`, or a WARNING ([failure point 4](#9-likely-failure-points)).
+     * for each column, `every CSV value reads back as the native value.`, or a WARNING ([failure point 4](#9-likely-failure-points) for a numeric column, [failure point 3](#9-likely-failure-points) for a character one).
    * **The session log's last line**, after the redirect ends: `Capture finished: native copies in ..., CSVs in ..., log in .... Review every WARNING there.` A failed run ends with `Capture failed.` instead.
 
    To compare the program's own record counts with the shipped SAS log, list the `CSS_` dataset notes of both logs:
@@ -372,7 +373,7 @@ The committed [equivalence report](../../reports/equivalence_report.md) lists 14
 
 The numbers match the launcher header, and the launcher cites them in its comments and log messages. For each point, the entry gives the symptom, then the debug action. SAS statements are submitted in the same session after the run. Shell commands run at the repository root, unless they use `$WPCT_WORKDIR` or `$WPCT_CSVDIR`.
 
-1. **ODS table name and columns.** The capture reads the PROC GLM ODS table `ParameterEstimates`, with the variables `Dependent Parameter Estimate Biased StdErr tValue Probt`.
+1. **ODS table name and columns.** The capture reads the PROC GLM ODS table `ParameterEstimates`. The CSV requires its variables `Parameter Estimate StdErr tValue Probt`. If this SAS/STAT release names one of them differently, the `parameter_estimates` export stops with an ERROR naming the missing variable. `Dependent` and `Biased` are kept in the native copy as ODS extras, left out of the CSV and not checked.
    * *Symptom:* `No ParameterEstimates table was captured.`, or `wpctcap.parameter_estimates has no variable <var>, which WPCT-F.07.02_parameter_estimates.csv requires.`, or an ODS WARNING that the output was not created.
    * *Debug:* `proc contents data=wpctcap.parameter_estimates; run;` lists what was captured. In an interactive session, submit `ods trace on;` before the launcher, and the log then names every table PROC GLM creates.
 2. **Macro variable scoping.** The inserted DATA steps run inside `%boxplot_each_param_tp`. They resolve its local `pdx`, `tdx` and `css_pval_ds`, and the global `paramcd_val<n>` and `atptn_val<n>` that `util_labels_from_var` creates.
@@ -388,9 +389,9 @@ The numbers match the launcher header, and the launcher cites them in its commen
      run;
      ```
 
-3. **Format stripping.** The CSV step removes every format (`FORMAT _ALL_`) and writes each numeric with `WPCT_NUMFMT`. Character values are written as stored, without trailing blanks.
+3. **Format stripping.** The CSV step removes every format (`FORMAT _ALL_`) and writes each numeric with `PUTN` and `WPCT_NUMFMT`. Character values are written as stored, without trailing blanks, and are enclosed in double quotes, with each double quote in them doubled, when they hold a comma, a double quote or a line break. The read-back check reads the CSV with SAS list input, which removes leading blanks and enclosing quotes, so a character value with leading blanks, a quoted value or one with a line break can draw the WARNING `... CSV values read back as other text than the native value.`, or a row-count WARNING, although the CSV holds it as stored.
    * *Symptom:* rounded values, `<.0001`, or other text in a numeric CSV column. `python -m wpct reproduce` reports such text as an input error (exit code 2), naming the file, column and row.
-   * *Debug:* run `head -3 "$WPCT_CSVDIR/WPCT-F.07.02_parameter_estimates.csv"`. Every numeric field must be an `E` number or `.`. Compare with the native values:
+   * *Debug:* run `head -3 "$WPCT_CSVDIR/WPCT-F.07.02_parameter_estimates.csv"`. With the default `E32.17`, every numeric field is a number in scientific notation or `.`; with `BEST32.` (point 4), ordinary decimal and integer tokens are valid too. Text such as `<.0001` is never valid, and neither is a value rounded against the native one. Compare with the native values:
 
      ```sas
      proc print data=wpctcap.parameter_estimates;

@@ -54,16 +54,22 @@
 
   LIKELY FAILURE POINTS, for the first licensed run
     1. ODS table name and columns. The capture relies on the ODS table ParameterEstimates of
-       PROC GLM and its variables Dependent Parameter Estimate Biased StdErr tValue Probt. If this
-       SAS/STAT release names them differently, the parameter_estimates export stops with an
-       ERROR naming the missing variable.
+       PROC GLM. The CSV requires its variables Parameter Estimate StdErr tValue Probt. If this
+       SAS/STAT release names one of them differently, the parameter_estimates export stops with
+       an ERROR naming the missing variable. Dependent and Biased are kept in the native copy as
+       ODS extras, left out of the CSV and not checked.
     2. Macro variable scoping. The inserted DATA steps run inside macro boxplot_each_param_tp and
        resolve its local pdx, tdx and css_pval_ds, and the global paramcd_val<n> and atptn_val<n>
        that util_labels_from_var creates. Check the MPRINT lines of DATA _WPCT_PE and
        DATA _WPCT_STATS: PARAMCD must read DIABP or SYSBP and ATPTN 815 or 816.
     3. Format stripping. The CSV step removes every format (FORMAT _ALL_) and writes each numeric
-       with the explicit WPCT_NUMFMT format, so no estimate is rounded and no p-value becomes
-       text such as <.0001. Character values are written as stored, without trailing blanks.
+       with PUTN and the explicit WPCT_NUMFMT format, without leading blanks, so no estimate is
+       rounded and no p-value becomes text such as <.0001. Character values are written as
+       stored, without trailing blanks, and as an empty field when missing. One holding a comma,
+       a double quote or a line break is enclosed in double quotes, with its double quotes
+       doubled. Each record is written by one formatted PUT, so no DSD rule applies. The
+       read-back check uses list input, which removes leading blanks and enclosing quotes, so
+       such values can draw a read-back WARNING although the CSV holds them as stored.
     4. E32.17. The SAS 9.4 documentation lists the E format as Ew. only, so whether E32.17 is
        accepted is unverified, and SAS documents formatted values beyond about 15 significant
        digits as possibly inaccurate. A pre-flight check writes test values with WPCT_NUMFMT and
@@ -135,7 +141,7 @@ options mprint;
   The global WPCT_ACTION selects CLEAR (remove FILE) or WRITE (write and read back FILE).
 ***/
 %macro wpct_export_csv(data=, file=, rows=, vars=);
-  %local path dsid nobs rbobs n i var vnum types putlist header missing rc;
+  %local path dsid nobs rbobs n i var vnum types header missing rc toolong;
   %let path = &wpct_csvdir/&file;
 
   %if &wpct_action = clear %then %do;
@@ -177,11 +183,9 @@ options mprint;
         %end;
         %else %if %sysfunc(vartype(&dsid, &vnum)) = N %then %do;
           %let types = &types N;
-          %let putlist = &putlist &var :&wpct_numfmt;
         %end;
         %else %do;
           %let types = &types C;
-          %let putlist = &putlist &var;
         %end;
       %end;
       %let rc = %sysfunc(close(&dsid));
@@ -194,27 +198,75 @@ options mprint;
       %else
         %put WARNING: (WPCT CAPTURE) &data has &nobs rows, but the shipped SAS log reports &rows for &file..;
 
-      /* Formats are removed and every numeric is written with the explicit WPCT_NUMFMT format.
-         Special missing values are written as the ordinary missing value. */
+      /* Formats are removed. A numeric is written with PUTN and the explicit WPCT_NUMFMT format,
+         the function the pre-flight checks, without leading blanks; special missing values are
+         written as the ordinary missing value. A character value is written as stored, without
+         its trailing blanks, leading and interior blanks kept, and as an empty field when missing.
+         A character value that holds a comma, a double quote or a line break is enclosed in
+         double quotes, with each double quote in it doubled. Each record is assembled in
+         _WPCT_REC and written by one formatted PUT, so no DSD or list-output rule changes a
+         value. A record longer than 32767 bytes stops the step, and the file counts as failed. */
+      %let toolong = 0;
       data _null_;
-        file "&path" dsd encoding="&wpct_encoding" lrecl=32767;
+        file "&path" encoding="&wpct_encoding" lrecl=32767;
+        length _wpct_rec _wpct_fld $32767;
         if _n_ = 1 then put "&header";
         set &data;
         format _all_;
+        _wpct_rlen = 0;
         %do i = 1 %to &n;
-          %if %scan(&types, &i) = N %then %do;
-            if missing(%scan(&vars, &i, %str( ))) then %scan(&vars, &i, %str( )) = .;
+          %let var = %scan(&vars, &i, %str( ));
+          %if &i > 1 %then %do;
+            _wpct_fld = ',';
+            _wpct_flen = 1;
+            link _wpct_add;
           %end;
+          %if %scan(&types, &i) = N %then %do;
+            if missing(&var) then &var = .;
+            _wpct_fld = left(putn(&var, "&wpct_numfmt"));
+            _wpct_flen = lengthn(_wpct_fld);
+          %end;
+          %else %do;
+            _wpct_flen = lengthn(&var);
+            if _wpct_flen > 0 then do;
+              _wpct_fld = substr(&var, 1, _wpct_flen);
+              if indexc(_wpct_fld, ',"', '0D0A'x) then do;
+                _wpct_flen = _wpct_flen + countc(_wpct_fld, '"') + 2;
+                if _wpct_flen <= 32767 then do;
+                  _wpct_fld = tranwrd(substr(&var, 1, lengthn(&var)), '"', '""');
+                  _wpct_fld = '"' || trimn(_wpct_fld) || '"';
+                end;
+              end;
+            end;
+          %end;
+          link _wpct_add;
         %end;
-        put &putlist;
+        put _wpct_rec $varying32767. _wpct_rlen;
+        return;
+
+      _wpct_add:
+        if _wpct_flen > 0 then do;
+          if _wpct_rlen + _wpct_flen > 32767 then do;
+            putlog "ERROR: (WPCT CAPTURE) Row " _n_ "of &data makes a record of &file longer than 32767 bytes.";
+            call symputx('toolong', '1', 'L');
+            stop;
+          end;
+          substr(_wpct_rec, _wpct_rlen + 1, _wpct_flen) = _wpct_fld;
+          _wpct_rlen = _wpct_rlen + _wpct_flen;
+        end;
+        return;
       run;
-      %if &syserr > 4 %then %do;
+      %if &syserr > 4 or &toolong = 1 %then %do;
         %put ERROR: (WPCT CAPTURE) Writing &path failed.;
         %let wpct_ok = 0;
       %end;
       %else %put NOTE: (WPCT CAPTURE) Wrote &path from &data..;
 
-      /* Read-back check: SAS reads the CSV again and compares every value with the native copy. */
+      /* Read-back check: SAS reads the CSV again and compares every value with the native copy.
+         SAS list input reads one line per record and removes leading blanks and enclosing
+         quotes, so a character value with leading blanks, a quoted value or one with a line
+         break can read back as other text, or as an extra row, and draw a WARNING although the
+         CSV holds it as stored. */
       data work._wpct_rb;
         infile "&path" dsd firstobs=2 lrecl=32767 truncover encoding="&wpct_encoding";
         input (_wpct_f1-_wpct_f&n) (:$512.);
