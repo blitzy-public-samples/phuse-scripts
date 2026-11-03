@@ -75,7 +75,7 @@ The export README predates this launcher. Line 64 of the README asks for `BEST32
 
 ### 3. Values to record
 
-Record these values with the exports. No manifest or hashing script is provided: run the commands by hand. The shell commands are POSIX; on Windows, run them in Git Bash.
+Record these values with the exports. No manifest or hashing script is provided: run the commands by hand. The shell commands are for a POSIX shell such as `sh` or `bash`; on Windows, run them in Git Bash. Besides `git`, `python` and `sas`, they use standard utilities and `sha256sum`, which comes from GNU coreutils and is not a POSIX utility. Where `sha256sum` is missing, `shasum -a 256` with the same arguments prints the same lines; macOS includes `shasum`.
 
 First set the three directories in the shell. Every later shell command in this runbook uses them, with the same absolute paths as the launcher settings:
 
@@ -109,13 +109,13 @@ set -- data/adam/cdisc/advs.xpt \
   whitepapers/utilities/util_boxplot_block_ranges.sas \
   whitepapers/utilities/util_proc_template.sas \
   whitepapers/utilities/util_axis_order.sas
-git hash-object "$@"
+git hash-object --no-filters -- "$@"
 sha256sum "$@"
 ```
 
-* `git rev-parse HEAD` prints the full commit. `git status --porcelain` must print nothing, so the files on disk are those of that commit.
+* `git rev-parse HEAD` prints the full commit. `git status --porcelain` must print nothing, but it does not show line-ending conversion. With `core.autocrlf=true`, the Git for Windows default, git writes the LF files, such as the macros and the launcher, with CRLF line endings on checkout, and `git status --porcelain` still prints nothing. The files on disk are the bytes of that commit only in a checkout made with `core.autocrlf=false`, for example `git clone -c core.autocrlf=false <url>`. The `--no-filters` hashes below confirm it: each must equal `git rev-parse HEAD:<path>`.
 * The 15 macro files are the repository macros WPCT-F.07.02 calls, directly or through another macro.
-* `git hash-object` prints each file's git blob, one line per file in the order given. For the repository inputs, these are the blobs that `tests/test_sources_unchanged.py` compares with the upstream commit. `sha256sum` prints the SHA-256 of the bytes on disk.
+* `git hash-object --no-filters` prints the git blob of each file's unchanged bytes on disk, one line per file in the order given. `--no-filters` stops `core.autocrlf`, which Git for Windows turns on by default, or another clean filter from converting the bytes before hashing; `wpct/provenance.py` hashes the same way. For the repository inputs, these are the working-tree blobs that `tests/test_sources_unchanged.py` compares with the upstream commit. `sha256sum` prints the SHA-256 of the bytes on disk.
 
 **The SAS session**, submitted in the SAS session that runs the launcher, before or after it. The launcher writes the same values to its capture log ([section 4](#4-run-steps), step 5), so in a batch run that log is the record.
 
@@ -307,7 +307,9 @@ git status --porcelain
 * **What runs.** `test_d01_02_05_to_09_sas_export_equivalence` has seven cases.
   * The three WPCT-F.07.02 cases run. Each passes only when every comparison of its file is PASS.
   * The four WPCT-F.07.07 cases skip with `SAS reference export <file> not found in <dir>; see python/wpct/reference/sas_exports/README.md`.
-* **The full suite.** `python -m pytest` then runs the same three cases among all the others.
+* **The full suite.** `python -m pytest` then runs the same three cases among all the others. One more case reads the copied CSVs: `tests/test_report.py::test_env03_reproduce_under_write_root[default]`.
+  * It runs `reproduce` without `--sas-exports`, under a temporary write root, and requires exit code `0`.
+  * Any export comparison that is FAIL makes `reproduce` exit `1`, so this case fails too. One disagreeing file therefore shows as two failures: its own export case and this one.
 * **Cleanup.** `git status --porcelain` prints nothing once the CSVs are removed and the report is restored ([section 6.2](#62-the-equivalence-report)).
 
 #### 6.4 The clean-checkout baseline
@@ -332,6 +334,9 @@ The lookup follows the export README, How the exports are used:
 * `sas_exports` loads that directory once per session with `sas_reference.load_sas_exports`. That function opens `<dir>/<file>` for each name of `schemas.SAS_EXPORT_FILES`, exactly as named, and searches no other folder or subfolder.
   * An absent file loads as `None`, and its case skips with the message of [section 6.3](#63-the-export-test-cases).
   * A present file that does not load is an error.
+* `tests/test_report.py::test_env03_reproduce_under_write_root[default]` reads the same directory ([section 6.3](#63-the-export-test-cases)).
+  * It calls `reproduce` of [`wpct/__main__.py`](../../wpct/__main__.py) with no export directory, so `reproduce` reads `RepoPaths.sas_exports_dir`, the default of `python -m wpct reproduce`.
+  * Its `RepoPaths` comes from `RepoPaths.with_write_root`, which moves only the write root under pytest's `tmp_path` and keeps `repo_root`. The case asserts that this directory equals the `sas_exports_dir` fixture.
 * Nothing points the tests at another directory: no pytest option, environment variable or setting. `--sas-exports DIR` belongs to `python -m wpct reproduce` alone, as its only option.
 
 ### 8. The 14 NOT COMPARED quantities of WPCT-F.07.02
@@ -355,9 +360,10 @@ The committed [equivalence report](../../reports/equivalence_report.md) lists 14
 | 13 | css_stats: statistics rows and categorical fields (AVISIT trtp_short) | `WPCT-F.07.02_css_stats.csv` | `Export WPCT-F.07.02_css_stats.csv` |
 | 14 | parameter_estimates: full-precision GLM values (ESTIMATE STDERR TVALUE PROBT) | `WPCT-F.07.02_parameter_estimates.csv` | `Export WPCT-F.07.02_parameter_estimates.csv` |
 
-* **When a file is present and loads.** `python -m wpct reproduce` removes the file's rows from Not compared. It compares their quantities in the report group `Export <file>`, where every row is PASS or FAIL. One exception: a field with no matched record is NOT COMPARED in that group, and its test case then fails.
+* **When a file is present and loads.** `python -m wpct reproduce` removes the file's rows from Not compared. It compares their quantities in the report group `Export <file>`, where every row is PASS or FAIL. One exception: when no record key of `WPCT-F.07.02_css_anadata.csv` matches a Python record, every field its group compares is NOT COMPARED, with the reason `no matched records`, and its test case then fails.
 * **When all three files are supplied and load:**
-  * the WPCT-F.07.02 NOT COMPARED count goes from 14 to 0;
+  * the 14 missing-export rows of the table above leave the Not compared section;
+  * the WPCT-F.07.02 NOT COMPARED count reaches 0 only when every quantity can be compared. The `no matched records` rows of that exception remain NOT COMPARED, and the Not compared section lists them under their `Export` group;
   * the 17 NOT COMPARED rows of WPCT-F.07.07 remain, because no WPCT-F.07.07 file is captured;
   * the WPCT-F.07.02 log-checkpoint and listing groups stay as they are.
 * **Outcome.** This runbook predicts no outcome. Which rows become PASS and which become FAIL is for the comparison to show.
@@ -405,10 +411,10 @@ The numbers match the launcher header, and the launcher cites them in its commen
 
 6. **Anchor mismatch.** Lines 85, 126, 280 and 308 are checked.
    * *Symptom:* `Line <n> of WPCT-F.07.02.sas does not hold the expected anchor text. It reads: ...`, then `Staged copy rejected`. Nothing runs.
-   * *Debug:* `git status --porcelain whitepapers/WPCT/WPCT-F.07.02.sas` must print nothing. The two hashes below must be equal, and the last command shows the four anchor lines. A different revision of the program needs a change to the launcher.
+   * *Debug:* `git status --porcelain whitepapers/WPCT/WPCT-F.07.02.sas` must print nothing. The two hashes below, of the unchanged bytes on disk and of the upstream file, must be equal, and the last command shows the four anchor lines. A different revision of the program needs a change to the launcher.
 
      ```sh
-     git hash-object whitepapers/WPCT/WPCT-F.07.02.sas
+     git hash-object --no-filters -- whitepapers/WPCT/WPCT-F.07.02.sas
      git rev-parse 398a6d33ced9359ffb58c46650a6d488811176b1:whitepapers/WPCT/WPCT-F.07.02.sas
      sed -n '85p;126p;280p;308p' whitepapers/WPCT/WPCT-F.07.02.sas
      ```
