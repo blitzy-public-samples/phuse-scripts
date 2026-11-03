@@ -39,7 +39,9 @@
     Each anchor is checked by line number and text. Any mismatch stops the launcher before the
     program runs. The repository macros run unmodified from whitepapers/utilities through
     SASAUTOS. WORK.CSS_ANADATA, which nothing later changes or deletes, is copied after the
-    program returns. The repository files are only read, never written.
+    program returns. The repository files are only read, never written. Before anything runs,
+    the launcher checks that each of the 15 repository macro files WPCT-F.07.02 calls, directly
+    or through another macro, can be read from whitepapers/utilities, and stops if one cannot.
 
   FILES PRODUCED (all below the settings-block directories, never in the repository)
     <work>/WPCT-F.07.02_staged.sas                 the staged working copy
@@ -83,9 +85,13 @@
     7. SASAUTOS. util_resolve_sasautos, used by assert_macro_exist, parses one flat list of
        filerefs and double-quoted paths, and line 76 wraps the current SASAUTOS value in another
        pair of parentheses with an empty "" entry. The launcher therefore sets SASAUTOS to the
-       single fileref WPCTAUTO, which concatenates the double-quoted "<repo>/whitepapers/utilities"
-       and the directories of the SASAUTOS fileref, so line 76 yields (WPCTAUTO ""). If
-       assert_depend reports a missing macro, compare the WPCTAUTO rows of SASHELP.VEXTFL.
+       single fileref WPCTAUTO, so line 76 yields (WPCTAUTO ""). WPCTAUTO concatenates the
+       double-quoted "<repo>/whitepapers/utilities" first, then every entry of the SASAUTOS option
+       the session started with, in order: a quoted path as given, and a fileref expanded to its
+       directories from SASHELP.VEXTFL, or through PATHNAME when the view has no row for it. An
+       empty "" entry is skipped with a NOTE. An entry that names no directory gives a WARNING and
+       is not carried. If assert_depend reports a missing macro, read the SASAUTOS entry NOTE and
+       WARNING lines, then compare the WPCTAUTO rows of SASHELP.VEXTFL.
     8. Lines 76 and 82 of the original. Line 76 continues after its asterisk comment with text
        that SAS reads as an invalid statement, and the asterisk comment on line 82 does not stop
        its macro call from running. The URL FILENAME statement of that call is absorbed by the
@@ -361,7 +367,7 @@ options mprint;
        trailing separator. */
     data _null_;
       length _wpct_name $16 _wpct_value _wpct_clean $1024 _wpct_enc _wpct_fmt _wpct_probe $64
-             _wpct_wp _wpct_dt $1024;
+             _wpct_wp _wpct_dt _wpct_mpath $1024 _wpct_mac $32 _wpct_mref $8;
       array _wpct_p {3} $1024 _wpct_p1-_wpct_p3;
       array _wpct_c {3} $1024 _wpct_c1-_wpct_c3;
       array _wpct_n {3} $1024 _wpct_n1-_wpct_n3;
@@ -447,6 +453,28 @@ options mprint;
           put 'ERROR: (WPCT CAPTURE) Not found: ' _wpct_c1 +(-1) '/whitepapers/utilities';
           _wpct_ok = 0;
         end;
+        /* Each repository macro that WPCT-F.07.02 calls, directly or through another macro, must
+           be a file that opens for input before the staged copy runs, so that no same-name macro
+           elsewhere on the autocall path stands in. FOPEN also rejects a directory, which
+           FILEEXIST accepts. Every file that fails is reported. */
+        else do _wpct_mac = 'util_access_test_data', 'util_delete_dsets', 'assert_depend',
+                            'assert_continue', 'assert_dset_exist', 'assert_var_exist',
+                            'assert_macro_exist', 'util_resolve_sasautos', 'util_labels_from_var',
+                            'util_count_unique_values', 'util_get_var_min_max', 'util_value_format',
+                            'util_boxplot_block_ranges', 'util_proc_template', 'util_axis_order';
+          _wpct_mpath = cats(_wpct_c1, '/whitepapers/utilities/', _wpct_mac, '.sas');
+          _wpct_mref = '_wpctmac';
+          _wpct_mfid = 0;
+          if filename(_wpct_mref, trim(_wpct_mpath)) = 0 then do;
+            _wpct_mfid = fopen(_wpct_mref, 'I');
+            if _wpct_mfid > 0 then _wpct_rc = fclose(_wpct_mfid);
+            _wpct_rc = filename(_wpct_mref);
+          end;
+          if _wpct_mfid = 0 then do;
+            put 'ERROR: (WPCT CAPTURE) Not found or not readable: ' _wpct_mpath;
+            _wpct_ok = 0;
+          end;
+        end;
       end;
 
       /* Pre-flight of the numeric CSV format: each test value must be written as text that SAS
@@ -531,17 +559,181 @@ options mprint;
     %end;
   %end;
 
-  /* SASAUTOS becomes one flat fileref: the repository utilities first, then the directories of
-     the SASAUTOS fileref (failure point 7). */
+  /* SASAUTOS becomes one flat fileref, WPCTAUTO: the repository utilities first, then every entry
+     of the SASAUTOS option the session started with, in order (failure point 7). A quoted entry
+     is carried as the path it names. A fileref entry is expanded to its directories in the row
+     order of SASHELP.VEXTFL, as util_resolve_sasautos reads them, or from PATHNAME when the view
+     has no row for it; the members of a concatenation are paths, so the tokens of a parenthesised
+     PATHNAME value are all carried as paths. Each directory is written single-quoted into
+     WPCT_SASDIRS, so no macro trigger in an inherited path is resolved by the FILENAME
+     statement. WPCT_OK is set back to 1 only by a step that completes with the whole list. */
   %if &wpct_ok = 1 %then %do;
+    %let wpct_ok = 0;
     data _null_;
-      length _wpct_dirs $32767;
-      retain _wpct_dirs ' ';
-      set sashelp.vextfl (where=(upcase(fileref) = 'SASAUTOS')) end=_wpct_last;
-      _wpct_dirs = catx(' ', _wpct_dirs, quote(strip(xpath)));
-      if _wpct_last then call symputx('wpct_sasdirs', _wpct_dirs, 'G');
+      length _wpct_opt _wpct_src _wpct_inner _wpct_raw _wpct_entry _wpct_tok _wpct_path _wpct_item
+             _wpct_dirs _wpct_desc $32767 _wpct_q _wpct_sq _wpct_dq $1 _wpct_ref $8 _wpct_how $32;
+      _wpct_sq = byte(39);
+      _wpct_dq = byte(34);
+      _wpct_dirs = ' ';
+      _wpct_over = 0;
+      _wpct_k = 0;
+      _wpct_opt = getoption('sasautos');
+      _wpct_olen = lengthn(_wpct_opt);
+      _wpct_opos = 1;
+      if _wpct_olen >= 32767 then do;
+        put 'ERROR: (WPCT CAPTURE) The SASAUTOS option holds 32767 characters or more, so it cannot be read whole. SASAUTOS is left unchanged.';
+        _wpct_over = 1;
+      end;
+      else if _wpct_olen = 0 then
+        put 'NOTE: (WPCT CAPTURE) The SASAUTOS option the session started with is blank, so WPCTAUTO holds only the repository utilities.';
+
+      do while (_wpct_opos <= _wpct_olen and not _wpct_over);
+        _wpct_src = _wpct_opt;
+        _wpct_slen = _wpct_olen;
+        _wpct_pos = _wpct_opos;
+        link _wpct_token;
+        _wpct_opos = _wpct_pos;
+        if _wpct_got then do;
+          _wpct_k = _wpct_k + 1;
+          _wpct_entry = _wpct_raw;
+          _wpct_desc = ' ';
+          _wpct_cnt = 0;
+          if _wpct_tq then do;
+            if not _wpct_closed then
+              put 'WARNING: (WPCT CAPTURE) SASAUTOS entry ' _wpct_k 'has no closing quotation mark and is not carried into WPCTAUTO: ' _wpct_entry;
+            else if lengthn(_wpct_tok) = 0 then
+              put 'NOTE: (WPCT CAPTURE) SASAUTOS entry ' _wpct_k _wpct_entry 'is an empty path and is skipped.';
+            else do;
+              _wpct_path = _wpct_tok;
+              _wpct_how = 'the quoted path';
+              link _wpct_carry;
+            end;
+          end;
+          else if not prxmatch('/^[A-Za-z_][A-Za-z0-9_]{0,7}$/', trim(_wpct_tok)) then
+            put 'WARNING: (WPCT CAPTURE) SASAUTOS entry ' _wpct_k _wpct_entry 'is neither a quoted path nor a fileref name and is not carried into WPCTAUTO.';
+          else do;
+            _wpct_ref = upcase(_wpct_tok);
+            _wpct_how = 'SASHELP.VEXTFL';
+            _wpct_dsid = open('sashelp.vextfl');
+            if _wpct_dsid > 0 then do;
+              _wpct_fnum = varnum(_wpct_dsid, 'fileref');
+              _wpct_xnum = varnum(_wpct_dsid, 'xpath');
+              if _wpct_fnum > 0 and _wpct_xnum > 0 then do while (fetch(_wpct_dsid) = 0);
+                if upcase(getvarc(_wpct_dsid, _wpct_fnum)) = _wpct_ref then do;
+                  _wpct_path = getvarc(_wpct_dsid, _wpct_xnum);
+                  link _wpct_carry;
+                end;
+                if _wpct_over then leave;
+              end;
+              _wpct_rc = close(_wpct_dsid);
+            end;
+            else put 'WARNING: (WPCT CAPTURE) SASHELP.VEXTFL cannot be opened, so the fileref ' _wpct_ref 'is resolved through PATHNAME only.';
+
+            if _wpct_cnt = 0 and not _wpct_over then do;
+              _wpct_how = 'PATHNAME';
+              _wpct_inner = pathname(_wpct_ref, 'F');
+              _wpct_inner = left(_wpct_inner);
+              if char(_wpct_inner, 1) = '(' then do;
+                _wpct_src = _wpct_inner;
+                _wpct_slen = lengthn(_wpct_inner);
+                _wpct_pos = 1;
+                do while (_wpct_pos <= _wpct_slen and not _wpct_over);
+                  link _wpct_token;
+                  if _wpct_got and (_wpct_closed or not _wpct_tq) then do;
+                    _wpct_path = _wpct_tok;
+                    link _wpct_carry;
+                  end;
+                end;
+              end;
+              else do;
+                _wpct_path = strip(_wpct_inner);
+                link _wpct_carry;
+              end;
+            end;
+            if _wpct_cnt = 0 and not _wpct_over then
+              put 'WARNING: (WPCT CAPTURE) SASAUTOS entry ' _wpct_k 'is the fileref ' _wpct_ref +(-1) ', which names no directory in SASHELP.VEXTFL or through PATHNAME, so it is not carried into WPCTAUTO.';
+          end;
+          if _wpct_cnt > 0 and not _wpct_over then
+            put 'NOTE: (WPCT CAPTURE) SASAUTOS entry ' _wpct_k _wpct_entry 'is carried into WPCTAUTO from ' _wpct_how +(-1) ': ' _wpct_desc;
+        end;
+      end;
+
+      if not _wpct_over then call symputx('wpct_sasdirs', _wpct_dirs, 'G');
+      call symputx('wpct_ok', 1 - _wpct_over, 'G');
+      return;
+
+    /* The next token of _WPCT_SRC from position _WPCT_POS: outside quotation marks, blanks,
+       commas and parentheses separate tokens; a token that starts with a quotation mark runs to
+       the matching closing one, a doubled mark inside it standing for one mark. */
+    _wpct_token:
+      _wpct_got = 0;
+      _wpct_tq = 0;
+      _wpct_closed = 0;
+      _wpct_tok = ' ';
+      _wpct_raw = ' ';
+      do while (_wpct_pos <= _wpct_slen);
+        if indexc(char(_wpct_src, _wpct_pos), ' ,()') = 0 then leave;
+        _wpct_pos = _wpct_pos + 1;
+      end;
+      if _wpct_pos <= _wpct_slen then do;
+        _wpct_got = 1;
+        _wpct_beg = _wpct_pos;
+        _wpct_q = char(_wpct_src, _wpct_pos);
+        if _wpct_q = _wpct_sq or _wpct_q = _wpct_dq then do;
+          _wpct_tq = 1;
+          _wpct_pos = _wpct_pos + 1;
+          do while (_wpct_pos <= _wpct_slen and not _wpct_closed);
+            if char(_wpct_src, _wpct_pos) ne _wpct_q then _wpct_pos = _wpct_pos + 1;
+            else if _wpct_pos < _wpct_slen and char(_wpct_src, _wpct_pos + 1) = _wpct_q then _wpct_pos = _wpct_pos + 2;
+            else do;
+              _wpct_closed = 1;
+              _wpct_pos = _wpct_pos + 1;
+            end;
+          end;
+          _wpct_raw = substr(_wpct_src, _wpct_beg, _wpct_pos - _wpct_beg);
+          if _wpct_closed then _wpct_tok = dequote(_wpct_raw);
+        end;
+        else do;
+          do while (_wpct_pos <= _wpct_slen);
+            if indexc(char(_wpct_src, _wpct_pos), ' ,()', _wpct_sq, _wpct_dq) then leave;
+            _wpct_pos = _wpct_pos + 1;
+          end;
+          _wpct_raw = substr(_wpct_src, _wpct_beg, _wpct_pos - _wpct_beg);
+          _wpct_tok = _wpct_raw;
+        end;
+      end;
+      return;
+
+    /* Adds _WPCT_PATH, single-quoted, to the list; a list beyond 32767 characters is an error,
+       never a truncated list. */
+    _wpct_carry:
+      if lengthn(_wpct_path) > 0 then do;
+        _wpct_ilen = lengthn(_wpct_path) + countc(_wpct_path, _wpct_sq) + 2;
+        if lengthn(_wpct_dirs) + 1 + _wpct_ilen > 32767 then do;
+          put 'ERROR: (WPCT CAPTURE) The directories of the SASAUTOS option exceed 32767 characters, so WPCTAUTO cannot hold them all. SASAUTOS is left unchanged.';
+          _wpct_over = 1;
+        end;
+        else do;
+          _wpct_item = quote(trim(_wpct_path), _wpct_sq);
+          _wpct_dirs = catx(' ', _wpct_dirs, _wpct_item);
+          _wpct_desc = catx(' ', _wpct_desc, _wpct_item);
+          _wpct_cnt = _wpct_cnt + 1;
+        end;
+      end;
+      return;
     run;
-    filename wpctauto ("&wpct_repo/whitepapers/utilities" &wpct_sasdirs);
+
+    %if &wpct_ok = 1 %then %do;
+      filename wpctauto ("&wpct_repo/whitepapers/utilities" &wpct_sasdirs);
+      %if &sysfilrc ne 0 %then %do;
+        %put ERROR: (WPCT CAPTURE) The FILENAME statement for WPCTAUTO ended with SYSFILRC=&sysfilrc, so SASAUTOS is left unchanged.;
+        %let wpct_ok = 0;
+      %end;
+    %end;
+    %else %put ERROR: (WPCT CAPTURE) WPCTAUTO was not set up, so SASAUTOS is left unchanged. See the lines above.;
+  %end;
+
+  %if &wpct_ok = 1 %then %do;
     options mautosource sasautos=wpctauto;
     %put NOTE: (WPCT CAPTURE) SASAUTOS=%qsysfunc(getoption(sasautos)) with WPCTAUTO=%qsysfunc(pathname(wpctauto));
 

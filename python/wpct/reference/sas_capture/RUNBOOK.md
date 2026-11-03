@@ -115,7 +115,7 @@ sha256sum "$@"
 ```
 
 * `git rev-parse HEAD` prints the full commit. `git status --porcelain` must print nothing, but it does not show line-ending conversion. With `core.autocrlf=true`, the Git for Windows default, git writes the LF files, such as the macros and the launcher, with CRLF line endings on checkout, and `git status --porcelain` still prints nothing. The files on disk are the bytes of that commit only in a checkout made with `core.autocrlf=false`, for example `git clone -c core.autocrlf=false <url>`. The `--no-filters` hashes below confirm it: each must equal `git rev-parse HEAD:<path>`.
-* The 15 macro files are the repository macros WPCT-F.07.02 calls, directly or through another macro.
+* The 15 macro files are the repository macros WPCT-F.07.02 calls, directly or through another macro. Before anything runs, the launcher checks that each of them can be read under `<repo>/whitepapers/utilities`; for each one it cannot read, it writes `Not found or not readable: <path>`, and the program does not run.
 * `git hash-object --no-filters` prints the git blob of each file's unchanged bytes on disk, one line per file in the order given. `--no-filters` stops `core.autocrlf`, which Git for Windows turns on by default, or another clean filter from converting the bytes before hashing; `wpct/provenance.py` hashes the same way. For the repository inputs, these are the working-tree blobs that `tests/test_sources_unchanged.py` compares with the upstream commit. `sha256sum` prints the SHA-256 of the bytes on disk.
 
 **The SAS session**, submitted in the SAS session that runs the launcher, before or after it. The launcher writes the same values to its capture log ([section 4](#4-run-steps), step 5), so in a batch run that log is the record.
@@ -420,9 +420,9 @@ The numbers match the launcher header, and the launcher cites them in its commen
      sed -n '85p;126p;280p;308p' whitepapers/WPCT/WPCT-F.07.02.sas
      ```
 
-7. **SASAUTOS.** `util_resolve_sasautos`, which `assert_macro_exist` uses, parses one flat list of filerefs and double-quoted paths. Line 76 wraps the current SASAUTOS value in another pair of parentheses, with an empty `""` entry. The launcher therefore sets SASAUTOS to the single fileref `WPCTAUTO`, which concatenates the double-quoted `"<repo>/whitepapers/utilities"` and the directories of the SASAUTOS fileref.
-   * *Symptom:* `ERROR: (ASSERT_DEPEND) Macro <NAME> is required but not in the AUTOCALL path(s).`, or `Apparent invocation of macro ... not resolved`.
-   * *Debug:* read the log line `SASAUTOS=... with WPCTAUTO=...`. Then list the fileref, whose first directory must be `<repo>/whitepapers/utilities`:
+7. **SASAUTOS.** `util_resolve_sasautos`, which `assert_macro_exist` uses, parses one flat list of filerefs and double-quoted paths. Line 76 wraps the current SASAUTOS value in another pair of parentheses, with an empty `""` entry. The launcher therefore sets SASAUTOS to the single fileref `WPCTAUTO`. It concatenates the double-quoted `"<repo>/whitepapers/utilities"` first, then every entry of the SASAUTOS option the session started with, in order. A quoted path is carried as given. A fileref is expanded to its directories from `SASHELP.VEXTFL`, or through `PATHNAME` when the view has no row for it. An empty `""` entry is skipped with a NOTE.
+   * *Symptom:* `ERROR: (ASSERT_DEPEND) Macro <NAME> is required but not in the AUTOCALL path(s).`, or `Apparent invocation of macro ... not resolved`. A `WARNING: (WPCT CAPTURE) SASAUTOS entry <n> ... is not carried into WPCTAUTO` names an entry that gave no directory.
+   * *Debug:* read the log line `SASAUTOS before the launcher: ...`, the `SASAUTOS entry <n> ...` NOTE or WARNING of each entry, and the line `SASAUTOS=... with WPCTAUTO=...`. Then list the fileref, whose first directory must be `<repo>/whitepapers/utilities`:
 
      ```sas
      proc print data=sashelp.vextfl;
