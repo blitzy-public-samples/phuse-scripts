@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "description": "Single tolerance source for the WPCT-F.07.02 and WPCT-F.07.07 Python-versus-SAS equivalence checks, holding the values proposed by the request; edit this file to change them.",
+  "classes": {
+    "counts": {
+      "label": "Counts",
+      "rule": "exact",
+      "limit": 0,
+      "applies_to": "Log checkpoints, per-stratum record counts, summary n, number of parameter rows"
+    },
+    "categorical": {
+      "label": "Keys and categorical fields",
+      "rule": "exact",
+      "strip_trailing_blanks": true,
+      "applies_to": "Record keys, treatment labels, flags, visit numbers, study identifiers, EFFECT, LEVEL"
+    },
+    "summary_statistics": {
+      "label": "Summary statistics",
+      "rule": "absolute",
+      "limit": 1e-8,
+      "applies_to": "PROC SUMMARY statistics against full-precision exports"
+    },
+    "glm_estimates": {
+      "label": "GLM estimate, SE, t",
+      "rule": "relative",
+      "limit": 1e-6,
+      "zero_reference": "exact",
+      "applies_to": "ParameterEstimates against full-precision exports"
+    },
+    "p_values": {
+      "label": "p-values",
+      "rule": "absolute",
+      "limit": 1e-8,
+      "applies_to": "PROBT and the merged CSS_STATS pval against full-precision exports"
+    },
+    "record_numeric": {
+      "label": "Record-level numeric values",
+      "rule": "absolute",
+      "limit": 1e-8,
+      "applies_to": "Record-by-record comparisons; the request names no class for these, so the plan sets this value"
+    },
+    "rounded_listing": {
+      "label": "Rounded listing values",
+      "rule": "displayed_precision",
+      "half_unit": 0.5,
+      "epsilon": 1e-12,
+      "bound_token": "<.0001",
+      "bound_upper": 0.0001,
+      "applies_to": "Every value parsed from WPCT-F.07.02.lst and WPCT-F.07.07.lst, including the TRTPN Probt used for merged pval cells"
+    },
+    "missing": {
+      "label": "Missing values",
+      "rule": "missing_agreement",
+      "both_missing": "PASS",
+      "one_missing": "FAIL",
+      "applies_to": "All classes"
+    }
+  }
+}

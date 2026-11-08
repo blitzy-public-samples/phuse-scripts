@@ -1,0 +1,377 @@
+"""SAS transport (XPT v5) reader: the port's only access path to the ADVS input data.
+
+The drivers read data only through this module, and only from the repository copies
+``data/adam/cdisc/advs.xpt`` (07.02) and ``data/adam/cdisc-split/advs.xpt`` (07.07). It opens its
+inputs read-only and never writes.
+
+Spec items realised here (``python/wpct/docs/sas_specification.md``):
+
+- S02-DEP-util_access_test_data, S07-DEP-util_access_test_data: :func:`read_xpt` ports the local
+  branch of ``%util_access_test_data``, which copies the transport member to ``WORK.ADVS``
+  [whitepapers/utilities/util_access_test_data.sas:47-57,62-66]. Its remote-URL branch
+  [whitepapers/utilities/util_access_test_data.sas:58-60] is not ported: the port opens no network
+  connection and has no fallback to the GitHub URL (ENV-02, ENV-04). The SAS failure ``ERROR:
+  (UTIL_ACCESS_TEST_DATA) Please confirm that data set ADVS exists in transport file ADVS.``
+  [whitepapers/utilities/util_access_test_data.sas:68-71] becomes an :class:`InputDataError`. So
+  does a truncated or damaged file, which ``pyreadstat`` reads in part without complaint:
+  :func:`read_xpt` checks that the observations returned account for the file's bytes. SAS reads
+  member ``ADVS`` by name, ``set source.&ds``
+  [whitepapers/utilities/util_access_test_data.sas:64-66], while ``pyreadstat`` reads the file's
+  first member, so :func:`read_xpt` requires that member to be named ``ADVS``, ignoring case. A
+  file whose ``ADVS`` member is not its first is therefore an input error where SAS would read it.
+- S02-DEP-assert_dset_exist, S07-DEP-assert_dset_exist: the file-existence check of
+  :func:`read_xpt`.
+- S02-DEP-assert_depend, S07-DEP-assert_depend, S02-DEP-assert_var_exist,
+  S07-DEP-assert_var_exist: :func:`require_variables` ports the ``vars=`` check
+  [whitepapers/utilities/assert_depend.sas:102-128], which halts the program when a variable is
+  absent. The OS, SASV, SYSPROD, macros and symbols checks test the SAS session and are not ported.
+  The port adds a check that each required variable is stored with its SAS type
+  (``schemas.REQUIRED_INPUT_TYPES``), where SAS meets a mistyped variable only in the later steps
+  that use it. The :class:`InputDataError` that :func:`require_variables` raises is also the port
+  of the ``%assert_continue`` halt after the dependency assertion: S02-DEP-assert_continue
+  [whitepapers/WPCT/WPCT-F.07.02.sas:158] and S07-DEP-assert_continue for its line-204 call
+  [whitepapers/WPCT/WPCT-F.07.07.sas:204].
+- D-10: dates stay SAS day numbers (days since 1960-01-01) as floats.
+- D-11: a blank character value reads back as ``''``, with trailing blanks and NULs stripped.
+"""
+
+import os
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import MappingProxyType
+
+import pandas as pd
+import pyreadstat
+
+from wpct.errors import InputDataError
+from wpct.sas_semantics import is_char_missing
+from wpct.schemas import CHAR, NUM, REQUIRED_INPUT_TYPES
+
+__all__ = ["XptMetadata", "read_xpt", "require_variables"]
+
+#: Layout of a SAS transport file, after SAS Institute TS-140, "The Record Layout of a Data Set in
+#: SAS Transport (XPORT) Format": whole 80-byte records. A member's observations start in the record
+#: after its observation header record, follow one another without gaps, and are padded with blanks
+#: to the end of their last record; the next member, if any, starts with its member header record.
+#: Version 8 files use the ``OBSV8`` and ``MEMBV8`` spellings of the two header records.
+_XPT_RECORD_LENGTH = 80
+_XPT_OBS_HEADER_TAGS = (
+    b"HEADER RECORD*******OBS     HEADER RECORD!!!!!!!",
+    b"HEADER RECORD*******OBSV8   HEADER RECORD!!!!!!!",
+)
+_XPT_MEMBER_HEADER_TAGS = (
+    b"HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!",
+    b"HEADER RECORD*******MEMBV8  HEADER RECORD!!!!!!!",
+)
+
+#: The transport member both programs read: ``%util_access_test_data(advs, ...)``
+#: [whitepapers/WPCT/WPCT-F.07.02.sas:85] and ``%util_access_test_data(&ds, ...)`` with
+#: ``DS = ADVS`` [whitepapers/WPCT/WPCT-F.07.07.sas:96,141]. SAS member names ignore case.
+_ADVS_MEMBER = "ADVS"
+
+#: :data:`schemas.REQUIRED_INPUT_TYPES` keyed by the upper-cased name, as SAS names ignore case, and
+#: the word each type code is reported as.
+_REQUIRED_TYPES_BY_KEY = {name.upper(): code for name, code in REQUIRED_INPUT_TYPES.items()}
+_TYPE_WORDS = {CHAR: "character", NUM: "numeric"}
+
+
+@dataclass(frozen=True)
+class XptMetadata:
+    """Variable-level metadata of one transport member, as ``pyreadstat`` reports it.
+
+    Attributes:
+        path: Absolute path of the transport file read.
+        table_name: Name of the member read, as stored: ``ADVS`` in any case, because
+            ``pyreadstat`` reads the first member of the file and :func:`read_xpt` refuses a file
+            whose first member has another name or none.
+        column_names: Variable names in dataset order, exactly as stored.
+        labels: Variable label per variable; ``''`` for an unlabelled variable.
+        formats: SAS format per variable as the reader reports it, e.g. ``DATE9`` for ``ADT``,
+            ``TRTSDT`` and ``TRTEDT``; ``''`` for a variable without a format.
+        storage_widths: Storage width in bytes per variable, e.g. ``STUDYID`` 12, ``USUBJID`` 11,
+            ``AVISIT`` 16, and 8 for numerics.
+        n_rows: Number of observations.
+        n_columns: Number of variables.
+
+    The three mappings are read-only and take no part in hashing.
+    """
+
+    path: Path
+    table_name: str
+    column_names: tuple[str, ...]
+    labels: Mapping[str, str] = field(hash=False)
+    formats: Mapping[str, str] = field(hash=False)
+    storage_widths: Mapping[str, int] = field(hash=False)
+    n_rows: int
+    n_columns: int
+
+
+def _cannot_read(program: str, abs_path: Path, reason: object) -> InputDataError:
+    return InputDataError(f"{program}: cannot read SAS transport file {abs_path}: {reason}")
+
+
+def _layout_problem(abs_path: Path, n_rows: int, row_length: int) -> str | None:
+    """Why the first member's observations do not account for the file's bytes, or ``None``.
+
+    ``pyreadstat`` reads every whole observation up to the end of the file and drops a partial one
+    without complaint, so a truncated file reads in part (S02/S07-DEP-util_access_test_data). The
+    check compares the ``n_rows`` observations of ``row_length`` bytes it returned with the layout
+    of ``_XPT_*``: the file is whole records, the observations start after the first observation
+    header record, only blank padding completes their last record, and any bytes after that begin
+    another member. It reads the header records and the bytes after the last observation, never
+    the observations themselves. Trailing all-blank observations, which the reader drops as
+    padding, pass when they end within the last record and are reported as damage otherwise.
+
+    Raises:
+        OSError: The file cannot be opened or read.
+    """
+    rows_read = f"observations read: {n_rows} of {row_length} bytes each"
+    with abs_path.open("rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        if size % _XPT_RECORD_LENGTH:
+            return (
+                f"truncated transport file: {size} bytes is not a whole number of "
+                f"{_XPT_RECORD_LENGTH}-byte records ({rows_read})"
+            )
+
+        data_start = None
+        while data_start is None:
+            record = stream.read(_XPT_RECORD_LENGTH)
+            if len(record) < _XPT_RECORD_LENGTH:
+                return f"no observation header record in {size} bytes"
+            if record.startswith(_XPT_OBS_HEADER_TAGS):
+                data_start = stream.tell()
+
+        data_end = data_start + n_rows * row_length
+        padded_end = -(-data_end // _XPT_RECORD_LENGTH) * _XPT_RECORD_LENGTH
+        if padded_end > size:
+            return (
+                f"truncated transport file: {size} bytes cannot hold the observations read "
+                f"({rows_read})"
+            )
+        stream.seek(data_end)
+        padding = stream.read(padded_end - data_end)
+        if padding != b" " * (padded_end - data_end):
+            return (
+                f"truncated transport file: {size} bytes end inside an observation "
+                f"({rows_read})"
+            )
+        if padded_end < size and not stream.read(_XPT_RECORD_LENGTH).startswith(
+            _XPT_MEMBER_HEADER_TAGS
+        ):
+            return (
+                f"damaged transport file: the {size - padded_end} bytes after the observations "
+                f"read and their padding do not begin a member header record ({rows_read})"
+            )
+    return None
+
+
+def _stored_type(column: pd.Series) -> str:
+    """Name the type ``column`` stores, as :func:`require_variables` reports it.
+
+    ``numeric`` for a numeric dtype other than bool and ``boolean`` for a bool dtype. Any other
+    dtype is ``character`` when each of its values is a ``str`` or missing
+    (:func:`~wpct.sas_semantics.is_char_missing`), as :func:`read_xpt` returns a character variable;
+    otherwise the dtype and the types of the other values are named, never a value itself.
+    """
+    dtype = column.dtype
+    if pd.api.types.is_bool_dtype(dtype):
+        return "boolean"
+    if pd.api.types.is_numeric_dtype(dtype):
+        return "numeric"
+    other = {
+        type(value).__name__
+        for value in column.to_numpy(dtype=object)
+        if not isinstance(value, str) and not is_char_missing(value)
+    }
+    if not other:
+        return "character"
+    return f"dtype {dtype} with {' and '.join(sorted(other))} values"
+
+
+def read_xpt(path: str | os.PathLike[str], program: str) -> tuple[pd.DataFrame, XptMetadata]:
+    """Read a SAS transport file into a frame and its metadata (S02/S07-DEP-util_access_test_data).
+
+    Values are returned as the reader produces them, with no post-processing: numeric variables
+    are float64 with every SAS missing value (``.``, ``._``, ``.A``-``.Z``) as NaN; dates stay SAS
+    day numbers (D-10); character variables are ``str`` with trailing blanks stripped, so a blank
+    value is ``''`` (D-11). Column names keep their stored case.
+
+    Args:
+        path: The transport file, absolute or relative to the working directory.
+        program: Program identifier that prefixes every error message, e.g. ``"WPCT-F.07.02"``.
+
+    Returns:
+        The data frame and its :class:`XptMetadata`.
+
+    Raises:
+        InputDataError: ``"<program>: input dataset not found: <absolute path>"`` when the path does
+            not exist or is not a regular file (S02/S07-DEP-assert_dset_exist), or ``"<program>:
+            cannot read SAS transport file <absolute path>: <reader message>"`` when the file cannot
+            be read or holds no variables. The same message ends with ``member ADVS not found
+            (first member is <name>)``, or ``(the first member has no name)``, when the file's
+            first member, the one the reader returns, is not named ``ADVS`` in any case; SAS would
+            look the member up by name among all of them. It ends with ``truncated transport file:
+            <detail>`` when the file is not a whole number of 80-byte records or ends inside an
+            observation, and with ``damaged transport file: <detail>`` when bytes after the last
+            observation's padding do not begin another member; the reader alone would return the
+            whole observations before the cut (S02/S07-DEP-util_access_test_data). A cut that
+            falls exactly where both an observation and a record end cannot be detected, because
+            a version 5 transport file records no observation count.
+    """
+    abs_path = Path(path).absolute()
+    try:
+        is_file = abs_path.is_file()
+    except OSError as exc:
+        # pathlib reports a missing path as False but raises for other stat failures, such as a
+        # parent directory the process may not search.
+        raise _cannot_read(program, abs_path, exc) from exc
+    if not is_file:
+        raise InputDataError(f"{program}: input dataset not found: {abs_path}")
+
+    try:
+        df, meta = pyreadstat.read_xport(str(abs_path), disable_datetime_conversion=True)
+    except Exception as exc:  # Any reader failure is the same input error, whatever its type.
+        raise _cannot_read(program, abs_path, exc) from exc
+    # SAS reads the member by name; the reader returns the first member, so it must be that one.
+    table_name = str(meta.table_name or "")
+    if table_name.upper() != _ADVS_MEMBER:
+        first = f"first member is {table_name}" if table_name else "the first member has no name"
+        raise _cannot_read(program, abs_path, f"member {_ADVS_MEMBER} not found ({first})")
+    if df.shape[1] == 0:
+        raise _cannot_read(program, abs_path, "no variables found")
+
+    column_names = tuple(str(name) for name in df.columns)
+    labels = meta.column_names_to_labels or {}
+    formats = meta.original_variable_types or {}
+    widths = meta.variable_storage_width or {}
+    metadata = XptMetadata(
+        path=abs_path,
+        table_name=table_name,
+        column_names=column_names,
+        labels=MappingProxyType({name: str(labels.get(name) or "") for name in column_names}),
+        formats=MappingProxyType({name: str(formats.get(name) or "") for name in column_names}),
+        storage_widths=MappingProxyType({str(name): int(width) for name, width in widths.items()}),
+        n_rows=int(df.shape[0]),
+        n_columns=int(df.shape[1]),
+    )
+    try:
+        problem = _layout_problem(abs_path, metadata.n_rows, sum(metadata.storage_widths.values()))
+    except OSError as exc:
+        raise _cannot_read(program, abs_path, exc) from exc
+    if problem is not None:
+        raise _cannot_read(program, abs_path, problem)
+    return df, metadata
+
+
+def require_variables(
+    df: pd.DataFrame,
+    names: Iterable[str],
+    path: str | os.PathLike[str],
+    program: str,
+) -> pd.DataFrame:
+    """Return ``df`` with ``names`` spelled as given (S02/S07-DEP-assert_depend ``vars=`` check).
+
+    SAS variable names are case-insensitive, and ``assert_var_exist`` looks up the upper-cased name
+    with ``varnum()`` [whitepapers/utilities/assert_var_exist.sas:23]
+    (S02/S07-DEP-assert_var_exist), so the comparison folds case. As ``assert_depend`` checks every
+    listed variable before the program halts [whitepapers/utilities/assert_depend.sas:111-120], the
+    error names every missing variable, as given and in the order given. Every later SAS step then
+    addresses a variable by any spelling, so the frame returned carries each required variable under
+    its spelling in ``names``, the one the drivers index, whatever case the file stores.
+
+    Each name that ``schemas.REQUIRED_INPUT_TYPES`` types, matched ignoring case, must then be
+    stored with that SAS type: a ``NUM`` variable in a numeric dtype other than bool, a ``CHAR``
+    variable in any other dtype holding only ``str`` or missing values
+    (``sas_semantics.is_char_missing``). A name it does not type is checked for presence only. This
+    goes beyond ``assert_depend``, which checks existence alone, so SAS meets a mistyped variable
+    only in the later steps that use it; the port reports it here as an input error, naming every
+    mistyped variable in the order given and never a value.
+
+    Args:
+        df: The frame to check, normally the one :func:`read_xpt` returned. It is not modified.
+        names: Required variable names, a sequence of strings such as the tuples of
+            ``schemas.REQUIRED_INPUT_VARIABLES`` the drivers pass.
+        path: The file ``df`` was read from, named in the message.
+        program: Program identifier that prefixes the message.
+
+    Returns:
+        ``df`` itself when each name already matches its column exactly. Otherwise a new frame in
+        which each matched column is renamed to its spelling in ``names``; other columns keep their
+        stored spelling, and the column order and values are those of ``df``.
+
+    Raises:
+        TypeError: ``names`` is a single string, or one of its items is not a string.
+        ValueError: ``names`` lists a variable more than once, ignoring case, so no single spelling
+            can be given to its column.
+        InputDataError: ``"<program>: <absolute path> lacks required variables: <names>"`` when a
+            variable is absent, ``"<program>: <absolute path> has variables that differ only in
+            case: <columns>"`` when a required variable matches more than one column of ``df``, or
+            ``"<program>: <absolute path> has required variables of the wrong type: <entries>"``,
+            each entry such as ``SAFFL (numeric; character expected)`` or ``CHG (character;
+            numeric expected)``, when a typed variable is stored with another type. The checks run
+            in that order, and the first that fails raises.
+    """
+    if isinstance(names, str):
+        # Iterating a lone string would check each of its characters as a variable name.
+        raise TypeError(
+            "require_variables: names must be a sequence of variable names, not the single string "
+            f"{names!r}"
+        )
+    required = tuple(names)
+    for position, name in enumerate(required):
+        if not isinstance(name, str):
+            raise TypeError(
+                f"require_variables: names[{position}] must be a variable name string, got "
+                f"{type(name).__name__}"
+            )
+    keys = [name.upper() for name in required]
+    repeated = [name for name, key in zip(required, keys, strict=True) if keys.count(key) > 1]
+    if repeated:
+        raise ValueError(
+            "require_variables: names lists a variable more than once, ignoring case: "
+            f"{' '.join(repeated)}"
+        )
+
+    columns_by_key: dict[str, list[object]] = {}
+    for column in df.columns:
+        columns_by_key.setdefault(str(column).upper(), []).append(column)
+    missing = [name for name, key in zip(required, keys, strict=True) if key not in columns_by_key]
+    if missing:
+        raise InputDataError(
+            f"{program}: {Path(path).absolute()} lacks required variables: {' '.join(missing)}"
+        )
+    clashing = [
+        str(column)
+        for key in keys
+        if len(columns_by_key[key]) > 1
+        for column in columns_by_key[key]
+    ]
+    if clashing:
+        raise InputDataError(
+            f"{program}: {Path(path).absolute()} has variables that differ only in case: "
+            f"{' '.join(clashing)}"
+        )
+    wrong_types = []
+    for name, key in zip(required, keys, strict=True):
+        expected = _REQUIRED_TYPES_BY_KEY.get(key)
+        if expected is None:
+            continue
+        stored = _stored_type(df[columns_by_key[key][0]])
+        if stored != _TYPE_WORDS[expected]:
+            wrong_types.append(f"{name} ({stored}; {_TYPE_WORDS[expected]} expected)")
+    if wrong_types:
+        raise InputDataError(
+            f"{program}: {Path(path).absolute()} has required variables of the wrong type: "
+            f"{', '.join(wrong_types)}"
+        )
+
+    renames = {
+        columns_by_key[key][0]: name
+        for name, key in zip(required, keys, strict=True)
+        if columns_by_key[key][0] != name
+    }
+    if not renames:
+        return df
+    return df.rename(columns=renames)
